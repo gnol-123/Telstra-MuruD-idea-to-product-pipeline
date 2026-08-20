@@ -35,9 +35,8 @@ backend/
       health.py      # GET /health
       chat.py        # POST /chat
   requirements.txt   # Pinned dependencies
-  Procfile           # Process definition
+  Dockerfile         # Docker instructions file
   railway.json       # Railway build/deploy config
-  runtime.txt        # Python version pin
   .env               # Local secrets (gitignored)
   .env.example       # Committed template
   .gitignore
@@ -75,12 +74,11 @@ The agent is created lazily behind `@lru_cache` rather than at import time. This
 
 ## Deployment (Railway)
 
-- **Builder:** Nixpacks, configured in `railway.json`.
+- **Builder:** Docker, configured in `railway.json`.
 - **Root directory:** set the Railway service root to `backend`.
 - **Start command:** `uvicorn app.main:app --host 0.0.0.0 --port $PORT` — Railway injects `$PORT`; binding to `0.0.0.0` is required.
 - **Healthcheck path:** `/health`.
 - **Restart policy:** `ON_FAILURE`.
-- **Python version:** pinned to 3.12 in `runtime.txt`.
 
 The `Procfile` declares the same start command and serves as a fallback for buildpack-based platforms; `railway.json` is what Railway actually uses.
 
