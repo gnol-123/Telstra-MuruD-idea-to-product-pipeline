@@ -1,0 +1,120 @@
+name: CI
+
+on:
+  push:
+    branches: ["**"]
+  pull_request:
+    branches: [main]
+
+permissions:
+  contents: read
+
+concurrency:
+  group: ci-${{ github.ref }}
+  cancel-in-progress: true
+
+env:
+  PYTHON_VERSION: "3.12"
+
+jobs:
+  lint:
+    name: Lint (ruff)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: ${{ env.PYTHON_VERSION }}
+          cache: pip
+          cache-dependency-path: backend/requirements-dev.txt
+
+      - name: Install dev dependencies
+        working-directory: backend
+        run: pip install -r requirements-dev.txt
+
+      - name: ruff check
+        working-directory: backend
+        run: ruff check --output-format=github .
+
+      - name: ruff format check
+        working-directory: backend
+        run: ruff format --check .
+
+  test:
+    name: Backend unit tests
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: ${{ env.PYTHON_VERSION }}
+          cache: pip
+          cache-dependency-path: backend/requirements-dev.txt
+
+      - name: Install dev dependencies
+        working-directory: backend
+        run: pip install -r requirements-dev.txt
+
+      - name: Run pytest
+        working-directory: backend
+        env:
+          # Keep tests hermetic: the agent is stubbed, never called for real.
+          ANTHROPIC_API_KEY: ""
+          ENVIRONMENT: test
+        run: pytest -q
+
+  security:
+    name: Security scans
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      security-events: write
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: ${{ env.PYTHON_VERSION }}
+          cache: pip
+          cache-dependency-path: backend/requirements-dev.txt
+
+      - name: Install dev dependencies
+        working-directory: backend
+        run: pip install -r requirements-dev.txt
+
+      - name: Bandit (static analysis)
+        working-directory: backend
+        run: bandit -r app -c pyproject.toml
+
+      # Reports known CVEs in pinned deps. Non-blocking for now: the current
+      # pins have outstanding advisories (starlette, python-dotenv) that need a
+      # deliberate upgrade. Drop continue-on-error once those are bumped.
+      - name: pip-audit (dependency vulnerabilities)
+        continue-on-error: true
+        working-directory: backend
+        run: pip-audit -r requirements.txt --desc
+
+      - name: Gitleaks (secret scanning)
+        uses: gitleaks/gitleaks-action@v2
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Build backend image
+        run: docker build -t murud-backend:${{ github.sha }} backend
+
+      - name: Trivy (image + config scan)
+        uses: aquasecurity/trivy-action@0.28.0
+        with:
+          image-ref: murud-backend:${{ github.sha }}
+          format: sarif
+          output: trivy-results.sarif
+          severity: CRITICAL,HIGH
+          ignore-unfixed: true
+
+      - name: Upload Trivy results
+        uses: github/codeql-action/upload-sarif@v3
+        if: always()
+        with:
+          sarif_file: trivy-results.sarif
