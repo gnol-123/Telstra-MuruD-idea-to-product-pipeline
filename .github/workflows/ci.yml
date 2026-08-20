@@ -73,6 +73,9 @@ jobs:
       security-events: write
     steps:
       - uses: actions/checkout@v4
+        with:
+          # Gitleaks scans commit history, not just the tip.
+          fetch-depth: 0
 
       - uses: actions/setup-python@v5
         with:
@@ -105,7 +108,7 @@ jobs:
         run: docker build -t murud-backend:${{ github.sha }} backend
 
       - name: Trivy (image + config scan)
-        uses: aquasecurity/trivy-action@0.28.0
+        uses: aquasecurity/trivy-action@v0.36.0
         with:
           image-ref: murud-backend:${{ github.sha }}
           format: sarif
