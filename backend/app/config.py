@@ -9,6 +9,8 @@ class Settings(BaseSettings):
     cors_origins: str = "*"
     anthropic_api_key: str = ""
     anthropic_model: str = "claude-opus-5"
+    supabase_url: str = ""
+    supabase_key: str = ""
 
     @property
     def cors_origin_list(self) -> list[str]:
