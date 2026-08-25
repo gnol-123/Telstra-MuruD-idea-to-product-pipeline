@@ -11,6 +11,7 @@ class Settings(BaseSettings):
     anthropic_model: str = "claude-opus-5"
     supabase_url: str = ""
     supabase_key: str = ""
+    dbos_database_url: str = ""
 
     @property
     def cors_origin_list(self) -> list[str]:
