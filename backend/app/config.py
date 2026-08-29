@@ -1,4 +1,4 @@
-""" 
+"""
 App configuration settings.
 Settings are loaded from environment variables, which can be set in a ``.env``
 """
