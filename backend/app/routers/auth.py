@@ -1,4 +1,4 @@
-""" Authentication endpoints backed by Supabase Auth. """
+"""Authentication endpoints backed by Supabase Auth."""
 
 import logging
 from typing import Annotated
@@ -14,6 +14,7 @@ logger = logging.getLogger(__name__)
 router = APIRouter(prefix="/auth", tags=["auth"])
 
 bearer_scheme = HTTPBearer(auto_error=False)
+
 
 # Pydantic models for validation of request and response bodies.
 class SignUpRequest(BaseModel):
@@ -60,7 +61,8 @@ async def get_current_user(
 ) -> UserResponse:
     """Get current user from a bearer token.
 
-    Add ``user: Annotated[UserResponse, Depends(get_current_user)]`` to any route to require authentication.
+    Add ``user: Annotated[UserResponse, Depends(get_current_user)]`` to any
+    route to require authentication.
     """
     if credentials is None:
         raise _credentials_error("Not authenticated")
@@ -85,7 +87,9 @@ def signup(req: SignUpRequest) -> dict[str, str]:
 
     Supabase will send a confirmation email to the user.
 
-    Note for the frontend dev: Supabase does not allow signing in until the email is confirmed, so the user will need to check their email before logging in.
+    Note for the frontend dev: Supabase does not allow signing in until the
+    email is confirmed, so the user will need to check their email before
+    logging in.
     """
     try:
         response = get_client().auth.sign_up({"email": req.email, "password": req.password})
@@ -124,7 +128,7 @@ def refresh(req: RefreshRequest) -> TokenResponse:
     """Refresh an access token using a refresh token."""
     try:
         response = get_client().auth.refresh_session(req.refresh_token)
-    except Exception as exc:  
+    except Exception as exc:
         raise _credentials_error("Invalid or expired refresh token") from exc
 
     if response.session is None or response.user is None:
