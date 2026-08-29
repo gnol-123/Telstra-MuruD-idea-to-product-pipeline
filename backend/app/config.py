@@ -1,3 +1,8 @@
+""" 
+App configuration settings.
+Settings are loaded from environment variables, which can be set in a ``.env``
+"""
+
 from pydantic_settings import BaseSettings, SettingsConfigDict
 
 
@@ -7,8 +12,8 @@ class Settings(BaseSettings):
     app_name: str = "MuruDPipeline API"
     environment: str = "development"
     cors_origins: str = "*"
-    anthropic_api_key: str = ""
-    anthropic_model: str = "claude-opus-5"
+    gemini_api_key: str = ""
+    gemini_model: str = "gemini-3-flash-preview"
     supabase_url: str = ""
     supabase_key: str = ""
 
