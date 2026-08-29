@@ -1,12 +1,15 @@
 """Authentication endpoints backed by Supabase Auth."""
 
 import logging
+from functools import lru_cache
 from typing import Annotated
 
 from fastapi import APIRouter, Depends, HTTPException, status
 from fastapi.security import HTTPAuthorizationCredentials, HTTPBearer
 from pydantic import BaseModel, EmailStr, Field
+from supabase import ClientOptions, create_client
 
+from app.config import settings
 from app.supabase import get_client
 
 logger = logging.getLogger(__name__)
@@ -173,3 +176,66 @@ def password_reset(req: PasswordResetRequest) -> dict[str, str]:
         logger.warning("password reset email failed", exc_info=True)
 
     return {"message": "If that email is registered, a reset link has been sent."}
+
+
+@lru_cache
+def _oauth_client():
+    """Separate client pinned to the implicit flow.
+
+    The shared ``get_client()`` defaults to PKCE, which returns a ``?code=``
+    that must be exchanged using the same ``code_verifier`` that generated it.
+    That verifier lives on the client instance, and ours is a process-wide
+    singleton, so concurrent sign-ins would overwrite each other's verifier.
+
+    The implicit flow sidesteps that: Supabase returns the session directly in
+    the URL fragment, with no server-side state to keep.
+    """
+    return create_client(
+        settings.supabase_url,
+        settings.supabase_key,
+        options=ClientOptions(flow_type="implicit"),
+    )
+
+
+class OAuthUrlResponse(BaseModel):
+    url: str
+    provider: str = "google"
+
+
+@router.get("/login/google", response_model=OAuthUrlResponse)
+def google_login(redirect_to: str | None = None) -> OAuthUrlResponse:
+    """Start Google sign-in.
+
+    Returns the Google consent URL; the frontend sends the browser there. After
+    the user approves, Supabase redirects back to ``redirect_to`` with the
+    session in the URL *fragment* (``#access_token=...``).
+
+    The fragment is deliberate: browsers never send it to the server, so tokens
+    stay in the client. The frontend reads them with ``window.location.hash``
+    and then uses the existing ``/auth/*`` endpoints unchanged.
+    """
+    target = redirect_to or settings.oauth_redirect_url
+    if not target:
+        raise HTTPException(
+            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+            detail="OAUTH_REDIRECT_URL is not configured",
+        )
+
+    try:
+        response = _oauth_client().auth.sign_in_with_oauth(
+            {"provider": "google", "options": {"redirect_to": target}}
+        )
+    except Exception as exc:
+        logger.warning("google sign-in could not start", exc_info=True)
+        raise HTTPException(
+            status_code=status.HTTP_502_BAD_GATEWAY,
+            detail="Could not start Google sign-in",
+        ) from exc
+
+    if not response.url:
+        raise HTTPException(
+            status_code=status.HTTP_502_BAD_GATEWAY,
+            detail="Could not start Google sign-in",
+        )
+
+    return OAuthUrlResponse(url=response.url, provider="google")

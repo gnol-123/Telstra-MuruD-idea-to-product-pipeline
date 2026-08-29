@@ -16,6 +16,9 @@ class Settings(BaseSettings):
     gemini_model: str = "gemini-3-flash-preview"
     supabase_url: str = ""
     supabase_key: str = ""
+    # Where Supabase sends the browser back after Google sign-in.
+    # Add frontend url to allowedlist on supabase to use Google sign-in.
+    oauth_redirect_url: str = ""
 
     @property
     def cors_origin_list(self) -> list[str]:
