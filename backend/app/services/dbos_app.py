@@ -8,10 +8,14 @@ progress in Postgres (our Supabase database), under its own ``dbos`` schema.
 ``app.workflows``.
 """
 
+import logging
+
 from dbos import DBOS, DBOSConfig
 from fastapi import FastAPI
 
 from app.config import settings
+
+logger = logging.getLogger(__name__)
 
 
 def setup_dbos(app: FastAPI) -> DBOS | None:
@@ -26,7 +30,15 @@ def setup_dbos(app: FastAPI) -> DBOS | None:
     config: DBOSConfig = {
         "name": "murud-pipeline",
         "database_url": settings.dbos_database_url,
+        "system_database_url": settings.dbos_database_url,
+        "db_engine_kwargs": {"connect_args": {"prepare_threshold": None}},
     }
-    dbos = DBOS(config=config, fastapi=app)
-    DBOS.launch()
+
+    try:
+        dbos = DBOS(config=config, fastapi=app)
+        DBOS.launch()
+    except Exception:
+        logger.exception("DBOS failed to start; continuing without durable workflows")
+        return None
+
     return dbos
