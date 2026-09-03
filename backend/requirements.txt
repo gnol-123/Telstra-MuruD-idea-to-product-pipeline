@@ -5,3 +5,4 @@ email-validator==2.2.0
 python-dotenv==1.0.1
 pydantic-ai-slim[google]==2.32.1
 supabase==2.31.0
+dbos==2.30.0

@@ -10,7 +10,7 @@ from pydantic import BaseModel, EmailStr, Field
 from supabase import ClientOptions, create_client
 
 from app.config import settings
-from app.supabase import get_client
+from app.services.supabase import get_client
 
 logger = logging.getLogger(__name__)
 

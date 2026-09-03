@@ -2,9 +2,8 @@ from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
 
 from app.config import settings
-from app.routers import chat, health
-from app.services.dbos_app import setup_dbos
 from app.routers import auth, chat, health
+from app.services.dbos_app import setup_dbos
 
 app = FastAPI(title=settings.app_name)
 
