@@ -52,7 +52,7 @@ async def call_agent(system_prompt: str, model: str, prompt: str, history: list)
     """Run one agent trun, doesn't save to DB"""
     agent = get_agent_for(system_prompt, model)
     result = await agent.run(prompt, message_history=to_model_messages(history))
-    usage = result.usage()
+    usage = result.usage
     return AgentTurn(
         output=result.output,
         model=model,

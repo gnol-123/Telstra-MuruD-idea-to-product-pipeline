@@ -6,7 +6,12 @@ from anyio import to_thread
 from fastapi import APIRouter, HTTPException, status
 from pydantic import BaseModel, Field
 
-from app.repositories.chat_repo import AgentNode, AgentType, Project
+from app.repositories.chat_repo import (
+    AgentNode,
+    AgentType,
+    DuplicateProjectName,
+    Project,
+)
 from app.routers.deps import ChatRepo
 
 router = APIRouter(tags=["projects"])
@@ -72,7 +77,13 @@ async def list_agent_types(repo: ChatRepo) -> list[AgentTypeResponse]:
 
 @router.post("/projects", response_model=ProjectResponse, status_code=status.HTTP_201_CREATED)
 async def create_project(req: CreateProjectRequest, repo: ChatRepo) -> ProjectResponse:
-    project = await to_thread.run_sync(lambda: repo.create_project(req.name, req.description))
+    try:
+        project = await to_thread.run_sync(lambda: repo.create_project(req.name, req.description))
+    except DuplicateProjectName as exc:
+        raise HTTPException(
+            status_code=status.HTTP_409_CONFLICT,
+            detail=f"You already have a project named '{req.name}'",
+        ) from exc
     return ProjectResponse.of(project)
 
 

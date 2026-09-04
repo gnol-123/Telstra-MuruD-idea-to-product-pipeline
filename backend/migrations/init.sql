@@ -101,6 +101,12 @@ create table if not exists public.projects (
 create index if not exists projects_owner_id_created_at_idx
   on public.projects (owner_id, created_at desc);
 
+-- One project name per user. Two users may both have an "ab"; one user may not
+-- have two. Partial, so archiving a project frees its name for reuse.
+create unique index if not exists projects_owner_id_name_uniq
+  on public.projects (owner_id, name)
+  where archived_at is null;
+
 drop trigger if exists projects_set_updated_at on public.projects;
 create trigger projects_set_updated_at
   before update on public.projects

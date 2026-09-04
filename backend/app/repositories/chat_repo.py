@@ -20,6 +20,10 @@ _UNIQUE_VIOLATION = "23505"
 DEFAULT_HISTORY_LIMIT = 50
 
 
+class DuplicateProjectName(Exception):
+    """A user already has a project with this name."""
+
+
 @dataclass(frozen=True)
 class AgentType:
     """A row from the agent_types catalog."""
@@ -122,11 +126,17 @@ class ChatRepository:
     # -- projects -----------------------------------------------------------
 
     def create_project(self, name: str, description: str | None = None) -> Project:
-        rows = (
-            self._db.table("projects")
-            .insert({"owner_id": self._user_id, "name": name, "description": description})
-            .execute()
-        ).data
+        """Create a project. Names are unique per user."""
+        try:
+            rows = (
+                self._db.table("projects")
+                .insert({"owner_id": self._user_id, "name": name, "description": description})
+                .execute()
+            ).data
+        except APIError as exc:
+            if exc.code == _UNIQUE_VIOLATION:
+                raise DuplicateProjectName(name) from exc
+            raise
         return Project(id=rows[0]["id"], name=rows[0]["name"])
 
     def list_projects(self) -> list[Project]:
