@@ -57,7 +57,7 @@ class ChatResponse(BaseModel):
 @router.post("", response_model=ChatResponse)
 async def chat(req: ChatRequest, repo: ChatRepo) -> ChatResponse:
     node = await to_thread.run_sync(repo.get_agent_node, str(req.node_id))
-    
+
     if node is None:
         raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Agent not found")
 

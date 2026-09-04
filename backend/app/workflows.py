@@ -82,8 +82,9 @@ async def run_turn(
     """Persist the user turn, call the agent, persist the reply.
 
     Shared by both paths in ``routers.chat`` so that running without DBOS
-    behaves identically to running with it ``durable`` only decides whether the LLM call is checkpointed, 
-    so a crash mid-call resumes from the checkpoint instead of paying for the model twice.
+    behaves identically to running with it. ``durable`` only decides whether
+    the LLM call is checkpointed, so a crash mid-call resumes from the
+    checkpoint instead of paying for the model twice.
     """
     from anyio import to_thread
 

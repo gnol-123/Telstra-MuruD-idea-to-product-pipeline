@@ -115,7 +115,7 @@ async def create_agent_node(
     )
 
     node = await to_thread.run_sync(repo.get_agent_node, node_id)
-    if node is None: 
+    if node is None:
         raise HTTPException(
             status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
             detail="Node could not be read back after creation",
