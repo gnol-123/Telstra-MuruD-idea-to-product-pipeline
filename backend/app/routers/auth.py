@@ -87,7 +87,7 @@ CurrentUser = Annotated[UserResponse, Depends(get_current_user)]
 class AuthContext(BaseModel):
     """An authenticated user plus the raw bearer token.
 
-    Routes that need to query Postgres *as the user* uses AuthContext 
+    Routes that need to query Postgres *as the user* uses AuthContext
     to build a Supabase client with the user's JWT. This is necessary to enforce
     RLS policies in the database.
 
