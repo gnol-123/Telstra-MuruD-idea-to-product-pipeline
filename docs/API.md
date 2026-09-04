@@ -160,6 +160,7 @@ returns `404` rather than `403`, since `403` would confirm it exists.
 | Method | Path | Auth | Description |
 |---|---|---|---|
 | `POST` | `/chat` | **yes** | Send a message to an agent node |
+| `POST` | `/chat/stream` | **yes** | The same, streamed as server-sent events |
 
 ### `POST /chat`
 ```json
@@ -201,6 +202,29 @@ Notes:
 - `404` if the node is not yours or does not exist, again in preference to
   `403`.
 - `422` for a missing or empty prompt.
+
+### `POST /chat/stream`
+
+Same request body as `/chat`. Returns `text/event-stream`:
+
+```
+event: start   data: {"conversation_id": "...", "user_message": {...}}
+event: chunk   data: {"text": "The sea is"}
+event: chunk   data: {"text": " a vast..."}
+event: done    data: {"assistant_message": {...}}
+```
+
+`start` arrives before the model is called, so the client has the conversation
+id and the persisted user message immediately.
+
+If the model fails part-way an `event: error` is emitted and the assistant
+message is still written with `status: "failed"`. The HTTP status stays `200`,
+because headers are sent before the model is called.
+
+The turn is persisted exactly as `/chat` persists it, so idempotency, `seq`
+ordering and history replay are unchanged. Unlike `/chat` it is **not**
+DBOS-checkpointed: a step checkpoints a return value and a stream has none. The
+assembled text is written once the stream drains.
 
 ---
 

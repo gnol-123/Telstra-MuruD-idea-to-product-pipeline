@@ -310,6 +310,7 @@ class ChatRepository:
         model: str | None = None,
         input_tokens: int | None = None,
         output_tokens: int | None = None,
+        reasoning_tokens: int | None = None,
         status: str = "complete",
         error: str | None = None,
     ) -> Message:
@@ -331,6 +332,7 @@ class ChatRepository:
             ("model", model),
             ("input_tokens", input_tokens),
             ("output_tokens", output_tokens),
+            ("reasoning_tokens", reasoning_tokens),
             ("error", error),
         ):
             if value is not None:

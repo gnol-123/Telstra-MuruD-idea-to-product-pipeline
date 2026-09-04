@@ -435,7 +435,11 @@ create table if not exists public.messages (
   -- Which model actually answered, and what it cost. Models change.
   model           text,
   input_tokens    integer,
+  -- output_tokens INCLUDES reasoning. Gemini 3 spends most of its output budget
+  -- thinking: a 120-word reply can report ~2000 output tokens, 1900 of them
+  -- reasoning. Store both so cost can be attributed honestly.
   output_tokens   integer,
+  reasoning_tokens integer,
   -- 'failed' once the agent gives up retrying.
   -- 'awaiting_approval' is a turn suspended on a tool call.
   status          text not null default 'complete',
@@ -459,8 +463,14 @@ create table if not exists public.messages (
   constraint messages_error_iff_failed
     check ((status = 'failed') or (error is null)),
   constraint messages_tokens_nonneg
-    check (coalesce(input_tokens, 0) >= 0 and coalesce(output_tokens, 0) >= 0)
+    check (coalesce(input_tokens, 0) >= 0 and coalesce(output_tokens, 0) >= 0
+           and coalesce(reasoning_tokens, 0) >= 0)
 );
+
+-- Columns added after the table first shipped. `create table if not exists`
+-- above is a no-op on an existing database, so add them explicitly.
+alter table public.messages add column if not exists reasoning_tokens integer;
+
 
 -- Replaying a conversation. Unique, so a bypassed trigger errors instead
 -- of quietly corrupting the order.

@@ -15,6 +15,7 @@ interrupted, it can resume from the last successful step.
    written to Postgres, and a JWT is a live credential.
 """
 
+from collections.abc import AsyncIterator
 from dataclasses import dataclass
 
 from dbos import DBOS
@@ -30,7 +31,9 @@ class AgentTurn:
     output: str
     model: str
     input_tokens: int | None = None
+    # Includes reasoning
     output_tokens: int | None = None
+    reasoning_tokens: int | None = None
     error: str | None = None
 
     @property
@@ -52,12 +55,16 @@ async def call_agent(system_prompt: str, model: str, prompt: str, history: list)
     """Run one agent trun, doesn't save to DB"""
     agent = get_agent_for(system_prompt, model)
     result = await agent.run(prompt, message_history=to_model_messages(history))
-    usage = result.usage
+    return _turn_from(result.output, model, result.usage)
+
+
+def _turn_from(output: str, model: str, usage: object) -> AgentTurn:
     return AgentTurn(
-        output=result.output,
+        output=output,
         model=model,
         input_tokens=getattr(usage, "input_tokens", None),
         output_tokens=getattr(usage, "output_tokens", None),
+        reasoning_tokens=getattr(usage, "output_reasoning_tokens", None),
     )
 
 
@@ -113,6 +120,7 @@ async def run_turn(
             model=turn.model,
             input_tokens=turn.input_tokens,
             output_tokens=turn.output_tokens,
+            reasoning_tokens=turn.reasoning_tokens,
             status="failed" if turn.failed else "complete",
             error=turn.error,
         )
@@ -124,3 +132,78 @@ async def run_turn(
         assistant_message=assistant_message,
         output=turn.output,
     )
+
+
+async def stream_turn(
+    repo: ChatRepository,
+    conversation_id: str,
+    system_prompt: str,
+    model: str,
+    prompt: str,
+    *,
+    client_token: str | None = None,
+) -> AsyncIterator[tuple[str, dict]]:
+    """Stream one turn, yielding ``(event, payload)`` pairs.
+
+    Same order of writes as ``run_turn`` -- user row first, assistant row last --
+    so idempotency and seq ordering behave identically. The stream itself is not
+    checkpointed: DBOS records a step's return value, and a generator has none.
+    The assembled text is what gets persisted once the stream drains.
+
+    Events: ``start``, ``chunk``, ``done``, ``error``.
+    """
+    from anyio import to_thread
+
+    history = await to_thread.run_sync(repo.list_messages, conversation_id)
+    user_message = await to_thread.run_sync(
+        lambda: repo.add_message(conversation_id, "user", prompt, client_token=client_token)
+    )
+    yield (
+        "start",
+        {
+            "conversation_id": conversation_id,
+            "user_message": _message_payload(user_message),
+        },
+    )
+
+    chunks: list[str] = []
+    turn: AgentTurn
+    try:
+        agent = get_agent_for(system_prompt, model)
+        async with agent.run_stream(prompt, message_history=to_model_messages(history)) as result:
+            async for text in result.stream_text(delta=True):
+                chunks.append(text)
+                yield "chunk", {"text": text}
+            # Only valid once the stream has drained.
+            turn = _turn_from("".join(chunks), model, result.usage)
+    except Exception as exc:
+        # Headers are already sent, so this cannot become a 4xx. Report it as an
+        # event and still record the failure on the transcript.
+        turn = AgentTurn(output="".join(chunks), model=model, error=str(exc))
+        yield "error", {"error": str(exc)}
+
+    assistant_message = await to_thread.run_sync(
+        lambda: repo.add_message(
+            conversation_id,
+            "assistant",
+            turn.output,
+            model=turn.model,
+            input_tokens=turn.input_tokens,
+            output_tokens=turn.output_tokens,
+            reasoning_tokens=turn.reasoning_tokens,
+            status="failed" if turn.failed else "complete",
+            error=turn.error,
+        )
+    )
+    yield "done", {"assistant_message": _message_payload(assistant_message)}
+
+
+def _message_payload(m: Message) -> dict:
+    return {
+        "id": m.id,
+        "role": m.role,
+        "content": m.content,
+        "seq": m.seq,
+        "status": m.status,
+        "created_at": m.created_at,
+    }
