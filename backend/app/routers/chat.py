@@ -20,7 +20,6 @@ router = APIRouter(prefix="/chat", tags=["chat"])
 
 
 class ChatRequest(BaseModel):
-    # The agent box being talked to. It implies its project and template.
     node_id: UUID
     prompt: str = Field(min_length=1, max_length=32_000)
     # Optional idempotency key: a resend with the same token will not duplicate.
@@ -57,9 +56,8 @@ class ChatResponse(BaseModel):
 
 @router.post("", response_model=ChatResponse)
 async def chat(req: ChatRequest, repo: ChatRepo) -> ChatResponse:
-    # 404 rather than 403 for a node owned by someone else: a 403 would
-    # confirm that the node exists.
     node = await to_thread.run_sync(repo.get_agent_node, str(req.node_id))
+    
     if node is None:
         raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Agent not found")
 
