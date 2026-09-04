@@ -93,7 +93,6 @@ async def create_agent_node(
     repo: ChatRepo,
 ) -> AgentNodeResponse:
     """Provision an agent box on a project's canvas."""
-    # 404 rather than 403 for someone else's project: a 403 would confirm it exists.
     project = await to_thread.run_sync(repo.get_project, str(project_id))
     if project is None:
         raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Project not found")
@@ -116,7 +115,7 @@ async def create_agent_node(
     )
 
     node = await to_thread.run_sync(repo.get_agent_node, node_id)
-    if node is None:  # pragma: no cover - would mean the row vanished
+    if node is None: 
         raise HTTPException(
             status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
             detail="Node could not be read back after creation",
