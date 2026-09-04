@@ -161,6 +161,21 @@ class ChatRepository:
         ).data
         return Project(id=rows[0]["id"], name=rows[0]["name"]) if rows else None
 
+    def delete_project(self, project_id: str) -> bool:
+        """Delete a project and everything on its canvas.
+
+        One statement: `on delete cascade` takes the nodes, edges,
+        conversations and messages with it.
+        """
+        rows = (
+            self._db.table("projects")
+            .delete()
+            .eq("id", project_id)
+            .eq("owner_id", self._user_id)
+            .execute()
+        ).data
+        return bool(rows)
+
     # -- nodes --------------------------------------------------------------
 
     def create_agent_node(
@@ -201,8 +216,8 @@ class ChatRepository:
 
     def update_agent_node(self, node_id: str, changes: dict[str, Any]) -> AgentNode | None:
         """Apply a partial update to an agent node.
-            Only allowed fields are modifiable;
-            {"name", "position_x", "position_y", "tool_policy"}
+        Only allowed fields are modifiable;
+        {"name", "position_x", "position_y", "tool_policy"}
         """
         allowed = {"name", "position_x", "position_y", "tool_policy"}
         payload = {k: v for k, v in changes.items() if k in allowed and v is not None}

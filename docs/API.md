@@ -101,6 +101,7 @@ conversation.
 | `GET` | `/agent-types` | **yes** | The palette of agent templates |
 | `POST` | `/projects` | **yes** | Create a project |
 | `GET` | `/projects` | **yes** | List your projects |
+| `DELETE` | `/projects/{project_id}` | **yes** | Delete a project and its canvas |
 | `POST` | `/projects/{project_id}/nodes` | **yes** | Provision an agent node |
 | `GET` | `/projects/{project_id}/nodes` | **yes** | List a project's agent nodes |
 | `PATCH` | `/projects/{project_id}/nodes/{node_id}` | **yes** | Move, rename, or set tool policy |
@@ -122,6 +123,11 @@ insert, not a deploy — see `backend/migrations/README.md`.
 
 ### `GET /projects`
 → `200`, a list of the above. Archived projects are excluded.
+
+### `DELETE /projects/{project_id}`
+→ `204`. **Irreversible, and takes the whole canvas**: every node, edge,
+conversation and message in the project is deleted with it. `404` if the
+project is not yours or is already gone.
 
 ### `POST /projects/{project_id}/nodes`
 ```json

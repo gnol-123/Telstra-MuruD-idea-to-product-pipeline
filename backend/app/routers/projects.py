@@ -53,7 +53,7 @@ class CreateAgentNodeRequest(BaseModel):
 
 class UpdateAgentNodeRequest(BaseModel):
     """A partial update. Only the fields sent are changed. no-op if the body is empty.
-        Does not allow changing of node_type and owner_id.
+    Does not allow changing of node_type and owner_id.
     """
 
     name: str | None = Field(default=None, min_length=1, max_length=200)
@@ -182,3 +182,15 @@ async def delete_agent_node(project_id: UUID, node_id: UUID, repo: ChatRepo) -> 
     deleted = await to_thread.run_sync(repo.delete_agent_node, str(node_id))
     if not deleted:
         raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Agent not found")
+
+
+@router.delete("/projects/{project_id}", status_code=status.HTTP_204_NO_CONTENT)
+async def delete_project(project_id: UUID, repo: ChatRepo) -> None:
+    """Delete a project and its whole canvas.
+
+    Irreversible: every node, edge, conversation and message in the project
+    goes with it.
+    """
+    deleted = await to_thread.run_sync(repo.delete_project, str(project_id))
+    if not deleted:
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Project not found")
