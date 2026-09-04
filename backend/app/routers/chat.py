@@ -1,28 +1,87 @@
-from fastapi import APIRouter
-from pydantic import BaseModel
+"""Chat endpoint.
+
+A turn is addressed to one agent node. The node owns a single conversation,
+whose transcript is persisted and replayed into the model on the next turn.
+"""
+
+from datetime import datetime
+from uuid import UUID
+
+from anyio import to_thread
+from fastapi import APIRouter, HTTPException, status
+from pydantic import BaseModel, Field
 
 from app.config import settings
-from app.services.agent import get_agent
+from app.repositories.chat_repo import Message
+from app.routers.deps import ChatRepo
+from app.workflows import run_turn
 
 router = APIRouter(prefix="/chat", tags=["chat"])
 
 
 class ChatRequest(BaseModel):
-    prompt: str
+    # The agent box being talked to. It implies its project and template.
+    node_id: UUID
+    prompt: str = Field(min_length=1, max_length=32_000)
+    # Optional idempotency key: a resend with the same token will not duplicate.
+    client_token: str | None = Field(default=None, max_length=100)
+
+
+class ChatMessage(BaseModel):
+    id: UUID
+    role: str
+    content: str
+    seq: int
+    status: str
+    created_at: datetime
+
+    @classmethod
+    def of(cls, m: Message) -> "ChatMessage":
+        return cls(
+            id=UUID(m.id),
+            role=m.role,
+            content=m.content,
+            seq=m.seq,
+            status=m.status,
+            created_at=m.created_at,
+        )
 
 
 class ChatResponse(BaseModel):
+    node_id: UUID
+    conversation_id: UUID
     output: str
+    user_message: ChatMessage
+    assistant_message: ChatMessage
 
 
 @router.post("", response_model=ChatResponse)
-async def chat(req: ChatRequest) -> ChatResponse:
-    # With DBOS configured the turn runs as a durable workflow; without it we
-    # call the agent directly so the API still works with no database.
-    if settings.dbos_database_url:
-        from app.workflows import chat_workflow
+async def chat(req: ChatRequest, repo: ChatRepo) -> ChatResponse:
+    # 404 rather than 403 for a node owned by someone else: a 403 would
+    # confirm that the node exists.
+    node = await to_thread.run_sync(repo.get_agent_node, str(req.node_id))
+    if node is None:
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Agent not found")
 
-        return ChatResponse(output=await chat_workflow(req.prompt))
+    conversation_id = await to_thread.run_sync(
+        lambda: repo.get_or_create_conversation(node.id, node.project_id)
+    )
 
-    result = await get_agent().run(req.prompt)
-    return ChatResponse(output=result.output)
+    turn = await run_turn(
+        repo,
+        conversation_id,
+        node.system_prompt,
+        node.model,
+        req.prompt,
+        client_token=req.client_token,
+        # Only the LLM call becomes durable; persistence is identical either way.
+        durable=bool(settings.dbos_database_url),
+    )
+
+    return ChatResponse(
+        node_id=UUID(node.id),
+        conversation_id=UUID(turn.conversation_id),
+        output=turn.output,
+        user_message=ChatMessage.of(turn.user_message),
+        assistant_message=ChatMessage.of(turn.assistant_message),
+    )
