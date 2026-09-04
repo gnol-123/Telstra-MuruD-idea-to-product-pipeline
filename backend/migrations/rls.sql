@@ -1,29 +1,35 @@
 -- rls.sql
--- RLS security configuration
+-- Row Level Security. Apply after init.sql.
 --
--- Backend filters by owner explicitly on every query; RLS is simply a precaution
+-- The backend filters by owner as well; these policies are the backstop.
+--
+-- Use `(select auth.uid())`, not bare `auth.uid()` -- the subquery is
+-- evaluated once per query instead of once per row.
 
 begin;
 
 alter table public.agent_types   enable row level security;
+alter table public.tool_types    enable row level security;
 alter table public.projects      enable row level security;
+alter table public.nodes         enable row level security;
+alter table public.node_secrets  enable row level security;
+alter table public.edges         enable row level security;
 alter table public.conversations enable row level security;
 alter table public.messages      enable row level security;
 
--- Force RLS for table owners too, so a mistakenly owner-privileged connection
--- does not silently bypass every policy below. Note this does NOT constrain
--- service_role, which is BYPASSRLS: anything using the service key ignores all
--- of this and must rely on the backend's explicit owner filtering.
+-- Force RLS for table owners too. Does not cover service_role, which is
+-- BYPASSRLS -- anything using the service key relies on backend filtering.
 alter table public.projects      force row level security;
+alter table public.nodes         force row level security;
+alter table public.node_secrets  force row level security;
+alter table public.edges         force row level security;
 alter table public.conversations force row level security;
 alter table public.messages      force row level security;
 
 
 -- ---------------------------------------------------------------------------
--- agent_types: a public, read-only catalog.
---
--- No INSERT/UPDATE/DELETE policies. 
--- Agent_type seed in the SQL editor as postgres/service_role, which bypasses RLS.
+-- Catalogs: public, read-only.
+-- No write policies, so writes are refused. Seeding runs as postgres.
 -- ---------------------------------------------------------------------------
 drop policy if exists agent_types_select on public.agent_types;
 create policy agent_types_select
@@ -32,10 +38,16 @@ create policy agent_types_select
   to authenticated
   using (is_active);
 
+drop policy if exists tool_types_select on public.tool_types;
+create policy tool_types_select
+  on public.tool_types
+  for select
+  to authenticated
+  using (is_active);
+
 
 -- ---------------------------------------------------------------------------
 -- projects
--- Index support: projects_owner_id_created_at_idx serves the predicate directly.
 -- ---------------------------------------------------------------------------
 drop policy if exists projects_select on public.projects;
 create policy projects_select
@@ -57,7 +69,6 @@ create policy projects_update
   for update
   to authenticated
   using (owner_id = (select auth.uid()))
-  -- The WITH CHECK blocks re-assigning a project to another user.
   with check (owner_id = (select auth.uid()));
 
 drop policy if exists projects_delete on public.projects;
@@ -69,13 +80,131 @@ create policy projects_delete
 
 
 -- ---------------------------------------------------------------------------
+-- nodes: the boxes.
+-- INSERT checks the parent project, since owner_id is trigger-assigned and
+-- not yet trustworthy at check time.
+-- ---------------------------------------------------------------------------
+drop policy if exists nodes_select on public.nodes;
+create policy nodes_select
+  on public.nodes
+  for select
+  to authenticated
+  using (owner_id = (select auth.uid()));
+
+drop policy if exists nodes_insert on public.nodes;
+create policy nodes_insert
+  on public.nodes
+  for insert
+  to authenticated
+  with check (
+    exists (
+      select 1
+      from public.projects p
+      where p.id = nodes.project_id
+        and p.owner_id = (select auth.uid())
+    )
+  );
+
+drop policy if exists nodes_update on public.nodes;
+create policy nodes_update
+  on public.nodes
+  for update
+  to authenticated
+  using (owner_id = (select auth.uid()))
+  with check (owner_id = (select auth.uid()));
+
+drop policy if exists nodes_delete on public.nodes;
+create policy nodes_delete
+  on public.nodes
+  for delete
+  to authenticated
+  using (owner_id = (select auth.uid()));
+
+
+-- ---------------------------------------------------------------------------
+-- node_secrets: tool credentials.
+-- ---------------------------------------------------------------------------
+drop policy if exists node_secrets_select on public.node_secrets;
+create policy node_secrets_select
+  on public.node_secrets
+  for select
+  to authenticated
+  using (owner_id = (select auth.uid()));
+
+drop policy if exists node_secrets_insert on public.node_secrets;
+create policy node_secrets_insert
+  on public.node_secrets
+  for insert
+  to authenticated
+  with check (
+    exists (
+      select 1
+      from public.nodes n
+      where n.id = node_secrets.node_id
+        and n.owner_id = (select auth.uid())
+    )
+  );
+
+drop policy if exists node_secrets_update on public.node_secrets;
+create policy node_secrets_update
+  on public.node_secrets
+  for update
+  to authenticated
+  using (owner_id = (select auth.uid()))
+  with check (owner_id = (select auth.uid()));
+
+drop policy if exists node_secrets_delete on public.node_secrets;
+create policy node_secrets_delete
+  on public.node_secrets
+  for delete
+  to authenticated
+  using (owner_id = (select auth.uid()));
+
+
+-- ---------------------------------------------------------------------------
+-- edges: the arrows.
+-- INSERT checks the source node; a trigger in init.sql also refuses edges
+-- spanning two projects. UPDATE is for refreshing a stale summary.
+-- ---------------------------------------------------------------------------
+drop policy if exists edges_select on public.edges;
+create policy edges_select
+  on public.edges
+  for select
+  to authenticated
+  using (owner_id = (select auth.uid()));
+
+drop policy if exists edges_insert on public.edges;
+create policy edges_insert
+  on public.edges
+  for insert
+  to authenticated
+  with check (
+    exists (
+      select 1
+      from public.nodes n
+      where n.id = edges.source_node_id
+        and n.owner_id = (select auth.uid())
+    )
+  );
+
+drop policy if exists edges_update on public.edges;
+create policy edges_update
+  on public.edges
+  for update
+  to authenticated
+  using (owner_id = (select auth.uid()))
+  with check (owner_id = (select auth.uid()));
+
+drop policy if exists edges_delete on public.edges;
+create policy edges_delete
+  on public.edges
+  for delete
+  to authenticated
+  using (owner_id = (select auth.uid()));
+
+
+-- ---------------------------------------------------------------------------
 -- conversations
--- Index support: conversations_owner_id_idx.
---
--- INSERT checks the parent PROJECT rather than the supplied owner_id, because
--- owner_id is trigger-assigned and so not yet trustworthy at check time. That
--- EXISTS hits projects' primary key once per inserted row (one row per
--- request), so it is a single index probe, not an N+1.
 -- ---------------------------------------------------------------------------
 drop policy if exists conversations_select on public.conversations;
 create policy conversations_select
@@ -92,9 +221,9 @@ create policy conversations_insert
   with check (
     exists (
       select 1
-      from public.projects p
-      where p.id = conversations.project_id
-        and p.owner_id = (select auth.uid())
+      from public.nodes n
+      where n.id = conversations.node_id
+        and n.owner_id = (select auth.uid())
     )
   );
 
@@ -115,14 +244,9 @@ create policy conversations_delete
 
 
 -- ---------------------------------------------------------------------------
--- messages -- the hot table.
---
--- SELECT/DELETE use the denormalised owner_id: a bare indexed equality against
--- a column already on the row. Combined with messages_conversation_id_seq_idx,
--- replaying a conversation is one ordered index scan plus a cheap filter.
---
--- INSERT alone pays one EXISTS against conversations' primary key, for the same
--- reason as conversations above.
+-- messages.
+-- UPDATE is only so a turn suspended on tool approval can be completed in
+-- place. The transcript is otherwise append-only.
 -- ---------------------------------------------------------------------------
 drop policy if exists messages_select on public.messages;
 create policy messages_select
@@ -145,9 +269,13 @@ create policy messages_insert
     )
   );
 
--- Messages are an append-only transcript, so there is deliberately no UPDATE
--- policy. The one legitimate mutation -- marking an assistant turn failed -- is
--- done by the backend at INSERT time, not by editing history.
+drop policy if exists messages_update on public.messages;
+create policy messages_update
+  on public.messages
+  for update
+  to authenticated
+  using (owner_id = (select auth.uid()))
+  with check (owner_id = (select auth.uid()));
 
 drop policy if exists messages_delete on public.messages;
 create policy messages_delete
