@@ -103,6 +103,8 @@ conversation.
 | `GET` | `/projects` | **yes** | List your projects |
 | `POST` | `/projects/{project_id}/nodes` | **yes** | Provision an agent node |
 | `GET` | `/projects/{project_id}/nodes` | **yes** | List a project's agent nodes |
+| `PATCH` | `/projects/{project_id}/nodes/{node_id}` | **yes** | Move, rename, or set tool policy |
+| `DELETE` | `/projects/{project_id}/nodes/{node_id}` | **yes** | Remove a node |
 
 ### `GET /agent-types`
 → `200`
@@ -152,6 +154,33 @@ returns `404` rather than `403`, since `403` would confirm it exists.
 
 ### `GET /projects/{project_id}/nodes`
 → `200`, a list of the above. `404` if the project is not yours.
+
+### `PATCH /projects/{project_id}/nodes/{node_id}`
+
+Every field optional; only what you send changes.
+
+```json
+{ "position_x": 340, "position_y": 180 }   // dropped after a drag
+{ "name": "Market Research (EU)" }          // rename
+{ "tool_policy": "auto" }                   // ask | auto
+```
+
+→ `200` with the updated node. An empty body is a no-op, not an error, so a
+drag that ends where it started is harmless.
+
+**The conversation is untouched.** Moving a box does not affect its transcript.
+Send this on drop rather than during the drag: one request per gesture.
+
+`agent_type_id`, `project_id` and `owner_id` are **not** updatable. Swapping a
+node's template mid-conversation would leave a transcript that no longer
+matches the prompt that produced it.
+
+`404` if the node is not yours. `422` for an invalid `tool_policy` or an empty
+name.
+
+### `DELETE /projects/{project_id}/nodes/{node_id}`
+→ `204`. **Cascades**: the node's conversation and its whole transcript go
+with it. `404` if the node is not yours or is already gone.
 
 ---
 

@@ -199,6 +199,39 @@ class ChatRepository:
         self._create_conversation(node_id, project_id)
         return node_id
 
+    def update_agent_node(self, node_id: str, changes: dict[str, Any]) -> AgentNode | None:
+        """Apply a partial update to an agent node.
+            Only allowed fields are modifiable;
+            {"name", "position_x", "position_y", "tool_policy"}
+        """
+        allowed = {"name", "position_x", "position_y", "tool_policy"}
+        payload = {k: v for k, v in changes.items() if k in allowed and v is not None}
+        if not payload:
+            # A drag that ends where it started is a no-op, not an error.
+            return self.get_agent_node(node_id)
+
+        rows = (
+            self._db.table("nodes")
+            .update(payload)
+            .eq("id", node_id)
+            .eq("owner_id", self._user_id)
+            .eq("kind", "agent")
+            .execute()
+        ).data
+        return self.get_agent_node(node_id) if rows else None
+
+    def delete_agent_node(self, node_id: str) -> bool:
+        """Remove a node. Cascades to its conversation and transcript."""
+        rows = (
+            self._db.table("nodes")
+            .delete()
+            .eq("id", node_id)
+            .eq("owner_id", self._user_id)
+            .eq("kind", "agent")
+            .execute()
+        ).data
+        return bool(rows)
+
     def list_agent_nodes(self, project_id: str) -> list[AgentNode]:
         rows = (
             self._db.table("nodes")

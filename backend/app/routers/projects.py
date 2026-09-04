@@ -1,5 +1,6 @@
 """Projects and the agent nodes provisioned inside them."""
 
+from typing import Literal
 from uuid import UUID
 
 from anyio import to_thread
@@ -48,6 +49,17 @@ class CreateAgentNodeRequest(BaseModel):
     name: str | None = Field(default=None, min_length=1, max_length=200)
     position_x: float = 0
     position_y: float = 0
+
+
+class UpdateAgentNodeRequest(BaseModel):
+    """A partial update. Only the fields sent are changed. no-op if the body is empty.
+        Does not allow changing of node_type and owner_id.
+    """
+
+    name: str | None = Field(default=None, min_length=1, max_length=200)
+    position_x: float | None = None
+    position_y: float | None = None
+    tool_policy: Literal["ask", "auto"] | None = None
 
 
 class AgentNodeResponse(BaseModel):
@@ -142,3 +154,31 @@ async def list_agent_nodes(project_id: UUID, repo: ChatRepo) -> list[AgentNodeRe
 
     nodes = await to_thread.run_sync(repo.list_agent_nodes, str(project_id))
     return [AgentNodeResponse.of(n) for n in nodes]
+
+
+@router.patch("/projects/{project_id}/nodes/{node_id}", response_model=AgentNodeResponse)
+async def update_agent_node(
+    project_id: UUID,
+    node_id: UUID,
+    req: UpdateAgentNodeRequest,
+    repo: ChatRepo,
+) -> AgentNodeResponse:
+    """Update a node. Used for dragging a box, renaming it, or toggling its
+    tool policy. An empty body is a no-op rather than an error."""
+    node = await to_thread.run_sync(
+        lambda: repo.update_agent_node(str(node_id), req.model_dump(exclude_none=True))
+    )
+    if node is None:
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Agent not found")
+    return AgentNodeResponse.of(node)
+
+
+@router.delete(
+    "/projects/{project_id}/nodes/{node_id}",
+    status_code=status.HTTP_204_NO_CONTENT,
+)
+async def delete_agent_node(project_id: UUID, node_id: UUID, repo: ChatRepo) -> None:
+    """Remove a node, along with its conversation and transcript."""
+    deleted = await to_thread.run_sync(repo.delete_agent_node, str(node_id))
+    if not deleted:
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Agent not found")
