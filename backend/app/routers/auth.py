@@ -84,15 +84,45 @@ async def get_current_user(
 CurrentUser = Annotated[UserResponse, Depends(get_current_user)]
 
 
+class AuthContext(BaseModel):
+    """An authenticated user plus the raw bearer token.
+
+    Routes that need to query Postgres *as the user* uses AuthContext
+    to build a Supabase client with the user's JWT. This is necessary to enforce
+    RLS policies in the database.
+
+    ***The token is a REAL credential. DO NOT include it in ``response_model``, and
+    NEVER pass it into a DBOS workflow***
+    """
+
+    user: UserResponse
+    token: str = Field(repr=False)
+
+
+async def get_auth_context(
+    credentials: Annotated[HTTPAuthorizationCredentials | None, Depends(bearer_scheme)],
+) -> AuthContext:
+    """Resolve the caller and keep hold of their bearer token."""
+    user = await get_current_user(credentials)
+    if credentials is None:
+        raise _credentials_error("Not authenticated")
+    return AuthContext(user=user, token=credentials.credentials)
+
+
+CurrentAuth = Annotated[AuthContext, Depends(get_auth_context)]
+
+
 @router.post("/signup", status_code=status.HTTP_201_CREATED)
 def signup(req: SignUpRequest) -> dict[str, str]:
     """Register a user.
 
     Supabase will send a confirmation email to the user.
 
-    Note for the frontend dev: Supabase does not allow signing in until the
+    Note for the frontend(Sahil) dev: Supabase does not allow signing in until the
     email is confirmed, so the user will need to check their email before
     logging in.
+
+    Route user back to login page in the meantime.
     """
     try:
         response = get_client().auth.sign_up({"email": req.email, "password": req.password})
