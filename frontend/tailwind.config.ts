@@ -5,17 +5,15 @@ const config: Config = {
   theme: {
     extend: {
       colors: {
-        bg: "#04070a",
+        bg: "#000000",
         panel: "#0b0f13",
         panel2: "#0e1318",
-        border: "rgba(255,255,255,0.08)",
+        border: "rgba(255,255,255,0.09)",
         accent: "#22e0f0",
+        amber: "#ffb74d",
+        green: "#7ee787",
         text: "#e8ecee",
-        muted: "rgba(255,255,255,0.45)",
-      },
-      fontFamily: {
-        mono: ["JetBrains Mono", "ui-monospace", "monospace"],
-        sans: ["Inter", "-apple-system", "BlinkMacSystemFont", "sans-serif"],
+        muted: "rgba(255,255,255,0.4)",
       },
     },
   },

@@ -1,39 +1,54 @@
-export type TabId =
-  | "Project Idea"
-  | "Market Research"
-  | "Slides"
-  | "UI Design"
-  | "Code";
+export interface User {
+  id: string;
+  email: string;
+}
+
+export interface AuthTokens {
+  access_token: string;
+  refresh_token: string;
+  token_type: string;
+  expires_in: number;
+  user: User;
+}
+
+export interface AgentType {
+  id: string;
+  slug: string;
+  name: string;
+}
+
+export interface Project {
+  id: string;
+  name: string;
+  description?: string;
+}
+
+export type ToolPolicy = "ask" | "auto";
+
+export interface AgentNode {
+  id: string;
+  project_id: string;
+  name: string;
+  agent_slug: string;
+  tool_policy: ToolPolicy;
+  // position_x/position_y
+  position_x?: number;
+  position_y?: number;
+}
 
 export interface ChatMessage {
-  role: "agent" | "user";
-  who: string;
-  time: string;
-  text: string;
-}
-
-export interface SourceItem {
   id: string;
-  label: string;
-  meta: string;
+  role: "user" | "assistant";
+  content: string;
+  seq: number;
+  status: "complete" | "failed" | "pending";
+  created_at: string;
 }
 
-export interface SourceGroup {
-  id: string;
-  tab: TabId;
-  icon: string;
-  items: SourceItem[];
-}
-
-export interface CompetitorRow {
-  name: string;
-  segment: string;
-  price: string;
-  gap: string;
-}
-
-export interface FileItem {
-  id: string;
-  name: string;
-  changed?: boolean;
+export interface ChatResponse {
+  node_id: string;
+  conversation_id: string;
+  output: string;
+  user_message: ChatMessage;
+  assistant_message: ChatMessage;
 }

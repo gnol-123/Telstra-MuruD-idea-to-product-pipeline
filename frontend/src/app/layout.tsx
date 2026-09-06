@@ -1,20 +1,15 @@
 import type { Metadata } from "next";
 import "./globals.css";
-/* warpper for every page, imports global css, */
 
 export const metadata: Metadata = {
-  title: "Sidekick — Telstra Muru-D Team 2",
-  description: "Idea-to-prototype build workspace",
+  title: "Agent Mesh — Telstra Muru-D Team 2",
+  description: "Canvas of agent and tool nodes for the idea-to-prototype pipeline",
 };
 
-export default function RootLayout({
-  children,
-}: {
-  children: React.ReactNode;
-}) {
+export default function RootLayout({ children }: { children: React.ReactNode }) {
   return (
     <html lang="en">
-      <body className="font-sans">{children}</body>
+      <body>{children}</body>
     </html>
   );
 }
