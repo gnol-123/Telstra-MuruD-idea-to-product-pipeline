@@ -68,7 +68,7 @@ def _turn_from(output: str, model: str, usage: object) -> AgentTurn:
     )
 
 
-@DBOS.step(retries_allowed=True, max_attempts=3)
+@DBOS.step(retries_allowed=True, max_attempts=5)
 async def run_agent_step(system_prompt: str, model: str, prompt: str, history: list) -> AgentTurn:
     """Call the agent and checkpoint the result to DBOS, so a crash mid-call
     resumes from the checkpoint instead of paying for the model twice.
