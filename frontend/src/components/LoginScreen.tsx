@@ -1,0 +1,87 @@
+"use client";
+
+import { useState } from "react";
+import { login, signup, ApiError } from "@/lib/api";
+
+export default function LoginScreen({ onLoggedIn }: { onLoggedIn: () => void }) {
+  const [mode, setMode] = useState<"login" | "signup">("login");
+  const [email, setEmail] = useState("");
+  const [password, setPassword] = useState("");
+  const [message, setMessage] = useState<string | null>(null);
+  const [error, setError] = useState<string | null>(null);
+  const [busy, setBusy] = useState(false);
+
+  async function handleSubmit(e: React.FormEvent) {
+    e.preventDefault();
+    setError(null);
+    setMessage(null);
+    setBusy(true);
+    try {
+      if (mode === "login") {
+        await login(email, password);
+        onLoggedIn();
+      } else {
+        await signup(email, password);
+        setMessage("Check your email to confirm your account, then log in.");
+        setMode("login");
+      }
+    } catch (err) {
+      setError(err instanceof ApiError ? err.message : "Something went wrong");
+    } finally {
+      setBusy(false);
+    }
+  }
+
+  return (
+    <div className="h-screen flex items-center justify-center bg-bg text-text">
+      <form
+        onSubmit={handleSubmit}
+        className="w-80 bg-panel border border-border rounded-xl p-6 space-y-4"
+      >
+        <div>
+          <div className="text-sm font-semibold">Agent Mesh</div>
+          <div className="text-xs text-muted">
+            {mode === "login" ? "Log in to your workspace" : "Create an account"}
+          </div>
+        </div>
+
+        <input
+          type="email"
+          required
+          placeholder="Email"
+          value={email}
+          onChange={(e) => setEmail(e.target.value)}
+          className="w-full bg-panel2 border border-border rounded-md px-3 py-2 text-sm outline-none focus:border-accent/50"
+        />
+        <input
+          type="password"
+          required
+          minLength={8}
+          placeholder="Password (min 8 chars)"
+          value={password}
+          onChange={(e) => setPassword(e.target.value)}
+          className="w-full bg-panel2 border border-border rounded-md px-3 py-2 text-sm outline-none focus:border-accent/50"
+        />
+
+        {error && <div className="text-xs text-red-400">{error}</div>}
+        {message && <div className="text-xs text-green">{message}</div>}
+
+        <button
+          type="submit"
+          disabled={busy}
+          className="w-full bg-accent text-black font-medium rounded-md py-2 text-sm disabled:opacity-50"
+        >
+          {busy ? "Please wait…" : mode === "login" ? "Log in" : "Sign up"}
+        </button>
+
+        <button
+          type="button"
+          onClick={() => setMode(mode === "login" ? "signup" : "login")}
+          className="w-full text-xs text-muted hover:text-text"
+        >
+          {mode === "login" ? "Need an account? Sign up" : "Already have one? Log in"}
+        </button>
+      </form>
+    </div>
+  );
+}
