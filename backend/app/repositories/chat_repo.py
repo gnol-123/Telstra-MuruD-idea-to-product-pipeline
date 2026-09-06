@@ -24,6 +24,10 @@ class DuplicateProjectName(Exception):
     """A user already has a project with this name."""
 
 
+class DuplicateEdge(Exception):
+    """An arrow of this kind already joins these two nodes."""
+
+
 @dataclass(frozen=True)
 class AgentType:
     """A row from the agent_types catalog."""
@@ -72,6 +76,31 @@ def _to_message(row: dict[str, Any]) -> Message:
         seq=row["seq"],
         status=row["status"],
         created_at=row["created_at"],
+    )
+
+
+@dataclass(frozen=True)
+class Edge:
+    """A connection between two nodes on the canvas."""
+
+    id: str
+    source_node_id: str
+    target_node_id: str
+    kind: str
+    summary: str | None
+    summarised_through_seq: int | None
+    summary_updated_at: str | None
+
+
+def _to_edge(row: dict[str, Any]) -> Edge:
+    return Edge(
+        id=row["id"],
+        source_node_id=row["source_node_id"],
+        target_node_id=row["target_node_id"],
+        kind=row["kind"],
+        summary=row.get("summary"),
+        summarised_through_seq=row.get("summarised_through_seq"),
+        summary_updated_at=row.get("summary_updated_at"),
     )
 
 
@@ -278,6 +307,76 @@ class ChatRepository:
         ).data
         return _to_agent_node(rows[0]) if rows else None
 
+    # -- edges --------------------------------------------------------------
+
+    def create_edge(
+        self,
+        source_node_id: str,
+        target_node_id: str,
+        kind: str = "context",
+    ) -> Edge:
+        """
+        Connect two nodes on the canvas.
+        Returns the edge object.
+        """
+        try:
+            rows = (
+                self._db.table("edges")
+                .insert(
+                    {
+                        "owner_id": self._user_id,
+                        "source_node_id": source_node_id,
+                        "target_node_id": target_node_id,
+                        "kind": kind,
+                    }
+                )
+                .execute()
+            ).data
+        except APIError as exc:
+            if exc.code == _UNIQUE_VIOLATION:
+                raise DuplicateEdge(f"{source_node_id} -> {target_node_id} ({kind})") from exc
+            raise
+        return _to_edge(rows[0])
+
+    def list_edges(self, project_id: str) -> list[Edge]:
+        """Every edge on a project's canvas."""
+        rows = (
+            self._db.table("edges")
+            .select(
+                "id, source_node_id, target_node_id, kind, summary,"
+                " summarised_through_seq, summary_updated_at"
+            )
+            .eq("project_id", project_id)
+            .eq("owner_id", self._user_id)
+            .execute()
+        ).data
+        return [_to_edge(r) for r in rows]
+
+    def delete_edge(self, edge_id: str) -> bool:
+        rows = (
+            self._db.table("edges")
+            .delete()
+            .eq("id", edge_id)
+            .eq("owner_id", self._user_id)
+            .execute()
+        ).data
+        return bool(rows)
+
+    def list_inbound_edges(self, node_id: str, kind: str) -> list[Edge]:
+        """Return all edges where this node is the target."""
+        rows = (
+            self._db.table("edges")
+            .select(
+                "id, source_node_id, target_node_id, kind, summary,"
+                " summarised_through_seq, summary_updated_at"
+            )
+            .eq("target_node_id", node_id)
+            .eq("owner_id", self._user_id)
+            .eq("kind", kind)
+            .execute()
+        ).data
+        return [_to_edge(r) for r in rows]
+
     # -- conversations ------------------------------------------------------
 
     def get_conversation_for_node(self, node_id: str) -> str | None:
@@ -362,11 +461,8 @@ class ChatRepository:
         status: str = "complete",
         error: str | None = None,
     ) -> Message:
-        """Insert one message, returning the stored row.
-
-        ``seq`` and ``owner_id`` are assigned by database triggers. A
-        ``client_token`` collision means a resend or a replayed step, so the
-        existing row is returned instead of raising.
+        """
+            Insert one message, returning the stored row.
         """
         payload: dict[str, Any] = {
             "conversation_id": conversation_id,
