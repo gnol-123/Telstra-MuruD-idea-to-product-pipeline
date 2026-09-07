@@ -169,6 +169,7 @@ async def create_agent_node(
 
 @router.get("/projects/{project_id}/nodes", response_model=list[AgentNodeResponse])
 async def list_agent_nodes(project_id: UUID, repo: ChatRepo) -> list[AgentNodeResponse]:
+    """List the agent boxes on a project's canvas."""
     project = await to_thread.run_sync(repo.get_project, str(project_id))
     if project is None:
         raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Project not found")
@@ -240,10 +241,13 @@ async def create_edge(project_id: UUID, req: CreateEdgeRequest, repo: ChatRepo) 
     if project is None:
         raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Project not found")
 
+    # Checks that node exists and belongs to this project.
     for node_id in (req.source_node_id, req.target_node_id):
-        if await to_thread.run_sync(repo.get_agent_node, str(node_id)) is None:
+        node = await to_thread.run_sync(repo.get_agent_node, str(node_id))
+        if node is None or node.project_id != str(project_id):
             raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Agent not found")
 
+    # Create Edge and checks duplicate and invalid edge errors.
     try:
         edge = await to_thread.run_sync(
             lambda: repo.create_edge(
@@ -271,6 +275,8 @@ async def create_edge(project_id: UUID, req: CreateEdgeRequest, repo: ChatRepo) 
 
 @router.get("/projects/{project_id}/edges", response_model=list[EdgeResponse])
 async def list_edges(project_id: UUID, repo: ChatRepo) -> list[EdgeResponse]:
+    """List the edges on a project's canvas."""
+    # Check valid project_id before listing edges.f
     project = await to_thread.run_sync(repo.get_project, str(project_id))
     if project is None:
         raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Project not found")
@@ -282,6 +288,7 @@ async def list_edges(project_id: UUID, repo: ChatRepo) -> list[EdgeResponse]:
 @router.delete("/projects/{project_id}/edges/{edge_id}", status_code=status.HTTP_204_NO_CONTENT)
 async def delete_edge(project_id: UUID, edge_id: UUID, repo: ChatRepo) -> None:
     """Remove an edge from the canvas."""
+    # Check valid project_id before deleting edge.
     project = await to_thread.run_sync(repo.get_project, str(project_id))
     if project is None:
         raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Project not found")
