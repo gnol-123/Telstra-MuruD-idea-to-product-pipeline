@@ -8,6 +8,7 @@ through ``anyio.to_thread.run_sync``.
 """
 
 from dataclasses import dataclass
+from datetime import UTC, datetime
 from typing import Any
 
 from postgrest.exceptions import APIError
@@ -90,6 +91,7 @@ class Edge:
     summary: str | None
     summarised_through_seq: int | None
     summary_updated_at: str | None
+    summary_max_words: int
 
 
 def _to_edge(row: dict[str, Any]) -> Edge:
@@ -101,6 +103,7 @@ def _to_edge(row: dict[str, Any]) -> Edge:
         summary=row.get("summary"),
         summarised_through_seq=row.get("summarised_through_seq"),
         summary_updated_at=row.get("summary_updated_at"),
+        summary_max_words=row.get("summary_max_words", 200),
     )
 
 
@@ -344,13 +347,46 @@ class ChatRepository:
             self._db.table("edges")
             .select(
                 "id, source_node_id, target_node_id, kind, summary,"
-                " summarised_through_seq, summary_updated_at"
+                " summarised_through_seq, summary_updated_at, summary_max_words"
             )
             .eq("project_id", project_id)
             .eq("owner_id", self._user_id)
             .execute()
         ).data
         return [_to_edge(r) for r in rows]
+
+    def get_edge(self, edge_id: str) -> Edge | None:
+        """One edge, if it belongs to the caller."""
+        rows = (
+            self._db.table("edges")
+            .select(
+                "id, source_node_id, target_node_id, kind, summary,"
+                " summarised_through_seq, summary_updated_at, summary_max_words"
+            )
+            .eq("id", edge_id)
+            .eq("owner_id", self._user_id)
+            .limit(1)
+            .execute()
+        ).data
+        return _to_edge(rows[0]) if rows else None
+
+    def update_edge_summary(self, edge_id: str, summary: str, through_seq: int) -> Edge | None:
+        """Store a freshly generated summary and how far up the source it covers."""
+        rows = (
+            self._db.table("edges")
+            .update(
+                {
+                    "summary": summary,
+                    "summarised_through_seq": through_seq,
+                    "summary_updated_at": datetime.now(UTC).isoformat(),
+                }
+            )
+            .eq("id", edge_id)
+            .eq("owner_id", self._user_id)
+            .eq("kind", "context")
+            .execute()
+        ).data
+        return _to_edge(rows[0]) if rows else None
 
     def delete_edge(self, edge_id: str) -> bool:
         rows = (
@@ -368,7 +404,7 @@ class ChatRepository:
             self._db.table("edges")
             .select(
                 "id, source_node_id, target_node_id, kind, summary,"
-                " summarised_through_seq, summary_updated_at"
+                " summarised_through_seq, summary_updated_at, summary_max_words"
             )
             .eq("target_node_id", node_id)
             .eq("owner_id", self._user_id)

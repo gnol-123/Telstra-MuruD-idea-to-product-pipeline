@@ -17,6 +17,7 @@ from app.repositories.chat_repo import (
     Project,
 )
 from app.routers.deps import ChatRepo
+from app.services.agent import summarise_conversation
 
 router = APIRouter(tags=["projects"])
 
@@ -307,3 +308,43 @@ async def delete_edge(project_id: UUID, edge_id: UUID, repo: ChatRepo) -> None:
 
 
 # -- STALE CONTEXT CHECK ----------------------------------------------------------------
+
+
+@router.post("/projects/{project_id}/edges/{edge_id}/refresh", response_model=EdgeResponse)
+async def refresh_edge_summary(project_id: UUID, edge_id: UUID, repo: ChatRepo) -> EdgeResponse:
+    """Regenerate a context edge's summary from its source conversation."""
+    project = await to_thread.run_sync(repo.get_project, str(project_id))
+    if project is None:
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Project not found")
+
+    edge = await to_thread.run_sync(repo.get_edge, str(edge_id))
+    if edge is None:
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Edge not found")
+    if edge.kind != "context":
+        raise HTTPException(
+            status_code=status.HTTP_422_UNPROCESSABLE_ENTITY,
+            detail="Only context edges carry a summary",
+        )
+
+    conversation_id = await to_thread.run_sync(repo.get_conversation_for_node, edge.source_node_id)
+    if conversation_id is None:
+        # No conversation means nothing to summarise. Record that, so the edge
+        updated = await to_thread.run_sync(lambda: repo.update_edge_summary(str(edge_id), "", 0))
+        return EdgeResponse.of(updated or edge, is_stale=False)
+
+    # Read the head before summarising: any message that lands mid-call is not
+    # covered by this summary, and the edge should go stale again for it.
+    head = await to_thread.run_sync(repo.get_conversation_head, edge.source_node_id)
+    history = await to_thread.run_sync(repo.list_messages, conversation_id)
+
+    summary = await summarise_conversation(history, max_words=edge.summary_max_words)
+
+    updated = await to_thread.run_sync(
+        lambda: repo.update_edge_summary(str(edge_id), summary, head)
+    )
+    if updated is None:
+        raise HTTPException(
+            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+            detail="Summary could not be stored",
+        )
+    return EdgeResponse.of(updated, is_stale=False)
