@@ -420,9 +420,8 @@ class ChatRepository:
             if exc.code != _UNIQUE_VIOLATION:
                 raise
 
-        # Lost a race against another first message: read the winner.
         winner = self.get_conversation_for_node(node_id)
-        if winner is None:  # pragma: no cover - would mean the row vanished
+        if winner is None:
             raise RuntimeError("conversation could not be created or found")
         return winner
 
@@ -462,7 +461,7 @@ class ChatRepository:
         error: str | None = None,
     ) -> Message:
         """
-            Insert one message, returning the stored row.
+        Insert one message, returning the stored row.
         """
         payload: dict[str, Any] = {
             "conversation_id": conversation_id,
@@ -504,6 +503,24 @@ class ChatRepository:
             .execute()
         ).data
         return _to_message(rows[0]) if rows else None
+
+    # -- stale context ---------------------------------------------------------
+
+    def get_conversation_head(self, node_id: str) -> int:
+        """How many messages this node's conversation holds.
+
+        Compared against an edge's ``summarised_through_seq`` to decide whether
+        a context summary has gone stale. 0 when the node has no conversation.
+        """
+        rows = (
+            self._db.table("conversations")
+            .select("message_count")
+            .eq("owner_id", self._user_id)
+            .eq("node_id", node_id)
+            .limit(1)
+            .execute()
+        ).data
+        return rows[0]["message_count"] if rows else 0
 
 
 def _to_agent_node(row: dict[str, Any]) -> AgentNode:

@@ -220,14 +220,16 @@ class EdgeResponse(BaseModel):
     source_node_id: UUID
     target_node_id: UUID
     kind: str
+    is_stale: bool
 
     @classmethod
-    def of(cls, e: Edge) -> "EdgeResponse":
+    def of(cls, e: Edge, is_stale: bool) -> "EdgeResponse":
         return cls(
             id=e.id,
             source_node_id=e.source_node_id,
             target_node_id=e.target_node_id,
             kind=e.kind,
+            is_stale=is_stale,
         )
 
 
@@ -270,7 +272,8 @@ async def create_edge(project_id: UUID, req: CreateEdgeRequest, repo: ChatRepo) 
             ) from exc
         raise
 
-    return EdgeResponse.of(edge)
+    # A brand new edge has never been summarised, so it starts stale.
+    return EdgeResponse.of(edge, is_stale=True)
 
 
 @router.get("/projects/{project_id}/edges", response_model=list[EdgeResponse])
@@ -282,7 +285,13 @@ async def list_edges(project_id: UUID, repo: ChatRepo) -> list[EdgeResponse]:
         raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Project not found")
 
     edges = await to_thread.run_sync(repo.list_edges, str(project_id))
-    return [EdgeResponse.of(e) for e in edges]
+
+    out = []
+    for e in edges:
+        head = await to_thread.run_sync(repo.get_conversation_head, e.source_node_id)
+        is_stale = e.summarised_through_seq is None or e.summarised_through_seq < head
+        out.append(EdgeResponse.of(e, is_stale))
+    return out
 
 
 @router.delete("/projects/{project_id}/edges/{edge_id}", status_code=status.HTTP_204_NO_CONTENT)
@@ -295,3 +304,6 @@ async def delete_edge(project_id: UUID, edge_id: UUID, repo: ChatRepo) -> None:
     deleted = await to_thread.run_sync(repo.delete_edge, str(edge_id))
     if not deleted:
         raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Edge not found")
+
+
+# -- STALE CONTEXT CHECK ----------------------------------------------------------------
