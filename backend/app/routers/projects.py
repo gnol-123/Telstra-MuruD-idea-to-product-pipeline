@@ -5,8 +5,8 @@ from uuid import UUID
 
 from anyio import to_thread
 from fastapi import APIRouter, HTTPException, status
-from pydantic import BaseModel, Field
 from postgrest.exceptions import APIError
+from pydantic import BaseModel, Field
 
 from app.repositories.chat_repo import (
     AgentNode,
@@ -223,9 +223,9 @@ class EdgeResponse(BaseModel):
     @classmethod
     def of(cls, e: Edge) -> "EdgeResponse":
         return cls(
-            id=UUID(e.id),
-            source_node_id=UUID(e.source_node_id),
-            target_node_id=UUID(e.target_node_id),
+            id=e.id,
+            source_node_id=e.source_node_id,
+            target_node_id=e.target_node_id,
             kind=e.kind,
         )
 
@@ -240,6 +240,10 @@ async def create_edge(project_id: UUID, req: CreateEdgeRequest, repo: ChatRepo) 
     if project is None:
         raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Project not found")
 
+    for node_id in (req.source_node_id, req.target_node_id):
+        if await to_thread.run_sync(repo.get_agent_node, str(node_id)) is None:
+            raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Agent not found")
+
     try:
         edge = await to_thread.run_sync(
             lambda: repo.create_edge(
@@ -249,18 +253,18 @@ async def create_edge(project_id: UUID, req: CreateEdgeRequest, repo: ChatRepo) 
             )
         )
     except DuplicateEdge as exc:
-        raise HTTPException(status_code=status.HTTP_409_CONFLICT, detail="Edge already exists")
+        raise HTTPException(
+            status_code=status.HTTP_409_CONFLICT,
+            detail="That edge already exists",
+        ) from exc
     except APIError as exc:
-        if exc.code == 23514:
+        if exc.code == "23514":
             raise HTTPException(
-                status_code=status.HTTP_400_BAD_REQUEST,
-                detail="Edge would create a cycle in the graph",
+                status_code=status.HTTP_422_UNPROCESSABLE_ENTITY,
+                detail="Invalid edge: a node cannot be its own source and target"
+                "nodes must belong to this project",
             ) from exc
-
-    # Second check to ensure nodes don't link to each other.
-    for node_id in (req.source_node_id, req.target_node_id):
-        if await to_thread.run_sync(repo.get_agent_node, str(node_id)) is None:
-            raise HTTPException(404, "Agent not found")
+        raise
 
     return EdgeResponse.of(edge)
 
