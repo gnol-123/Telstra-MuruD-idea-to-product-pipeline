@@ -57,6 +57,8 @@ class AgentNode:
     system_prompt: str
     model: str
     tool_policy: str
+    position_x: float
+    position_y: float
 
 
 @dataclass(frozen=True)
@@ -293,6 +295,7 @@ class ChatRepository:
             self._db.table("nodes")
             .select(
                 "id, project_id, name, agent_type_id, tool_policy,"
+                " position_x, position_y,"
                 " agent_types(system_prompt, model)"
             )
             .eq("project_id", project_id)
@@ -309,6 +312,7 @@ class ChatRepository:
             self._db.table("nodes")
             .select(
                 "id, project_id, name, agent_type_id, tool_policy,"
+                " position_x, position_y,"
                 " agent_types(system_prompt, model)"
             )
             .eq("id", node_id)
@@ -604,4 +608,6 @@ def _to_agent_node(row: dict[str, Any]) -> AgentNode:
         system_prompt=template.get("system_prompt", ""),
         model=template.get("model", ""),
         tool_policy=row.get("tool_policy", "ask"),
+        position_x=row.get("position_x") or 0.0,
+        position_y=row.get("position_y") or 0.0,
     )
