@@ -16,9 +16,18 @@ from pydantic import BaseModel, Field
 from app.config import settings
 from app.repositories.chat_repo import Message
 from app.routers.deps import ChatRepo
-from app.workflows import run_turn, stream_turn
+from app.workflows import build_context_instructions, run_turn, stream_turn
 
 router = APIRouter(prefix="/chat", tags=["chat"])
+
+
+async def _inbound_instructions(repo: ChatRepo, node_id: str) -> str | None:
+    """Context from agents whose arrows point at this node.
+
+    Stale summaries are included; refreshing is the user's call.
+    """
+    context = await to_thread.run_sync(repo.list_inbound_context, node_id)
+    return build_context_instructions(context)
 
 
 class ChatRequest(BaseModel):
@@ -67,6 +76,8 @@ async def chat(req: ChatRequest, repo: ChatRepo) -> ChatResponse:
         lambda: repo.get_or_create_conversation(node.id, node.project_id)
     )
 
+    instructions = await _inbound_instructions(repo, node.id)
+
     turn = await run_turn(
         repo,
         conversation_id,
@@ -76,6 +87,7 @@ async def chat(req: ChatRequest, repo: ChatRepo) -> ChatResponse:
         client_token=req.client_token,
         # Only the LLM call becomes durable; persistence is identical either way.
         durable=bool(settings.dbos_database_url),
+        instructions=instructions,
     )
 
     return ChatResponse(
@@ -108,6 +120,8 @@ async def chat_stream(req: ChatRequest, repo: ChatRepo) -> StreamingResponse:
         lambda: repo.get_or_create_conversation(node.id, node.project_id)
     )
 
+    instructions = await _inbound_instructions(repo, node.id)
+
     async def events():
         async for event, payload in stream_turn(
             repo,
@@ -116,6 +130,7 @@ async def chat_stream(req: ChatRequest, repo: ChatRepo) -> StreamingResponse:
             node.model,
             req.prompt,
             client_token=req.client_token,
+            instructions=instructions,
         ):
             yield (f"event: {event}\ndata: {json.dumps(payload)}\n\n")
 

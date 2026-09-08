@@ -20,7 +20,7 @@ from dataclasses import dataclass
 
 from dbos import DBOS
 
-from app.repositories.chat_repo import ChatRepository, Message
+from app.repositories.chat_repo import ChatRepository, InboundContext, Message
 from app.services.agent import get_agent_for, to_model_messages
 
 
@@ -51,10 +51,31 @@ class ChatTurn:
     output: str
 
 
-async def call_agent(system_prompt: str, model: str, prompt: str, history: list) -> AgentTurn:
+def build_context_instructions(context: list[InboundContext]) -> str | None:
+    """Format inbound edge summaries as per-call instructions.
+
+    Kept out of the system prompt, which is the ``get_agent_for`` cache key.
+    """
+    if not context:
+        return None
+    parts = ["Context from other agents in this project:"]
+    for c in context:
+        parts.append(f"\n## {c.source_node_name}\n{c.summary}")
+    return "\n".join(parts)
+
+
+async def call_agent(
+    system_prompt: str,
+    model: str,
+    prompt: str,
+    history: list,
+    instructions: str | None = None,
+) -> AgentTurn:
     """Run one agent trun, doesn't save to DB"""
     agent = get_agent_for(system_prompt, model)
-    result = await agent.run(prompt, message_history=to_model_messages(history))
+    result = await agent.run(
+        prompt, message_history=to_model_messages(history), instructions=instructions
+    )
     return _turn_from(result.output, model, result.usage)
 
 
@@ -69,11 +90,17 @@ def _turn_from(output: str, model: str, usage: object) -> AgentTurn:
 
 
 @DBOS.step(retries_allowed=True, max_attempts=5)
-async def run_agent_step(system_prompt: str, model: str, prompt: str, history: list) -> AgentTurn:
+async def run_agent_step(
+    system_prompt: str,
+    model: str,
+    prompt: str,
+    history: list,
+    instructions: str | None = None,
+) -> AgentTurn:
     """Call the agent and checkpoint the result to DBOS, so a crash mid-call
     resumes from the checkpoint instead of paying for the model twice.
     """
-    return await call_agent(system_prompt, model, prompt, history)
+    return await call_agent(system_prompt, model, prompt, history, instructions)
 
 
 async def run_turn(
@@ -85,6 +112,7 @@ async def run_turn(
     *,
     client_token: str | None = None,
     durable: bool = False,
+    instructions: str | None = None,
 ) -> ChatTurn:
     """Persist the user turn, call the agent, persist the reply.
 
@@ -106,9 +134,9 @@ async def run_turn(
     # reply is worse than a visible failure. Identical on both paths.
     try:
         if durable:
-            turn = await run_agent_step(system_prompt, model, prompt, history)
+            turn = await run_agent_step(system_prompt, model, prompt, history, instructions)
         else:
-            turn = await call_agent(system_prompt, model, prompt, history)
+            turn = await call_agent(system_prompt, model, prompt, history, instructions)
     except Exception as exc:
         turn = AgentTurn(output="", model=model, error=str(exc))
 
@@ -142,6 +170,7 @@ async def stream_turn(
     prompt: str,
     *,
     client_token: str | None = None,
+    instructions: str | None = None,
 ) -> AsyncIterator[tuple[str, dict]]:
     """Stream one turn, yielding ``(event, payload)`` pairs.
 
@@ -170,7 +199,9 @@ async def stream_turn(
     turn: AgentTurn
     try:
         agent = get_agent_for(system_prompt, model)
-        async with agent.run_stream(prompt, message_history=to_model_messages(history)) as result:
+        async with agent.run_stream(
+            prompt, message_history=to_model_messages(history), instructions=instructions
+        ) as result:
             async for text in result.stream_text(delta=True):
                 chunks.append(text)
                 yield "chunk", {"text": text}

@@ -106,6 +106,10 @@ conversation.
 | `GET` | `/projects/{project_id}/nodes` | **yes** | List a project's agent nodes |
 | `PATCH` | `/projects/{project_id}/nodes/{node_id}` | **yes** | Move, rename, or set tool policy |
 | `DELETE` | `/projects/{project_id}/nodes/{node_id}` | **yes** | Remove a node |
+| `POST` | `/projects/{project_id}/edges` | **yes** | Draw an arrow between two nodes |
+| `GET` | `/projects/{project_id}/edges` | **yes** | List a project's arrows |
+| `POST` | `/projects/{project_id}/edges/{edge_id}/refresh` | **yes** | Regenerate an edge's summary |
+| `DELETE` | `/projects/{project_id}/edges/{edge_id}` | **yes** | Remove an arrow |
 
 ### `GET /agent-types`
 → `200`
@@ -190,6 +194,150 @@ with it. `404` if the node is not yours or is already gone.
 
 ---
 
+## Edges
+
+Arrows between nodes. They do **not** execute a pipeline: an arrow makes one
+agent's context available to another, and `/chat` picks it up automatically.
+
+An `agent -> agent` arrow is `kind: "context"`. It carries a **summary** of the
+source agent's conversation, injected into the target agent's prompt. Passing
+whole transcripts would exhaust the token budget, so the summary is the payload.
+
+`tool` and `environment` kinds exist in the schema but are not yet accepted:
+there are no tool or environment nodes to point at.
+
+### `POST /projects/{project_id}/edges`
+```json
+{ "source_node_id": "uuid", "target_node_id": "uuid", "kind": "context" }
+```
+`kind` defaults to `"context"`.
+
+→ `201`
+```json
+{
+  "id": "uuid",
+  "source_node_id": "uuid",
+  "target_node_id": "uuid",
+  "kind": "context",
+  "is_stale": true,
+  "messages_behind": null,
+  "summarised_through_seq": null,
+  "summary_updated_at": null
+}
+```
+
+A new edge is always **stale**: it has no summary until you refresh it. All
+three endpoints below return this same shape.
+
+| Case | Status |
+|---|---|
+| That arrow already exists | `409` |
+| A node linked to itself, or the two nodes are in different projects | `422` |
+| `kind` other than `"context"` | `422` |
+| Project or either node not yours | `404` |
+
+The same two nodes may be joined by more than one arrow, as long as the kinds
+differ.
+
+### `GET /projects/{project_id}/edges`
+→ `200`, a list of edges. This is what the canvas draws.
+
+```json
+[{
+  "id": "uuid",
+  "source_node_id": "uuid",
+  "target_node_id": "uuid",
+  "kind": "context",
+  "is_stale": true,
+  "messages_behind": 4,
+  "summarised_through_seq": 3,
+  "summary_updated_at": "2026-09-08T10:15:00Z"
+}]
+```
+
+`messages_behind` is how far the summary lags: `0` when fresh, and **null**
+when the edge has never been summarised, since "behind by N" is meaningless
+then. It lets the UI distinguish one message behind from twenty, which warrant
+different urgency.
+
+`summary` itself is deliberately **not** returned: it is long, the canvas does
+not render it, and it would bloat every canvas load.
+
+### `POST /projects/{project_id}/edges/{edge_id}/refresh`
+
+Regenerates the summary from the source agent's conversation.
+
+→ `200` with the edge, now `is_stale: false`, `messages_behind: 0`, and
+`summarised_through_seq` set to the message count at the moment of the call.
+
+The head is read **before** summarising, so a message that arrives mid-call is
+not falsely claimed as covered: the edge correctly goes stale again for it.
+
+**User-triggered on purpose.** Summarising costs an LLM call, so nothing
+regenerates on its own. The canvas shows an edge as stale and the user
+refreshes it when they want the downstream agent brought up to date. No
+background spend, and it stays visible when an agent is working from older
+information.
+
+If the source agent has no conversation yet there is nothing to summarise, so
+an empty summary is stored rather than erroring. Otherwise the edge would read
+as stale forever and keep prompting a refresh that can never succeed.
+
+`404` if the edge or project is not yours. `422` on a non-context edge.
+
+### `DELETE /projects/{project_id}/edges/{edge_id}`
+→ `204`. `404` if it is not yours or already gone.
+
+### Staleness
+
+`is_stale` is computed, not stored:
+
+```
+is_stale  =  summarised_through_seq is null           (never summarised)
+             or summarised_through_seq < the source
+                conversation's message count          (it has moved on since)
+```
+
+So an edge goes stale on its own the moment its source agent says something
+new. Nothing polls; it is a comparison made when you list the edges.
+
+`GET /edges` is the only place this is reported. **A chat turn injects whatever
+summary exists without checking freshness**, deliberately: an old summary with
+the arrow visibly marked stale beats no context at all. The canvas is where the
+user sees that an agent is working from older information.
+
+### How context reaches the model
+
+On every `/chat` and `/chat/stream` turn, the API reads the arrows pointing at
+that node and folds their summaries into the call:
+
+```
+Context from other agents in this project:
+
+## Market Research
+The target market is SMB fintech. Budget is 40k, deadline March...
+
+## Project Scoping
+...
+```
+
+Three things worth knowing:
+
+- **Stale summaries are still injected.** An old summary with the arrow marked
+  stale beats no context at all.
+- **Edges with no summary yet are skipped**, so an unrefreshed arrow changes
+  nothing.
+- This is passed per call, not baked into the agent, so it does not fragment
+  the agent cache.
+
+### Summary length
+
+Each edge carries `summary_max_words`, defaulting to 200 and constrained to
+20-2000. A feeder with a long history can be given more room than a brief one.
+There is no endpoint to change it yet; set it in SQL.
+
+---
+
 ## Chat
 
 | Method | Path | Auth | Description |
@@ -229,6 +377,8 @@ Notes:
 
 - **History replays automatically.** The node's transcript is loaded and passed
   to the model, so the agent remembers earlier turns in that conversation.
+- **Context from inbound edges is injected automatically.** If another agent's
+  arrow points at this node, its summary is added to the call. See Edges.
 - **`client_token` is an idempotency key.** Resending the same token will not
   duplicate the message. Generate one per send if the client may retry.
 - **A failed turn still returns `200`**, with `assistant_message.status` set to
@@ -285,7 +435,10 @@ never confirms the existence of another tenant's data.
 
 The schema supports these; the API does not expose them:
 
-- Edges (arrows between nodes), context summaries, and the retrieval tool
+- **The retrieval tool.** A context edge gives the downstream agent a summary,
+  but no way to ask the upstream agent for detail the summary lost.
 - Tool and environment nodes, and tool credential configuration
-- Updating or deleting projects and nodes, including moving a box on the canvas
+- Changing an edge's `summary_max_words` over the API
 - Listing a conversation's history without sending a message
+- Node positions are stored but not returned by `GET .../nodes`, so a canvas
+  cannot yet restore its layout

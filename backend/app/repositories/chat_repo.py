@@ -60,6 +60,15 @@ class AgentNode:
 
 
 @dataclass(frozen=True)
+class InboundContext:
+    """A context summary and its source agent."""
+
+    source_node_id: str
+    source_node_name: str
+    summary: str
+
+
+@dataclass(frozen=True)
 class Message:
     id: str
     role: str
@@ -388,6 +397,35 @@ class ChatRepository:
         ).data
         return _to_edge(rows[0]) if rows else None
 
+    def list_inbound_context(self, node_id: str) -> list[InboundContext]:
+        """Summaries feeding this node, each named by its source agent.
+
+        Joined by constraint name: `edges` has two foreign keys to `nodes`.
+        Edges with no summary are omitted.
+        """
+        rows = (
+            self._db.table("edges")
+            .select("source_node_id, summary, nodes!edges_source_node_id_fkey(name)")
+            .eq("target_node_id", node_id)
+            .eq("kind", "context")
+            .eq("owner_id", self._user_id)
+            .execute()
+        ).data
+        out = []
+        for r in rows:
+            summary = (r.get("summary") or "").strip()
+            if not summary:
+                continue
+            node = r.get("nodes") or {}
+            out.append(
+                InboundContext(
+                    source_node_id=r["source_node_id"],
+                    source_node_name=node.get("name", "another agent"),
+                    summary=summary,
+                )
+            )
+        return out
+
     def delete_edge(self, edge_id: str) -> bool:
         rows = (
             self._db.table("edges")
@@ -543,11 +581,7 @@ class ChatRepository:
     # -- stale context ---------------------------------------------------------
 
     def get_conversation_head(self, node_id: str) -> int:
-        """How many messages this node's conversation holds.
-
-        Compared against an edge's ``summarised_through_seq`` to decide whether
-        a context summary has gone stale. 0 when the node has no conversation.
-        """
+        """Message count for this node's conversation. 0 when it has none."""
         rows = (
             self._db.table("conversations")
             .select("message_count")

@@ -1,5 +1,6 @@
 """Projects and the agent nodes provisioned inside them."""
 
+from datetime import datetime
 from typing import Literal
 from uuid import UUID
 
@@ -222,15 +223,22 @@ class EdgeResponse(BaseModel):
     target_node_id: UUID
     kind: str
     is_stale: bool
+    # 0 when fresh, null when never summarised.
+    messages_behind: int | None = None
+    summarised_through_seq: int | None = None
+    summary_updated_at: datetime | None = None
 
     @classmethod
-    def of(cls, e: Edge, is_stale: bool) -> "EdgeResponse":
+    def of(cls, e: Edge, is_stale: bool, messages_behind: int | None = None) -> "EdgeResponse":
         return cls(
             id=e.id,
             source_node_id=e.source_node_id,
             target_node_id=e.target_node_id,
             kind=e.kind,
             is_stale=is_stale,
+            messages_behind=messages_behind,
+            summarised_through_seq=e.summarised_through_seq,
+            summary_updated_at=e.summary_updated_at,
         )
 
 
@@ -273,7 +281,7 @@ async def create_edge(project_id: UUID, req: CreateEdgeRequest, repo: ChatRepo) 
             ) from exc
         raise
 
-    # A brand new edge has never been summarised, so it starts stale.
+    # A new edge is always stale.
     return EdgeResponse.of(edge, is_stale=True)
 
 
@@ -287,11 +295,16 @@ async def list_edges(project_id: UUID, repo: ChatRepo) -> list[EdgeResponse]:
 
     edges = await to_thread.run_sync(repo.list_edges, str(project_id))
 
+    # One head lookup per edge.
     out = []
     for e in edges:
         head = await to_thread.run_sync(repo.get_conversation_head, e.source_node_id)
-        is_stale = e.summarised_through_seq is None or e.summarised_through_seq < head
-        out.append(EdgeResponse.of(e, is_stale))
+        if e.summarised_through_seq is None:
+            # Never summarised: stale, with no meaningful gap.
+            out.append(EdgeResponse.of(e, is_stale=True, messages_behind=None))
+            continue
+        behind = max(0, head - e.summarised_through_seq)
+        out.append(EdgeResponse.of(e, is_stale=behind > 0, messages_behind=behind))
     return out
 
 
@@ -328,12 +341,11 @@ async def refresh_edge_summary(project_id: UUID, edge_id: UUID, repo: ChatRepo) 
 
     conversation_id = await to_thread.run_sync(repo.get_conversation_for_node, edge.source_node_id)
     if conversation_id is None:
-        # No conversation means nothing to summarise. Record that, so the edge
+        # Nothing to summarise; record it so the edge stops reading as stale.
         updated = await to_thread.run_sync(lambda: repo.update_edge_summary(str(edge_id), "", 0))
-        return EdgeResponse.of(updated or edge, is_stale=False)
+        return EdgeResponse.of(updated or edge, is_stale=False, messages_behind=0)
 
-    # Read the head before summarising: any message that lands mid-call is not
-    # covered by this summary, and the edge should go stale again for it.
+    # Read before summarising, so a message landing mid-call re-stales the edge.
     head = await to_thread.run_sync(repo.get_conversation_head, edge.source_node_id)
     history = await to_thread.run_sync(repo.list_messages, conversation_id)
 
@@ -347,4 +359,4 @@ async def refresh_edge_summary(project_id: UUID, edge_id: UUID, repo: ChatRepo) 
             status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
             detail="Summary could not be stored",
         )
-    return EdgeResponse.of(updated, is_stale=False)
+    return EdgeResponse.of(updated, is_stale=False, messages_behind=0)
