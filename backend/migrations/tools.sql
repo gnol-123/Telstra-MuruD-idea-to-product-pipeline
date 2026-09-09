@@ -298,4 +298,23 @@ values
   )
 on conflict (slug) do nothing;
 
+-- ---------------------------------------------------------------------------
+-- Seed the MCP server tool type. Tools are whatever the remote server
+-- reports at connect time, so config is just a URL and an optional token.
+-- ---------------------------------------------------------------------------
+insert into public.tool_types (slug, name, description, config_schema, secret_fields, sort_order)
+values
+  (
+    'mcp_server',
+    'MCP Server',
+    'Connect to an MCP server and use whatever tools it offers.',
+    '{"fields": [
+        {"key": "url", "label": "Server URL", "type": "text", "required": true},
+        {"key": "auth_token", "label": "Auth token", "type": "password", "required": false}
+      ]}'::jsonb,
+    array['auth_token'],
+    30
+  )
+on conflict (slug) do nothing;
+
 commit;
