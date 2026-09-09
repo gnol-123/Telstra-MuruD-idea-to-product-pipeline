@@ -1,7 +1,5 @@
-"""Turn configured tool nodes into toolsets for one agent run.
-
-Building a toolset must never raise into a turn. A node that cannot be built
-is dropped and named, exactly like an unready one.
+"""
+Turn configured tool nodes into toolsets for one agent run.
 """
 
 import re
@@ -27,10 +25,6 @@ def _prefix(node: ToolNode) -> str:
 @dataclass(frozen=True)
 class AssembledTools:
     toolsets: list[AbstractToolset] = field(default_factory=list)
-    # Tool name to owning node id, across all three flavours. MCP tool names
-    # are looked up by prefix since PrefixedToolset renames at call time; skill
-    # and API tool names are read straight off the built toolset since those
-    # already carry a node-id suffix of their own.
     owner_by_tool: dict[str, str] = field(default_factory=dict)
     unavailable: list[str] = field(default_factory=list)
 
@@ -61,14 +55,13 @@ def assemble(repo, tool_nodes: list[ToolNode], *, ask: bool) -> AssembledTools:
                     secrets=secrets,
                 )
             )
-        except Exception:  # noqa: BLE001 - one broken node must not fail the turn
+        except Exception:
             unavailable.append(node.name)
             continue
 
         if spec.kind == "mcp":
-            # Remote tool names are outside our control, so prefix per node
-            # and record the whole prefix as the owner key. Task 9 can strip
-            # the prefix pydantic-ai applies to recover this same key.
+            # Prefix per node for each service_tool in MCP server.
+            # and record the whole prefix as the owner key.
             prefix = _prefix(node)
             owner_by_tool[prefix] = node.id
             toolsets.append(PrefixedToolset(built, prefix))
