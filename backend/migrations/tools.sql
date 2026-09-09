@@ -232,4 +232,51 @@ grant execute on function public.set_node_secret(uuid, text, text) to authentica
 revoke all on function public.get_node_secret(uuid, text) from public, anon, authenticated;
 grant execute on function public.get_node_secret(uuid, text) to service_role;
 
+-- ---------------------------------------------------------------------------
+-- Vault cleanup. vault.secrets sits in another schema with no foreign key
+-- back to node_secrets, so the cascade that removes a pointer row cannot
+-- reach the ciphertext. This trigger deletes it, leaving no orphans behind
+-- when a tool node is removed.
+-- ---------------------------------------------------------------------------
+create or replace function public.node_secrets_delete_vault_secret()
+returns trigger
+language plpgsql
+security definer
+set search_path = public, pg_temp
+as $$
+begin
+  if old.vault_secret_id is not null then
+    delete from vault.secrets where id = old.vault_secret_id;
+  end if;
+  return old;
+end;
+$$;
+
+drop trigger if exists node_secrets_delete_vault_secret_trg on public.node_secrets;
+create trigger node_secrets_delete_vault_secret_trg
+  after delete on public.node_secrets
+  for each row execute function public.node_secrets_delete_vault_secret();
+
+-- Rotating a secret replaces the row's pointer. Drop the ciphertext the old
+-- pointer referenced.
+create or replace function public.node_secrets_replace_vault_secret()
+returns trigger
+language plpgsql
+security definer
+set search_path = public, pg_temp
+as $$
+begin
+  if old.vault_secret_id is not null
+     and old.vault_secret_id is distinct from new.vault_secret_id then
+    delete from vault.secrets where id = old.vault_secret_id;
+  end if;
+  return new;
+end;
+$$;
+
+drop trigger if exists node_secrets_replace_vault_secret_trg on public.node_secrets;
+create trigger node_secrets_replace_vault_secret_trg
+  after update of vault_secret_id on public.node_secrets
+  for each row execute function public.node_secrets_replace_vault_secret();
+
 commit;
