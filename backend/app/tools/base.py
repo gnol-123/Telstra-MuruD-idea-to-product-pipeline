@@ -22,12 +22,13 @@ class ToolContext:
 class VerifyResult:
     ok: bool
     detail: str | None = None
-    # MCP servers report their tools at connect time.
+    # MCP servers report their tools at connect time, so a client can list them.
     discovered_tools: list[str] | None = None
 
 
 @dataclass(frozen=True)
 class ToolSpec:
+    #
     kind: Literal["api", "mcp", "skill"]
     build: Callable[[ToolContext], AbstractToolset]
     verify: Callable[[ToolContext], Awaitable[VerifyResult]]

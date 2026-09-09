@@ -5,10 +5,12 @@ slug is absent here is reported as unconfigured rather than crashing a turn.
 """
 
 from app.tools import skills
+from app.tools.api import brave_search
 from app.tools.base import ToolSpec
 
 _REGISTRY: dict[str, ToolSpec] = {
     "skill": ToolSpec(kind="skill", build=skills.build, verify=skills.verify),
+    "brave_search": ToolSpec(kind="api", build=brave_search.build, verify=brave_search.verify),
 }
 
 
