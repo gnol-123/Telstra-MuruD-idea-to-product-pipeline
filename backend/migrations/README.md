@@ -7,7 +7,8 @@ creates, so run it second.
 |---|---|
 | `init.sql` | Tables, indexes, triggers, and the seeded catalogs. Run first. |
 | `rls.sql` | Row Level Security policies. Run second. |
-| `apply.py` | Runs both, in order, in one transaction. |
+| `tools.sql` | Tool call audit, the approval pause, and vault-backed secrets. Run third. |
+| `apply.py` | Runs all three, in order, in one transaction. |
 
 ## Applying
 

@@ -17,7 +17,7 @@ import sys
 import psycopg
 from dotenv import dotenv_values
 
-MIGRATIONS = ["init.sql", "rls.sql"]
+MIGRATIONS = ["init.sql", "rls.sql", "tools.sql"]
 HERE = pathlib.Path(__file__).parent
 
 EXPECTED_TABLES = [
@@ -28,6 +28,7 @@ EXPECTED_TABLES = [
     "node_secrets",
     "nodes",
     "projects",
+    "tool_calls",
     "tool_types",
 ]
 
