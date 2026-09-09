@@ -10,9 +10,11 @@ from app.tools.base import ToolSpec
 
 _MCP = ToolSpec(kind="mcp", build=mcp_servers.build, verify=mcp_servers.verify)
 
-# Every MCP service shares one handler. A service row differs only in its
-# config_schema: which fields the user fills in, and the default_url the node
-# is created with. Adding one means a tool_types row plus a slug listed here.
+# MCP Slug list is hardcoded here,
+# because the MCP toolset is not a single tool,
+# but a collection of tools that are dynamically loaded from the MCP server.
+# The slugs are used to identify which tools are part of the MCP toolset.
+
 _MCP_SLUGS = ("mcp_server", "github", "obsidian", "gmail")
 
 _REGISTRY: dict[str, ToolSpec] = {
