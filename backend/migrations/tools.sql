@@ -279,4 +279,23 @@ create trigger node_secrets_replace_vault_secret_trg
   after update of vault_secret_id on public.node_secrets
   for each row execute function public.node_secrets_replace_vault_secret();
 
+-- ---------------------------------------------------------------------------
+-- Seed the skill tool type. Instruction text an agent can load on demand,
+-- needs no network and no credentials.
+-- ---------------------------------------------------------------------------
+insert into public.tool_types (slug, name, description, config_schema, secret_fields, sort_order)
+values
+  (
+    'skill',
+    'Skill',
+    'Instruction text an agent can load on demand.',
+    '{"fields": [
+        {"key": "text", "label": "Instructions", "type": "textarea", "required": true},
+        {"key": "description", "label": "When to use it", "type": "text", "required": false}
+      ]}'::jsonb,
+    array[]::text[],
+    20
+  )
+on conflict (slug) do nothing;
+
 commit;
