@@ -16,6 +16,8 @@ class Settings(BaseSettings):
     gemini_model: str = "gemini-3-flash-preview"
     supabase_url: str = ""
     supabase_key: str = ""
+    # Service role key. Bypasses RLS. Required for Supabase Vault
+    supabase_service_key: str = ""
     dbos_database_url: str = ""
     # Where Supabase sends the browser back after Google sign-in.
     # Add frontend url to allowedlist on supabase to use Google sign-in.
