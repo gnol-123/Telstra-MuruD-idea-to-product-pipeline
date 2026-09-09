@@ -53,12 +53,13 @@ class AgentNode:
     id: str
     project_id: str
     name: str
-    agent_type_id: str
+    agent_type_id: str | None
     system_prompt: str
     model: str
     tool_policy: str
     position_x: float
     position_y: float
+    kind: str = "agent"
 
 
 @dataclass(frozen=True)
@@ -294,13 +295,12 @@ class ChatRepository:
         rows = (
             self._db.table("nodes")
             .select(
-                "id, project_id, name, agent_type_id, tool_policy,"
+                "id, project_id, name, agent_type_id, tool_policy, kind,"
                 " position_x, position_y,"
                 " agent_types(system_prompt, model)"
             )
             .eq("project_id", project_id)
             .eq("owner_id", self._user_id)
-            .eq("kind", "agent")
             .order("created_at")
             .execute()
         ).data
@@ -604,10 +604,11 @@ def _to_agent_node(row: dict[str, Any]) -> AgentNode:
         id=row["id"],
         project_id=row["project_id"],
         name=row["name"],
-        agent_type_id=row["agent_type_id"],
+        agent_type_id=row.get("agent_type_id"),
         system_prompt=template.get("system_prompt", ""),
         model=template.get("model", ""),
         tool_policy=row.get("tool_policy", "ask"),
         position_x=row.get("position_x") or 0.0,
         position_y=row.get("position_y") or 0.0,
+        kind=row.get("kind", "agent"),
     )

@@ -111,6 +111,7 @@ class AgentNodeResponse(BaseModel):
     tool_policy: str
     position_x: float
     position_y: float
+    kind: str = "agent"
 
     @classmethod
     def of(cls, n: AgentNode, agent_slug: str | None = None) -> "AgentNodeResponse":
@@ -122,6 +123,7 @@ class AgentNodeResponse(BaseModel):
             tool_policy=n.tool_policy,
             position_x=n.position_x,
             position_y=n.position_y,
+            kind=n.kind,
         )
 
 
