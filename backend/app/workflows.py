@@ -1,18 +1,11 @@
-"""Durable workflows.
+"""Turn orchestration, with the LLM call optionally checkpointed by DBOS.
 
-Using DBOS workflows to wrap the agent call in a checkpointed, retryable step.
-DBOS checkpoints each '@DBOS.step' decorated function, so if the process is
-interrupted, it can resume from the last successful step.
+Only the pure LLM call goes inside a DBOS step. Persistence stays outside it:
+DBOS serialises step arguments to Postgres, so a Supabase client cannot be
+pickled and a JWT would be a credential written to disk.
 
-1. ``run_agent_step`` performs the LLM call and *writes nothing*. The user row
-   is written before it and the assistant row after it, so its three retry
-   attempts cannot produce three rows.
-
-2. Only the pure LLM call is checkpointed. Persistence stays in ``run_turn``,
-   outside the DBOS boundary, because DBOS serializes step arguments and
-   results -- a Supabase client holds a thread lock and cannot be pickled.
-   Keeping the token out of DBOS is also deliberate: checkpointed arguments are
-   written to Postgres, and a JWT is a live credential.
+``run_agent_step`` writes nothing. The user row lands before it and the
+assistant row after, so its retries cannot produce duplicate rows.
 """
 
 from collections.abc import AsyncIterator
@@ -31,7 +24,7 @@ class AgentTurn:
     output: str
     model: str
     input_tokens: int | None = None
-    # Includes reasoning
+    # Gemini counts reasoning here.
     output_tokens: int | None = None
     reasoning_tokens: int | None = None
     error: str | None = None
@@ -54,7 +47,7 @@ class ChatTurn:
 def build_context_instructions(context: list[InboundContext]) -> str | None:
     """Format inbound edge summaries as per-call instructions.
 
-    Kept out of the system prompt, which is the ``get_agent_for`` cache key.
+    Kept out of the system prompt: that is the ``get_agent_for`` cache key.
     """
     if not context:
         return None
@@ -70,11 +63,15 @@ async def call_agent(
     prompt: str,
     history: list,
     instructions: str | None = None,
+    toolsets: list | None = None,
 ) -> AgentTurn:
-    """Run one agent trun, doesn't save to DB"""
+    """Run one agent turn. Writes nothing."""
     agent = get_agent_for(system_prompt, model)
     result = await agent.run(
-        prompt, message_history=to_model_messages(history), instructions=instructions
+        prompt,
+        message_history=to_model_messages(history),
+        instructions=instructions,
+        toolsets=toolsets or None,
     )
     return _turn_from(result.output, model, result.usage)
 
@@ -97,8 +94,11 @@ async def run_agent_step(
     history: list,
     instructions: str | None = None,
 ) -> AgentTurn:
-    """Call the agent and checkpoint the result to DBOS, so a crash mid-call
-    resumes from the checkpoint instead of paying for the model twice.
+    """Checkpointed LLM call, so a crash mid-call does not pay for it twice.
+
+    No ``toolsets`` parameter by design. A toolset holds live credentials that
+    must not be checkpointed, and a turn that has already fired side-effecting
+    calls is not safely replayable. Tool turns take the direct path instead.
     """
     return await call_agent(system_prompt, model, prompt, history, instructions)
 
@@ -113,13 +113,13 @@ async def run_turn(
     client_token: str | None = None,
     durable: bool = False,
     instructions: str | None = None,
+    toolsets: list | None = None,
 ) -> ChatTurn:
     """Persist the user turn, call the agent, persist the reply.
 
-    Shared by both paths in ``routers.chat`` so that running without DBOS
-    behaves identically to running with it. ``durable`` only decides whether
-    the LLM call is checkpointed, so a crash mid-call resumes from the
-    checkpoint instead of paying for the model twice.
+    Shared by both paths in ``routers.chat``, so behaviour with and without
+    DBOS is identical apart from the checkpoint. Tools force the direct path
+    regardless of ``durable``: see ``run_agent_step``.
     """
     from anyio import to_thread
 
@@ -129,14 +129,14 @@ async def run_turn(
         lambda: repo.add_message(conversation_id, "user", prompt, client_token=client_token)
     )
 
-    # A turn that fails is recorded on the transcript rather than raised: the
-    # user's own message is already stored, and an orphaned user row with no
-    # reply is worse than a visible failure. Identical on both paths.
+    use_durable = durable and not toolsets
+    # Failures are recorded on the transcript, not raised: the user row is
+    # already stored, and an orphan is worse than a visible failure.
     try:
-        if durable:
+        if use_durable:
             turn = await run_agent_step(system_prompt, model, prompt, history, instructions)
         else:
-            turn = await call_agent(system_prompt, model, prompt, history, instructions)
+            turn = await call_agent(system_prompt, model, prompt, history, instructions, toolsets)
     except Exception as exc:
         turn = AgentTurn(output="", model=model, error=str(exc))
 
@@ -171,15 +171,16 @@ async def stream_turn(
     *,
     client_token: str | None = None,
     instructions: str | None = None,
+    toolsets: list | None = None,
 ) -> AsyncIterator[tuple[str, dict]]:
     """Stream one turn, yielding ``(event, payload)`` pairs.
 
-    Same order of writes as ``run_turn`` -- user row first, assistant row last --
-    so idempotency and seq ordering behave identically. The stream itself is not
-    checkpointed: DBOS records a step's return value, and a generator has none.
-    The assembled text is what gets persisted once the stream drains.
-
     Events: ``start``, ``chunk``, ``done``, ``error``.
+
+    Same write order as ``run_turn``, user row first and assistant row last, so
+    idempotency and seq ordering match. Never checkpointed: DBOS records a
+    step's return value and a generator has none. The assembled text is
+    persisted once the stream drains.
     """
     from anyio import to_thread
 
@@ -200,7 +201,10 @@ async def stream_turn(
     try:
         agent = get_agent_for(system_prompt, model)
         async with agent.run_stream(
-            prompt, message_history=to_model_messages(history), instructions=instructions
+            prompt,
+            message_history=to_model_messages(history),
+            instructions=instructions,
+            toolsets=toolsets or None,
         ) as result:
             async for text in result.stream_text(delta=True):
                 chunks.append(text)
@@ -208,8 +212,8 @@ async def stream_turn(
             # Only valid once the stream has drained.
             turn = _turn_from("".join(chunks), model, result.usage)
     except Exception as exc:
-        # Headers are already sent, so this cannot become a 4xx. Report it as an
-        # event and still record the failure on the transcript.
+        # Headers are already sent, so this cannot be a 4xx. Emit an event and
+        # still record the failure on the transcript.
         turn = AgentTurn(output="".join(chunks), model=model, error=str(exc))
         yield "error", {"error": str(exc)}
 
