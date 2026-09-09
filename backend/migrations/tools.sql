@@ -317,4 +317,61 @@ values
   )
 on conflict (slug) do nothing;
 
+-- ---------------------------------------------------------------------------
+-- MCP service catalog.
+--
+-- Every row below resolves to the same `mcp_server` handler in the Python
+-- registry. They differ only in what the user is asked for: a row carrying
+-- `default_url` pre-fills the endpoint, so the user supplies just a token.
+--
+-- To add a service: copy a row, set the slug, name, default_url and fields,
+-- then run `python migrations/apply.py`. No Python change is needed.
+--
+-- `default_url` is empty for servers that have no public endpoint. Those run
+-- locally over stdio, so the user must expose one through an HTTP bridge and
+-- paste its URL. The box stays in error until they do.
+-- ---------------------------------------------------------------------------
+insert into public.tool_types (slug, name, description, config_schema, secret_fields, sort_order)
+values
+  (
+    'github',
+    'GitHub',
+    'Issues, pull requests, code search and repository files.',
+    '{"default_url": "https://api.githubcopilot.com/mcp/",
+      "fields": [
+        {"key": "auth_token", "label": "Personal access token", "type": "password",
+         "required": true,
+         "help": "github.com > Settings > Developer settings > Personal access tokens"}
+      ]}'::jsonb,
+    array['auth_token'],
+    31
+  ),
+  (
+    'obsidian',
+    'Obsidian',
+    'Read and search an Obsidian vault. Needs a local MCP bridge.',
+    '{"default_url": "",
+      "fields": [
+        {"key": "url", "label": "Bridge URL", "type": "text", "required": true,
+         "help": "Obsidian MCP servers run locally over stdio. Expose one over HTTP and paste its URL."},
+        {"key": "auth_token", "label": "Auth token", "type": "password", "required": false}
+      ]}'::jsonb,
+    array['auth_token'],
+    32
+  ),
+  (
+    'gmail',
+    'Gmail',
+    'Read, search and send mail. Needs a local MCP bridge with Google OAuth.',
+    '{"default_url": "",
+      "fields": [
+        {"key": "url", "label": "Bridge URL", "type": "text", "required": true,
+         "help": "No public Gmail MCP endpoint exists. Run a server that holds your Google OAuth credentials and expose it over HTTP."},
+        {"key": "auth_token", "label": "Auth token", "type": "password", "required": false}
+      ]}'::jsonb,
+    array['auth_token'],
+    33
+  )
+on conflict (slug) do nothing;
+
 commit;
