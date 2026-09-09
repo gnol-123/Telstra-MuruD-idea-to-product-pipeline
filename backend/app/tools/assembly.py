@@ -3,9 +3,19 @@ Turn configured tool nodes into toolsets for one agent run.
 """
 
 import re
+import time
 from dataclasses import dataclass, field
+from typing import Any
 
-from pydantic_ai.toolsets import AbstractToolset, ApprovalRequiredToolset, PrefixedToolset
+from anyio import to_thread
+from pydantic_ai import ApprovalRequired, ModelRetry, RunContext
+from pydantic_ai.toolsets import (
+    AbstractToolset,
+    ApprovalRequiredToolset,
+    PrefixedToolset,
+    WrapperToolset,
+)
+from pydantic_ai.toolsets.abstract import ToolsetTool
 
 from app.repositories.tool_repo import ToolNode, load_node_secrets
 from app.tools.base import ToolContext
@@ -27,11 +37,83 @@ class AssembledTools:
     toolsets: list[AbstractToolset] = field(default_factory=list)
     owner_by_tool: dict[str, str] = field(default_factory=dict)
     unavailable: list[str] = field(default_factory=list)
+    # Same order and length as ``toolsets``: the node id each entry came
+    # from, so a caller can wrap each toolset for recording without
+    # re-deriving ownership from tool names.
+    owner_by_toolset: list[str] = field(default_factory=list)
+
+
+@dataclass
+class RecordingToolset(WrapperToolset):
+    """Writes a tool_calls row around every invocation.
+
+    One instance per tool node, built where the conversation id is known
+    (the chat router), never inside a DBOS-checkpointed step.
+    """
+
+    repo: Any = None
+    project_id: str = ""
+    conversation_id: str = ""
+    agent_node_id: str = ""
+    tool_node_id: str = ""
+
+    async def call_tool(
+        self, name: str, tool_args: dict[str, Any], ctx: RunContext, tool: ToolsetTool
+    ) -> Any:
+        started = time.perf_counter()
+        call_id = await to_thread.run_sync(
+            lambda: self.repo.record_call(
+                project_id=self.project_id,
+                conversation_id=self.conversation_id,
+                agent_node_id=self.agent_node_id,
+                tool_node_id=self.tool_node_id,
+                tool_call_id=ctx.tool_call_id,
+                tool_name=name,
+                arguments=tool_args,
+                status="running",
+            )
+        )
+        try:
+            result = await super().call_tool(name, tool_args, ctx, tool)
+        except ModelRetry:
+            # The tool asked for a retry itself. Record and let it through.
+            await to_thread.run_sync(lambda: self.repo.finish_call(call_id, status="error"))
+            raise
+        except ApprovalRequired:
+            # Control flow, not a failure: the run pauses for user approval.
+            # Task 10 handles the pause; the row stays pending_approval.
+            await to_thread.run_sync(
+                lambda: self.repo.finish_call(call_id, status="pending_approval")
+            )
+            raise
+        except Exception as exc:
+            message = f"{type(exc).__name__}: {exc}"
+            await to_thread.run_sync(
+                lambda: self.repo.finish_call(
+                    call_id,
+                    status="error",
+                    error=message,
+                    duration_ms=int((time.perf_counter() - started) * 1000),
+                )
+            )
+            # Hand the failure to the model rather than killing the turn.
+            raise ModelRetry(f"{name} failed: {exc}") from exc
+
+        await to_thread.run_sync(
+            lambda: self.repo.finish_call(
+                call_id,
+                status="ok",
+                result=str(result)[:8000],
+                duration_ms=int((time.perf_counter() - started) * 1000),
+            )
+        )
+        return result
 
 
 def assemble(repo, tool_nodes: list[ToolNode], *, ask: bool) -> AssembledTools:
     toolsets: list[AbstractToolset] = []
     owner_by_tool: dict[str, str] = {}
+    owner_by_toolset: list[str] = []
     unavailable: list[str] = []
 
     for node in tool_nodes:
@@ -71,11 +153,44 @@ def assemble(repo, tool_nodes: list[ToolNode], *, ask: bool) -> AssembledTools:
             for tool_name in getattr(built, "tools", {}):
                 owner_by_tool[tool_name] = node.id
             toolsets.append(built)
+        owner_by_toolset.append(node.id)
 
     if ask and toolsets:
         toolsets = [ApprovalRequiredToolset(t) for t in toolsets]
 
-    return AssembledTools(toolsets=toolsets, owner_by_tool=owner_by_tool, unavailable=unavailable)
+    return AssembledTools(
+        toolsets=toolsets,
+        owner_by_tool=owner_by_tool,
+        unavailable=unavailable,
+        owner_by_toolset=owner_by_toolset,
+    )
+
+
+def record_calls(
+    tools: AssembledTools,
+    *,
+    repo,
+    project_id: str,
+    conversation_id: str,
+    agent_node_id: str,
+) -> list[AbstractToolset]:
+    """Wrap each assembled toolset so every call it serves writes a row.
+
+    Built where the conversation id is known (the chat router), never inside
+    a DBOS-checkpointed step: ``repo`` and any secrets a toolset holds must
+    stay out of a workflow argument.
+    """
+    return [
+        RecordingToolset(
+            toolset,
+            repo=repo,
+            project_id=project_id,
+            conversation_id=conversation_id,
+            agent_node_id=agent_node_id,
+            tool_node_id=node_id,
+        )
+        for toolset, node_id in zip(tools.toolsets, tools.owner_by_toolset, strict=True)
+    ]
 
 
 def unavailable_note(names: list[str]) -> str | None:
