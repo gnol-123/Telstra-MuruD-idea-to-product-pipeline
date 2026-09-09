@@ -1,8 +1,8 @@
 """MCP servers.
 
-One spec serves any server. Tools are whatever the server reports at connect
-time, so there is no per-server code and no schema of ours to validate
-against. That is why MCP nodes default to tool_policy 'ask'.
+Fethces MCP tools from MCP server;
+Builds toolset for Agent Call
+Verfies MCP server connection and tool availability
 """
 
 from pydantic_ai.mcp import MCPToolset, StreamableHttpTransport
@@ -30,7 +30,7 @@ async def verify(ctx: ToolContext) -> VerifyResult:
     try:
         async with toolset:
             tools = await toolset.list_tools()
-    except Exception as exc:  # noqa: BLE001 - an unreachable server degrades one node
+    except Exception as exc:
         return VerifyResult(ok=False, detail=f"Could not connect: {type(exc).__name__}")
     names = sorted(t.name for t in tools)
     return VerifyResult(

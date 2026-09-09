@@ -325,7 +325,8 @@ on conflict (slug) do nothing;
 -- `default_url` pre-fills the endpoint, so the user supplies just a token.
 --
 -- To add a service: copy a row, set the slug, name, default_url and fields,
--- then run `python migrations/apply.py`. No Python change is needed.
+-- run `python migrations/apply.py`, and add the slug to _MCP_SLUGS in
+-- app/tools/registry.py so it resolves to the shared MCP handler.
 --
 -- `default_url` is empty for servers that have no public endpoint. Those run
 -- locally over stdio, so the user must expose one through an HTTP bridge and
@@ -373,5 +374,57 @@ values
     33
   )
 on conflict (slug) do nothing;
+
+-- ---------------------------------------------------------------------------
+-- Each edge kind connects a specific pair of box kinds: context runs agent
+-- to agent, tool runs tool to agent. The migration header in init.sql
+-- documented this; nothing enforced it. Extends edges_validate to also read
+-- endpoint kind from the same two selects it already runs for the
+-- same-project check, rather than adding queries.
+-- ---------------------------------------------------------------------------
+create or replace function public.edges_validate()
+returns trigger
+language plpgsql
+security definer
+set search_path = public, pg_temp
+as $$
+declare
+  src_project uuid;
+  src_owner   uuid;
+  src_kind    text;
+  tgt_project uuid;
+  tgt_kind    text;
+begin
+  select n.project_id, n.owner_id, n.kind into src_project, src_owner, src_kind
+  from public.nodes n where n.id = new.source_node_id;
+
+  select n.project_id, n.kind into tgt_project, tgt_kind
+  from public.nodes n where n.id = new.target_node_id;
+
+  if src_project is null or tgt_project is null then
+    raise exception 'edge endpoints must exist'
+      using errcode = 'foreign_key_violation';
+  end if;
+
+  if src_project <> tgt_project then
+    raise exception 'edge endpoints must belong to the same project'
+      using errcode = 'check_violation';
+  end if;
+
+  if new.kind = 'context' and (src_kind <> 'agent' or tgt_kind <> 'agent') then
+    raise exception 'context edges run agent to agent, not % to %', src_kind, tgt_kind
+      using errcode = 'check_violation';
+  end if;
+
+  if new.kind = 'tool' and (src_kind <> 'tool' or tgt_kind <> 'agent') then
+    raise exception 'tool edges run tool to agent, not % to %', src_kind, tgt_kind
+      using errcode = 'check_violation';
+  end if;
+
+  new.project_id := src_project;
+  new.owner_id   := src_owner;
+  return new;
+end;
+$$;
 
 commit;
