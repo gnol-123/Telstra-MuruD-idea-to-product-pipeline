@@ -15,7 +15,8 @@ from pydantic import BaseModel, Field
 
 from app.config import settings
 from app.repositories.chat_repo import Message
-from app.routers.deps import ChatRepo
+from app.routers.deps import ChatRepo, ToolRepo
+from app.tools.assembly import AssembledTools, assemble, record_calls, unavailable_note
 from app.workflows import build_context_instructions, run_turn, stream_turn
 
 router = APIRouter(prefix="/chat", tags=["chat"])
@@ -28,6 +29,19 @@ async def _inbound_instructions(repo: ChatRepo, node_id: str) -> str | None:
     """
     context = await to_thread.run_sync(repo.list_inbound_context, node_id)
     return build_context_instructions(context)
+
+
+async def _inbound_toolsets(repo: ChatRepo, tool_repo: ToolRepo, node) -> AssembledTools:
+    """Toolsets from tool nodes whose arrows point at this agent."""
+    node_ids = await to_thread.run_sync(repo.list_inbound_tool_node_ids, node.id)
+    if not node_ids:
+        return AssembledTools()
+    nodes = [
+        n
+        for n in (await to_thread.run_sync(lambda: [tool_repo.get_tool_node(i) for i in node_ids]))
+        if n is not None
+    ]
+    return assemble(tool_repo, nodes, ask=node.tool_policy == "ask")
 
 
 class ChatRequest(BaseModel):
@@ -66,7 +80,7 @@ class ChatResponse(BaseModel):
 
 
 @router.post("", response_model=ChatResponse)
-async def chat(req: ChatRequest, repo: ChatRepo) -> ChatResponse:
+async def chat(req: ChatRequest, repo: ChatRepo, tool_repo: ToolRepo) -> ChatResponse:
     node = await to_thread.run_sync(repo.get_agent_node, str(req.node_id))
 
     if node is None:
@@ -78,6 +92,18 @@ async def chat(req: ChatRequest, repo: ChatRepo) -> ChatResponse:
 
     instructions = await _inbound_instructions(repo, node.id)
 
+    tools = await _inbound_toolsets(repo, tool_repo, node)
+    note = unavailable_note(tools.unavailable)
+    if note:
+        instructions = "\n\n".join(p for p in [instructions, note] if p)
+    toolsets = record_calls(
+        tools,
+        repo=tool_repo,
+        project_id=node.project_id,
+        conversation_id=conversation_id,
+        agent_node_id=node.id,
+    )
+
     turn = await run_turn(
         repo,
         conversation_id,
@@ -88,6 +114,7 @@ async def chat(req: ChatRequest, repo: ChatRepo) -> ChatResponse:
         # Only the LLM call becomes durable; persistence is identical either way.
         durable=bool(settings.dbos_database_url),
         instructions=instructions,
+        toolsets=toolsets,
     )
 
     return ChatResponse(
@@ -100,17 +127,14 @@ async def chat(req: ChatRequest, repo: ChatRepo) -> ChatResponse:
 
 
 @router.post("/stream")
-async def chat_stream(req: ChatRequest, repo: ChatRepo) -> StreamingResponse:
+async def chat_stream(req: ChatRequest, repo: ChatRepo, tool_repo: ToolRepo) -> StreamingResponse:
     """Stream a turn as server-sent events.
 
     Events: ``start`` (conversation id + the persisted user message),
     ``chunk`` (a piece of text), ``done`` (the persisted assistant message),
     and ``error`` if the model fails part-way.
 
-    The turn is persisted exactly as ``POST /chat`` persists it. Only the LLM
-    call differs: the reply is streamed, then the assembled text is written.
-    Unlike ``/chat`` this is not DBOS-checkpointed, because a step checkpoints
-    a return value and a stream has none.
+    DBOS does not checkpoint the stream, but it does the assembled text once the stream ends.
     """
     node = await to_thread.run_sync(repo.get_agent_node, str(req.node_id))
     if node is None:
@@ -122,6 +146,18 @@ async def chat_stream(req: ChatRequest, repo: ChatRepo) -> StreamingResponse:
 
     instructions = await _inbound_instructions(repo, node.id)
 
+    tools = await _inbound_toolsets(repo, tool_repo, node)
+    note = unavailable_note(tools.unavailable)
+    if note:
+        instructions = "\n\n".join(p for p in [instructions, note] if p)
+    toolsets = record_calls(
+        tools,
+        repo=tool_repo,
+        project_id=node.project_id,
+        conversation_id=conversation_id,
+        agent_node_id=node.id,
+    )
+
     async def events():
         async for event, payload in stream_turn(
             repo,
@@ -131,6 +167,7 @@ async def chat_stream(req: ChatRequest, repo: ChatRepo) -> StreamingResponse:
             req.prompt,
             client_token=req.client_token,
             instructions=instructions,
+            toolsets=toolsets,
         ):
             yield (f"event: {event}\ndata: {json.dumps(payload)}\n\n")
 
