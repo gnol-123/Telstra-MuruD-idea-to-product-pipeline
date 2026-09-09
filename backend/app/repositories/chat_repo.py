@@ -60,6 +60,9 @@ class AgentNode:
     position_x: float
     position_y: float
     kind: str = "agent"
+    # None for a tool node row (agent_types join is null), or if the join
+    # itself is absent from the select.
+    agent_slug: str | None = None
 
 
 @dataclass(frozen=True)
@@ -291,13 +294,28 @@ class ChatRepository:
         ).data
         return bool(rows)
 
+    def delete_node(self, node_id: str) -> bool:
+        """
+        Remove a node of any kind owned by the caller.
+        Does not filter by kind, blanket delete over
+        Every kind of node and cascades to any child objects e.g. conversations, secrets ...
+        """
+        rows = (
+            self._db.table("nodes")
+            .delete()
+            .eq("id", node_id)
+            .eq("owner_id", self._user_id)
+            .execute()
+        ).data
+        return bool(rows)
+
     def list_agent_nodes(self, project_id: str) -> list[AgentNode]:
         rows = (
             self._db.table("nodes")
             .select(
                 "id, project_id, name, agent_type_id, tool_policy, kind,"
                 " position_x, position_y,"
-                " agent_types(system_prompt, model)"
+                " agent_types(slug, system_prompt, model)"
             )
             .eq("project_id", project_id)
             .eq("owner_id", self._user_id)
@@ -313,7 +331,7 @@ class ChatRepository:
             .select(
                 "id, project_id, name, agent_type_id, tool_policy,"
                 " position_x, position_y,"
-                " agent_types(system_prompt, model)"
+                " agent_types(slug, system_prompt, model)"
             )
             .eq("id", node_id)
             .eq("owner_id", self._user_id)
@@ -611,4 +629,5 @@ def _to_agent_node(row: dict[str, Any]) -> AgentNode:
         position_x=row.get("position_x") or 0.0,
         position_y=row.get("position_y") or 0.0,
         kind=row.get("kind", "agent"),
+        agent_slug=template.get("slug"),
     )
