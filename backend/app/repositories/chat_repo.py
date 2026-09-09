@@ -8,6 +8,7 @@ through ``anyio.to_thread.run_sync``.
 """
 
 from dataclasses import dataclass
+from datetime import UTC, datetime
 from typing import Any
 
 from postgrest.exceptions import APIError
@@ -22,6 +23,10 @@ DEFAULT_HISTORY_LIMIT = 50
 
 class DuplicateProjectName(Exception):
     """A user already has a project with this name."""
+
+
+class DuplicateEdge(Exception):
+    """An arrow of this kind already joins these two nodes."""
 
 
 @dataclass(frozen=True)
@@ -52,6 +57,17 @@ class AgentNode:
     system_prompt: str
     model: str
     tool_policy: str
+    position_x: float
+    position_y: float
+
+
+@dataclass(frozen=True)
+class InboundContext:
+    """A context summary and its source agent."""
+
+    source_node_id: str
+    source_node_name: str
+    summary: str
 
 
 @dataclass(frozen=True)
@@ -72,6 +88,33 @@ def _to_message(row: dict[str, Any]) -> Message:
         seq=row["seq"],
         status=row["status"],
         created_at=row["created_at"],
+    )
+
+
+@dataclass(frozen=True)
+class Edge:
+    """A connection between two nodes on the canvas."""
+
+    id: str
+    source_node_id: str
+    target_node_id: str
+    kind: str
+    summary: str | None
+    summarised_through_seq: int | None
+    summary_updated_at: str | None
+    summary_max_words: int
+
+
+def _to_edge(row: dict[str, Any]) -> Edge:
+    return Edge(
+        id=row["id"],
+        source_node_id=row["source_node_id"],
+        target_node_id=row["target_node_id"],
+        kind=row["kind"],
+        summary=row.get("summary"),
+        summarised_through_seq=row.get("summarised_through_seq"),
+        summary_updated_at=row.get("summary_updated_at"),
+        summary_max_words=row.get("summary_max_words", 200),
     )
 
 
@@ -252,6 +295,7 @@ class ChatRepository:
             self._db.table("nodes")
             .select(
                 "id, project_id, name, agent_type_id, tool_policy,"
+                " position_x, position_y,"
                 " agent_types(system_prompt, model)"
             )
             .eq("project_id", project_id)
@@ -268,6 +312,7 @@ class ChatRepository:
             self._db.table("nodes")
             .select(
                 "id, project_id, name, agent_type_id, tool_policy,"
+                " position_x, position_y,"
                 " agent_types(system_prompt, model)"
             )
             .eq("id", node_id)
@@ -277,6 +322,138 @@ class ChatRepository:
             .execute()
         ).data
         return _to_agent_node(rows[0]) if rows else None
+
+    # -- edges --------------------------------------------------------------
+
+    def create_edge(
+        self,
+        source_node_id: str,
+        target_node_id: str,
+        kind: str = "context",
+    ) -> Edge:
+        """
+        Connect two nodes on the canvas.
+        Returns the edge object.
+        """
+        try:
+            rows = (
+                self._db.table("edges")
+                .insert(
+                    {
+                        "owner_id": self._user_id,
+                        "source_node_id": source_node_id,
+                        "target_node_id": target_node_id,
+                        "kind": kind,
+                    }
+                )
+                .execute()
+            ).data
+        except APIError as exc:
+            if exc.code == _UNIQUE_VIOLATION:
+                raise DuplicateEdge(f"{source_node_id} -> {target_node_id} ({kind})") from exc
+            raise
+        return _to_edge(rows[0])
+
+    def list_edges(self, project_id: str) -> list[Edge]:
+        """Every edge on a project's canvas."""
+        rows = (
+            self._db.table("edges")
+            .select(
+                "id, source_node_id, target_node_id, kind, summary,"
+                " summarised_through_seq, summary_updated_at, summary_max_words"
+            )
+            .eq("project_id", project_id)
+            .eq("owner_id", self._user_id)
+            .execute()
+        ).data
+        return [_to_edge(r) for r in rows]
+
+    def get_edge(self, edge_id: str) -> Edge | None:
+        """One edge, if it belongs to the caller."""
+        rows = (
+            self._db.table("edges")
+            .select(
+                "id, source_node_id, target_node_id, kind, summary,"
+                " summarised_through_seq, summary_updated_at, summary_max_words"
+            )
+            .eq("id", edge_id)
+            .eq("owner_id", self._user_id)
+            .limit(1)
+            .execute()
+        ).data
+        return _to_edge(rows[0]) if rows else None
+
+    def update_edge_summary(self, edge_id: str, summary: str, through_seq: int) -> Edge | None:
+        """Store a freshly generated summary and how far up the source it covers."""
+        rows = (
+            self._db.table("edges")
+            .update(
+                {
+                    "summary": summary,
+                    "summarised_through_seq": through_seq,
+                    "summary_updated_at": datetime.now(UTC).isoformat(),
+                }
+            )
+            .eq("id", edge_id)
+            .eq("owner_id", self._user_id)
+            .eq("kind", "context")
+            .execute()
+        ).data
+        return _to_edge(rows[0]) if rows else None
+
+    def list_inbound_context(self, node_id: str) -> list[InboundContext]:
+        """Summaries feeding this node, each named by its source agent.
+
+        Joined by constraint name: `edges` has two foreign keys to `nodes`.
+        Edges with no summary are omitted.
+        """
+        rows = (
+            self._db.table("edges")
+            .select("source_node_id, summary, nodes!edges_source_node_id_fkey(name)")
+            .eq("target_node_id", node_id)
+            .eq("kind", "context")
+            .eq("owner_id", self._user_id)
+            .execute()
+        ).data
+        out = []
+        for r in rows:
+            summary = (r.get("summary") or "").strip()
+            if not summary:
+                continue
+            node = r.get("nodes") or {}
+            out.append(
+                InboundContext(
+                    source_node_id=r["source_node_id"],
+                    source_node_name=node.get("name", "another agent"),
+                    summary=summary,
+                )
+            )
+        return out
+
+    def delete_edge(self, edge_id: str) -> bool:
+        rows = (
+            self._db.table("edges")
+            .delete()
+            .eq("id", edge_id)
+            .eq("owner_id", self._user_id)
+            .execute()
+        ).data
+        return bool(rows)
+
+    def list_inbound_edges(self, node_id: str, kind: str) -> list[Edge]:
+        """Return all edges where this node is the target."""
+        rows = (
+            self._db.table("edges")
+            .select(
+                "id, source_node_id, target_node_id, kind, summary,"
+                " summarised_through_seq, summary_updated_at, summary_max_words"
+            )
+            .eq("target_node_id", node_id)
+            .eq("owner_id", self._user_id)
+            .eq("kind", kind)
+            .execute()
+        ).data
+        return [_to_edge(r) for r in rows]
 
     # -- conversations ------------------------------------------------------
 
@@ -321,9 +498,8 @@ class ChatRepository:
             if exc.code != _UNIQUE_VIOLATION:
                 raise
 
-        # Lost a race against another first message: read the winner.
         winner = self.get_conversation_for_node(node_id)
-        if winner is None:  # pragma: no cover - would mean the row vanished
+        if winner is None:
             raise RuntimeError("conversation could not be created or found")
         return winner
 
@@ -362,11 +538,8 @@ class ChatRepository:
         status: str = "complete",
         error: str | None = None,
     ) -> Message:
-        """Insert one message, returning the stored row.
-
-        ``seq`` and ``owner_id`` are assigned by database triggers. A
-        ``client_token`` collision means a resend or a replayed step, so the
-        existing row is returned instead of raising.
+        """
+        Insert one message, returning the stored row.
         """
         payload: dict[str, Any] = {
             "conversation_id": conversation_id,
@@ -409,6 +582,20 @@ class ChatRepository:
         ).data
         return _to_message(rows[0]) if rows else None
 
+    # -- stale context ---------------------------------------------------------
+
+    def get_conversation_head(self, node_id: str) -> int:
+        """Message count for this node's conversation. 0 when it has none."""
+        rows = (
+            self._db.table("conversations")
+            .select("message_count")
+            .eq("owner_id", self._user_id)
+            .eq("node_id", node_id)
+            .limit(1)
+            .execute()
+        ).data
+        return rows[0]["message_count"] if rows else 0
+
 
 def _to_agent_node(row: dict[str, Any]) -> AgentNode:
     """Flatten a node row joined to its agent_types template."""
@@ -421,4 +608,6 @@ def _to_agent_node(row: dict[str, Any]) -> AgentNode:
         system_prompt=template.get("system_prompt", ""),
         model=template.get("model", ""),
         tool_policy=row.get("tool_policy", "ask"),
+        position_x=row.get("position_x") or 0.0,
+        position_y=row.get("position_y") or 0.0,
     )

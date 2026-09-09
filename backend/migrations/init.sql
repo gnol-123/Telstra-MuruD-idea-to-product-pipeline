@@ -271,6 +271,9 @@ create table if not exists public.edges (
   summary                text,
   summarised_through_seq bigint,
   summary_updated_at     timestamptz,
+  -- How long the generated summary may be. Per edge, because a feeder agent
+  -- with a long history may warrant more room than a brief one.
+  summary_max_words      integer not null default 200,
 
   created_at     timestamptz not null default now(),
   updated_at     timestamptz not null default now(),
@@ -285,8 +288,29 @@ create table if not exists public.edges (
     check (source_node_id <> target_node_id),
   -- Summary is for context edges only.
   constraint edges_summary_only_on_context
-    check (kind = 'context' or (summary is null and summarised_through_seq is null))
+    check (kind = 'context' or (summary is null and summarised_through_seq is null)),
+  constraint edges_summary_max_words_sane
+    check (summary_max_words between 20 and 2000)
 );
+
+-- Added after the table first shipped; `create table if not exists` above is
+-- a no-op on an existing database.
+alter table public.edges
+  add column if not exists summary_max_words integer not null default 200;
+
+-- Inline constraints are skipped too when the table already exists, so add it
+-- separately. `not valid` would skip checking existing rows; we want them checked.
+do $$
+begin
+  if not exists (
+    select 1 from pg_constraint where conname = 'edges_summary_max_words_sane'
+  ) then
+    alter table public.edges add constraint edges_summary_max_words_sane
+      check (summary_max_words between 20 and 2000);
+  end if;
+end
+$$;
+
 
 -- Canvas load.
 create index if not exists edges_project_id_idx on public.edges (project_id);
