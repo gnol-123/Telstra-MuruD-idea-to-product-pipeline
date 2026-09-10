@@ -193,6 +193,29 @@ class ToolRepository:
         arguments: dict,
         status: str,
     ) -> str:
+        """Start (or restart) recording one call. Idempotent per
+        (conversation_id, tool_call_id).
+        """
+        existing = (
+            self._db.table("tool_calls")
+            .select("id")
+            .eq("conversation_id", conversation_id)
+            .eq("tool_call_id", tool_call_id)
+            .eq("owner_id", self._user_id)
+            .limit(1)
+            .execute()
+        ).data
+        if existing:
+            call_id = existing[0]["id"]
+            (
+                self._db.table("tool_calls")
+                .update({"status": status, "arguments": arguments})
+                .eq("id", call_id)
+                .eq("owner_id", self._user_id)
+                .execute()
+            )
+            return call_id
+
         rows = (
             self._db.table("tool_calls")
             .insert(
@@ -232,6 +255,53 @@ class ToolRepository:
             self._db.table("tool_calls")
             .update(payload)
             .eq("id", call_id)
+            .eq("owner_id", self._user_id)
+            .execute()
+        )
+
+    def get_call_by_tool_call_id(
+        self, conversation_id: str, tool_call_id: str
+    ) -> dict[str, Any] | None:
+        """Look up a tool_calls row by its model-assigned call id.
+
+        Used to check for an existing row before inserting one, since
+        (conversation_id, tool_call_id) is unique.
+        """
+        rows = (
+            self._db.table("tool_calls")
+            .select(_TOOL_CALL_COLUMNS)
+            .eq("conversation_id", conversation_id)
+            .eq("tool_call_id", tool_call_id)
+            .eq("owner_id", self._user_id)
+            .limit(1)
+            .execute()
+        ).data
+        return rows[0] if rows else None
+
+    def finish_call_by_tool_call_id(
+        self,
+        conversation_id: str,
+        tool_call_id: str,
+        *,
+        status: str,
+        result: str | None = None,
+        error: str | None = None,
+    ) -> None:
+        """Update a tool_calls row keyed by its model-assigned call id.
+
+        Used on resume: the internal row id from the original turn may not
+        be known after a backend restart, but tool_call_id always is.
+        """
+        payload: dict[str, Any] = {"status": status}
+        if result is not None:
+            payload["result"] = result
+        if error is not None:
+            payload["error"] = error
+        (
+            self._db.table("tool_calls")
+            .update(payload)
+            .eq("conversation_id", conversation_id)
+            .eq("tool_call_id", tool_call_id)
             .eq("owner_id", self._user_id)
             .execute()
         )
