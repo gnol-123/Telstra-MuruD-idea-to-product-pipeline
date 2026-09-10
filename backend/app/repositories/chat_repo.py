@@ -47,18 +47,22 @@ class Project:
 
 
 @dataclass(frozen=True)
-class AgentNode:
-    """A provisioned agent box, joined to the template it was built from."""
+class Node:
+    """One box on a canvas. Agent fields are empty for a tool node."""
 
     id: str
     project_id: str
     name: str
-    agent_type_id: str
+    agent_type_id: str | None
     system_prompt: str
     model: str
     tool_policy: str
     position_x: float
     position_y: float
+    kind: str = "agent"
+    # None for a tool node row (agent_types join is null), or if the join
+    # itself is absent from the select.
+    agent_slug: str | None = None
 
 
 @dataclass(frozen=True)
@@ -221,7 +225,7 @@ class ChatRepository:
 
     # -- nodes --------------------------------------------------------------
 
-    def create_agent_node(
+    def create_node(
         self,
         project_id: str,
         agent_type_id: str,
@@ -257,7 +261,7 @@ class ChatRepository:
         self._create_conversation(node_id, project_id)
         return node_id
 
-    def update_agent_node(self, node_id: str, changes: dict[str, Any]) -> AgentNode | None:
+    def update_node(self, node_id: str, changes: dict[str, Any]) -> Node | None:
         """Apply a partial update to an agent node.
         Only allowed fields are modifiable;
         {"name", "position_x", "position_y", "tool_policy"}
@@ -278,42 +282,44 @@ class ChatRepository:
         ).data
         return self.get_agent_node(node_id) if rows else None
 
-    def delete_agent_node(self, node_id: str) -> bool:
-        """Remove a node. Cascades to its conversation and transcript."""
+    def delete_node(self, node_id: str) -> bool:
+        """
+        Remove a node of any kind owned by the caller.
+        Does not filter by kind, blanket delete over
+        Every kind of node and cascades to any child objects e.g. conversations, secrets ...
+        """
         rows = (
             self._db.table("nodes")
             .delete()
             .eq("id", node_id)
             .eq("owner_id", self._user_id)
-            .eq("kind", "agent")
             .execute()
         ).data
         return bool(rows)
 
-    def list_agent_nodes(self, project_id: str) -> list[AgentNode]:
+    def list_nodes(self, project_id: str) -> list[Node]:
         rows = (
             self._db.table("nodes")
             .select(
-                "id, project_id, name, agent_type_id, tool_policy,"
+                "id, project_id, name, agent_type_id, tool_policy, kind,"
                 " position_x, position_y,"
-                " agent_types(system_prompt, model)"
+                " agent_types(slug, system_prompt, model)"
             )
             .eq("project_id", project_id)
             .eq("owner_id", self._user_id)
-            .eq("kind", "agent")
             .order("created_at")
             .execute()
         ).data
-        return [_to_agent_node(r) for r in rows]
+        return [_to_node(r) for r in rows]
 
-    def get_agent_node(self, node_id: str) -> AgentNode | None:
+    def get_agent_node(self, node_id: str) -> Node | None:
         """Load one agent box together with its template's prompt and model."""
         rows = (
             self._db.table("nodes")
             .select(
                 "id, project_id, name, agent_type_id, tool_policy,"
                 " position_x, position_y,"
-                " agent_types(system_prompt, model)"
+                " agent_types(slug, system_prompt, model)"
             )
             .eq("id", node_id)
             .eq("owner_id", self._user_id)
@@ -321,7 +327,7 @@ class ChatRepository:
             .limit(1)
             .execute()
         ).data
-        return _to_agent_node(rows[0]) if rows else None
+        return _to_node(rows[0]) if rows else None
 
     # -- edges --------------------------------------------------------------
 
@@ -430,6 +436,18 @@ class ChatRepository:
             )
         return out
 
+    def list_inbound_tool_node_ids(self, node_id: str) -> list[str]:
+        """Tool nodes whose arrows point at this agent."""
+        rows = (
+            self._db.table("edges")
+            .select("source_node_id")
+            .eq("target_node_id", node_id)
+            .eq("kind", "tool")
+            .eq("owner_id", self._user_id)
+            .execute()
+        ).data
+        return [r["source_node_id"] for r in rows]
+
     def delete_edge(self, edge_id: str) -> bool:
         rows = (
             self._db.table("edges")
@@ -439,23 +457,6 @@ class ChatRepository:
             .execute()
         ).data
         return bool(rows)
-
-    def list_inbound_edges(self, node_id: str, kind: str) -> list[Edge]:
-        """Return all edges where this node is the target."""
-        rows = (
-            self._db.table("edges")
-            .select(
-                "id, source_node_id, target_node_id, kind, summary,"
-                " summarised_through_seq, summary_updated_at, summary_max_words"
-            )
-            .eq("target_node_id", node_id)
-            .eq("owner_id", self._user_id)
-            .eq("kind", kind)
-            .execute()
-        ).data
-        return [_to_edge(r) for r in rows]
-
-    # -- conversations ------------------------------------------------------
 
     def get_conversation_for_node(self, node_id: str) -> str | None:
         rows = (
@@ -597,17 +598,19 @@ class ChatRepository:
         return rows[0]["message_count"] if rows else 0
 
 
-def _to_agent_node(row: dict[str, Any]) -> AgentNode:
+def _to_node(row: dict[str, Any]) -> Node:
     """Flatten a node row joined to its agent_types template."""
     template = row.get("agent_types") or {}
-    return AgentNode(
+    return Node(
         id=row["id"],
         project_id=row["project_id"],
         name=row["name"],
-        agent_type_id=row["agent_type_id"],
+        agent_type_id=row.get("agent_type_id"),
         system_prompt=template.get("system_prompt", ""),
         model=template.get("model", ""),
         tool_policy=row.get("tool_policy", "ask"),
         position_x=row.get("position_x") or 0.0,
         position_y=row.get("position_y") or 0.0,
+        kind=row.get("kind", "agent"),
+        agent_slug=template.get("slug"),
     )

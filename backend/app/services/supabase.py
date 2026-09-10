@@ -40,3 +40,18 @@ def get_user_client(jwt: str) -> Client:
         settings.supabase_key,
         options=ClientOptions(headers={"Authorization": f"Bearer {jwt}"}),
     )
+
+
+@lru_cache
+def get_service_client() -> Client:
+    """Build a Supabase client that bypasses RLS.
+
+    Used at one call site only: decrypting tool secrets, after the caller's
+    own client has already proved they own the node.
+
+    Secrets never reach DBOS checkpointing.
+    Never exposed during a request, only decrypted in memory and returned to the caller.
+    """
+    if not settings.supabase_url or not settings.supabase_service_key:
+        raise RuntimeError("SUPABASE_URL and SUPABASE_SERVICE_KEY must be set to use tool secrets.")
+    return create_client(settings.supabase_url, settings.supabase_service_key)

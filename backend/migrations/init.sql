@@ -224,15 +224,14 @@ create trigger nodes_sync_owner_trg
 -- node_secrets: tool credentials, deliberately not on the node row so a
 -- select on nodes can never leak an API key.
 --
--- NOTE: `value` is stored as supplied. Encrypting at rest (pgsodium / Supabase
--- Vault) is a deliberate follow-up. 
+-- NOTE: secret values live in Supabase Vault, not on this table. Read and
+-- write them through set_node_secret / get_node_secret in tools.sql.
 -- ---------------------------------------------------------------------------
 create table if not exists public.node_secrets (
   id         uuid primary key default gen_random_uuid(),
   node_id    uuid not null references public.nodes (id)  on delete cascade,
   owner_id   uuid not null references auth.users (id)    on delete cascade,
   key        text not null,
-  value      text not null,
   created_at timestamptz not null default now(),
   updated_at timestamptz not null default now(),
   constraint node_secrets_node_key_uniq unique (node_id, key),

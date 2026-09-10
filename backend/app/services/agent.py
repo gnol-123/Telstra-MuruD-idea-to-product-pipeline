@@ -8,7 +8,7 @@ including ``/health``, when the API key is unset.
 
 from functools import lru_cache
 
-from pydantic_ai import Agent
+from pydantic_ai import Agent, DeferredToolRequests
 from pydantic_ai.messages import ModelMessage, ModelRequest, ModelResponse, TextPart, UserPromptPart
 from pydantic_ai.models.google import GoogleModel
 from pydantic_ai.providers.google import GoogleProvider
@@ -18,15 +18,21 @@ from app.repositories.chat_repo import Message
 
 
 @lru_cache(maxsize=32)
-def get_agent_for(system_prompt: str, model: str) -> Agent[None, str]:
+def get_agent_for(system_prompt: str, model: str) -> Agent[None, str | DeferredToolRequests]:
     """Return an agent for one catalog entry.
 
     Conversation history is passed per call via ``Agent.run(message_history=...)``
     Tools also passed per call via ``Agent.run(toolsets=...)``.
+
+    ``output_type`` includes ``DeferredToolRequests`` so a run pauses for tool
+    approval instead of raising: without it, a deferred tool call makes
+    pydantic-ai raise UserError rather than returning it as output. This is a
+    constant added to every agent, so it does not change the cache key.
     """
     return Agent(
         GoogleModel(model, provider=GoogleProvider(api_key=settings.gemini_api_key)),
         system_prompt=system_prompt,
+        output_type=[str, DeferredToolRequests],
     )
 
 
