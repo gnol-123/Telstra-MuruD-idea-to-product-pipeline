@@ -47,8 +47,8 @@ class Project:
 
 
 @dataclass(frozen=True)
-class AgentNode:
-    """A provisioned agent box, joined to the template it was built from."""
+class Node:
+    """One box on a canvas. Agent fields are empty for a tool node."""
 
     id: str
     project_id: str
@@ -225,7 +225,7 @@ class ChatRepository:
 
     # -- nodes --------------------------------------------------------------
 
-    def create_agent_node(
+    def create_node(
         self,
         project_id: str,
         agent_type_id: str,
@@ -261,7 +261,7 @@ class ChatRepository:
         self._create_conversation(node_id, project_id)
         return node_id
 
-    def update_agent_node(self, node_id: str, changes: dict[str, Any]) -> AgentNode | None:
+    def update_node(self, node_id: str, changes: dict[str, Any]) -> Node | None:
         """Apply a partial update to an agent node.
         Only allowed fields are modifiable;
         {"name", "position_x", "position_y", "tool_policy"}
@@ -282,18 +282,6 @@ class ChatRepository:
         ).data
         return self.get_agent_node(node_id) if rows else None
 
-    def delete_agent_node(self, node_id: str) -> bool:
-        """Remove a node. Cascades to its conversation and transcript."""
-        rows = (
-            self._db.table("nodes")
-            .delete()
-            .eq("id", node_id)
-            .eq("owner_id", self._user_id)
-            .eq("kind", "agent")
-            .execute()
-        ).data
-        return bool(rows)
-
     def delete_node(self, node_id: str) -> bool:
         """
         Remove a node of any kind owned by the caller.
@@ -309,7 +297,7 @@ class ChatRepository:
         ).data
         return bool(rows)
 
-    def list_agent_nodes(self, project_id: str) -> list[AgentNode]:
+    def list_nodes(self, project_id: str) -> list[Node]:
         rows = (
             self._db.table("nodes")
             .select(
@@ -322,9 +310,9 @@ class ChatRepository:
             .order("created_at")
             .execute()
         ).data
-        return [_to_agent_node(r) for r in rows]
+        return [_to_node(r) for r in rows]
 
-    def get_agent_node(self, node_id: str) -> AgentNode | None:
+    def get_agent_node(self, node_id: str) -> Node | None:
         """Load one agent box together with its template's prompt and model."""
         rows = (
             self._db.table("nodes")
@@ -339,7 +327,7 @@ class ChatRepository:
             .limit(1)
             .execute()
         ).data
-        return _to_agent_node(rows[0]) if rows else None
+        return _to_node(rows[0]) if rows else None
 
     # -- edges --------------------------------------------------------------
 
@@ -469,23 +457,6 @@ class ChatRepository:
             .execute()
         ).data
         return bool(rows)
-
-    def list_inbound_edges(self, node_id: str, kind: str) -> list[Edge]:
-        """Return all edges where this node is the target."""
-        rows = (
-            self._db.table("edges")
-            .select(
-                "id, source_node_id, target_node_id, kind, summary,"
-                " summarised_through_seq, summary_updated_at, summary_max_words"
-            )
-            .eq("target_node_id", node_id)
-            .eq("owner_id", self._user_id)
-            .eq("kind", kind)
-            .execute()
-        ).data
-        return [_to_edge(r) for r in rows]
-
-    # -- conversations ------------------------------------------------------
 
     def get_conversation_for_node(self, node_id: str) -> str | None:
         rows = (
@@ -627,10 +598,10 @@ class ChatRepository:
         return rows[0]["message_count"] if rows else 0
 
 
-def _to_agent_node(row: dict[str, Any]) -> AgentNode:
+def _to_node(row: dict[str, Any]) -> Node:
     """Flatten a node row joined to its agent_types template."""
     template = row.get("agent_types") or {}
-    return AgentNode(
+    return Node(
         id=row["id"],
         project_id=row["project_id"],
         name=row["name"],

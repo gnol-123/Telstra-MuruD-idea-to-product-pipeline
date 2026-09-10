@@ -10,11 +10,11 @@ from postgrest.exceptions import APIError
 from pydantic import BaseModel, Field
 
 from app.repositories.chat_repo import (
-    AgentNode,
     AgentType,
     DuplicateEdge,
     DuplicateProjectName,
     Edge,
+    Node,
     Project,
 )
 from app.repositories.tool_repo import ToolNode, ToolType, load_node_secrets
@@ -117,7 +117,7 @@ class NodeResponse(BaseModel):
     kind: str = "agent"
 
     @classmethod
-    def of(cls, n: AgentNode, agent_slug: str | None = None) -> "NodeResponse":
+    def of(cls, n: Node, agent_slug: str | None = None) -> "NodeResponse":
         """agent_slug defaults to the node's join; pass it on create, before the re-read."""
         return cls(
             id=UUID(n.id),
@@ -242,7 +242,7 @@ async def list_nodes(project_id: UUID, repo: ChatRepo) -> list[NodeResponse]:
     if project is None:
         raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Project not found")
 
-    nodes = await to_thread.run_sync(repo.list_agent_nodes, str(project_id))
+    nodes = await to_thread.run_sync(repo.list_nodes, str(project_id))
     return [NodeResponse.of(n) for n in nodes]
 
 
@@ -255,7 +255,7 @@ async def update_node(
 ) -> NodeResponse:
     """Move, rename, or set the tool policy. An empty body is a no-op."""
     node = await to_thread.run_sync(
-        lambda: repo.update_agent_node(str(node_id), req.model_dump(exclude_none=True))
+        lambda: repo.update_node(str(node_id), req.model_dump(exclude_none=True))
     )
     if node is None:
         raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Agent not found")
