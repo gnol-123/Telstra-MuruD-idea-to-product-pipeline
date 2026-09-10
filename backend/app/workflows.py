@@ -12,6 +12,8 @@ from collections.abc import AsyncIterator
 from dataclasses import dataclass
 
 from dbos import DBOS
+from pydantic_ai import DeferredToolRequests, DeferredToolResults
+from pydantic_ai.messages import ModelMessage
 
 from app.repositories.chat_repo import ChatRepository, InboundContext, Message
 from app.services.agent import get_agent_for, to_model_messages
@@ -28,20 +30,34 @@ class AgentTurn:
     output_tokens: int | None = None
     reasoning_tokens: int | None = None
     error: str | None = None
+    # Set when the run paused for approval. Output is empty; do not persist it.
+    pending: DeferredToolRequests | None = None
+    # History at the pause, for parking and resuming. None on a normal turn.
+    all_messages: list[ModelMessage] | None = None
 
     @property
     def failed(self) -> bool:
         return self.error is not None
 
+    @property
+    def paused(self) -> bool:
+        return self.pending is not None
+
 
 @dataclass
 class ChatTurn:
-    """Result of user prompt and LLM reply."""
+    """Result of user prompt and LLM reply.
+
+    ``assistant_message`` is None when the turn paused for approval: no
+    reply was produced, so nothing was persisted for it.
+    """
 
     conversation_id: str
     user_message: Message
-    assistant_message: Message
+    assistant_message: Message | None
     output: str
+    pending: DeferredToolRequests | None = None
+    all_messages: list[ModelMessage] | None = None
 
 
 def build_context_instructions(context: list[InboundContext]) -> str | None:
@@ -73,6 +89,42 @@ async def call_agent(
         instructions=instructions,
         toolsets=toolsets or None,
     )
+    if isinstance(result.output, DeferredToolRequests):
+        return AgentTurn(
+            output="",
+            model=model,
+            pending=result.output,
+            all_messages=result.all_messages(),
+        )
+    return _turn_from(result.output, model, result.usage)
+
+
+async def resume_agent(
+    system_prompt: str,
+    model: str,
+    message_history: list[ModelMessage],
+    deferred_tool_results: DeferredToolResults,
+    toolsets: list | None = None,
+) -> AgentTurn:
+    """Resume a run that paused for tool approval. Writes nothing.
+
+    No ``user_prompt``: this continues the parked run rather than starting a
+    new one. A resumed run may pause again, e.g. a second approval-required
+    tool; that shows up the same way as the first pause, via ``AgentTurn.pending``.
+    """
+    agent = get_agent_for(system_prompt, model)
+    result = await agent.run(
+        message_history=message_history,
+        deferred_tool_results=deferred_tool_results,
+        toolsets=toolsets or None,
+    )
+    if isinstance(result.output, DeferredToolRequests):
+        return AgentTurn(
+            output="",
+            model=model,
+            pending=result.output,
+            all_messages=result.all_messages(),
+        )
     return _turn_from(result.output, model, result.usage)
 
 
@@ -130,8 +182,7 @@ async def run_turn(
     )
 
     use_durable = durable and not toolsets
-    # Failures are recorded on the transcript, not raised: the user row is
-    # already stored, and an orphan is worse than a visible failure.
+    # Failures go on the transcript, not raised: an orphan user row is worse.
     try:
         if use_durable:
             turn = await run_agent_step(system_prompt, model, prompt, history, instructions)
@@ -139,6 +190,17 @@ async def run_turn(
             turn = await call_agent(system_prompt, model, prompt, history, instructions, toolsets)
     except Exception as exc:
         turn = AgentTurn(output="", model=model, error=str(exc))
+
+    if turn.paused:
+        # Paused, no reply. The router parks the history and records the calls.
+        return ChatTurn(
+            conversation_id=conversation_id,
+            user_message=user_message,
+            assistant_message=None,
+            output="",
+            pending=turn.pending,
+            all_messages=turn.all_messages,
+        )
 
     assistant_message = await to_thread.run_sync(
         lambda: repo.add_message(
@@ -175,7 +237,13 @@ async def stream_turn(
 ) -> AsyncIterator[tuple[str, dict]]:
     """Stream one turn, yielding ``(event, payload)`` pairs.
 
-    Events: ``start``, ``chunk``, ``done``, ``error``.
+    Events: ``start``, ``chunk``, ``done``, ``error``, ``paused``.
+
+    ``paused`` replaces ``done`` when the run stops for tool approval instead
+    of answering: the payload carries ``pending`` (the ``DeferredToolRequests``)
+    and ``all_messages`` (the history to park), and no assistant message is
+    persisted. The chat router turns this into the ``approval_required`` SSE
+    event and the pending-run bookkeeping; nothing here talks to ``tool_repo``.
 
     Same write order as ``run_turn``, user row first and assistant row last, so
     idempotency and seq ordering match. Never checkpointed: DBOS records a
@@ -183,6 +251,7 @@ async def stream_turn(
     persisted once the stream drains.
     """
     from anyio import to_thread
+    from pydantic_ai.exceptions import UserError
 
     history = await to_thread.run_sync(repo.list_messages, conversation_id)
     user_message = await to_thread.run_sync(
@@ -206,14 +275,21 @@ async def stream_turn(
             instructions=instructions,
             toolsets=toolsets or None,
         ) as result:
-            async for text in result.stream_text(delta=True):
-                chunks.append(text)
-                yield "chunk", {"text": text}
+            try:
+                async for text in result.stream_text(delta=True):
+                    chunks.append(text)
+                    yield "chunk", {"text": text}
+            except UserError:
+                # Deferred approval, not text. Falls through to get_output().
+                pass
+            output = await result.get_output()
+            if isinstance(output, DeferredToolRequests):
+                yield "paused", {"pending": output, "all_messages": result.all_messages()}
+                return
             # Only valid once the stream has drained.
-            turn = _turn_from("".join(chunks), model, result.usage)
+            turn = _turn_from(output if output else "".join(chunks), model, result.usage)
     except Exception as exc:
-        # Headers are already sent, so this cannot be a 4xx. Emit an event and
-        # still record the failure on the transcript.
+        # Headers are sent, so no 4xx. Emit an event and record the failure.
         turn = AgentTurn(output="".join(chunks), model=model, error=str(exc))
         yield "error", {"error": str(exc)}
 
