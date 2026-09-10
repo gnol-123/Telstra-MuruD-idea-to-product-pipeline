@@ -117,7 +117,7 @@ conversation.
 [ { "id": "uuid", "slug": "market_research", "name": "Market Research" } ]
 ```
 Seeded: `market_research`, `project_scoping`, `coding`. Adding one is a SQL
-insert, not a deploy — see `backend/migrations/README.md`.
+insert, not a deploy. See `backend/migrations/README.md`.
 
 ### `POST /projects`
 ```json
@@ -134,6 +134,9 @@ conversation and message in the project is deleted with it. `404` if the
 project is not yours or is already gone.
 
 ### `POST /projects/{project_id}/nodes`
+
+`kind` is `"agent"` (default) or `"tool"`. Agent shape:
+
 ```json
 {
   "agent_slug": "market_research",
@@ -151,19 +154,39 @@ Only `agent_slug` is required; `name` defaults to the template's name.
   "project_id": "uuid",
   "name": "Market Research (EU)",
   "agent_slug": "market_research",
-  "tool_policy": "ask"
+  "tool_policy": "ask",
+  "position_x": 240,
+  "position_y": 120,
+  "kind": "agent"
 }
 ```
 
 The node's conversation is created at the same time, so it can be chatted with
-immediately. **Several nodes may share one `agent_slug`** — that is how a
+immediately. **Several nodes may share one `agent_slug`**: that is how a
 project holds a team rather than one agent of each kind.
 
 `404` if the project is not yours or the slug is unknown. A missing project
 returns `404` rather than `403`, since `403` would confirm it exists.
 
+For `kind: "tool"`, see the Tools section below.
+
 ### `GET /projects/{project_id}/nodes`
-→ `200`, a list of the above. `404` if the project is not yours.
+→ `200`, a list of nodes, **agents and tools mixed together**. Tell them apart
+by `kind`.
+
+```json
+[
+  { "id": "uuid", "project_id": "uuid", "name": "Market Research (EU)",
+    "agent_slug": "market_research", "tool_policy": "ask",
+    "position_x": 240, "position_y": 120, "kind": "agent" },
+  { "id": "uuid", "project_id": "uuid", "name": "GitHub",
+    "tool_slug": "github", "config": {"url": "https://api.githubcopilot.com/mcp/"},
+    "status": "ready", "status_detail": null, "secrets_set": ["auth_token"],
+    "kind": "tool" }
+]
+```
+
+`404` if the project is not yours.
 
 ### `PATCH /projects/{project_id}/nodes/{node_id}`
 
@@ -203,14 +226,18 @@ An `agent -> agent` arrow is `kind: "context"`. It carries a **summary** of the
 source agent's conversation, injected into the target agent's prompt. Passing
 whole transcripts would exhaust the token budget, so the summary is the payload.
 
-`tool` and `environment` kinds exist in the schema but are not yet accepted:
-there are no tool or environment nodes to point at.
+A `tool -> agent` arrow is `kind: "tool"`: it makes the tool node's toolset
+callable by that agent. Direction is fixed and enforced twice, by the router
+(`422`) and by a database trigger, so a tool edge can never be drawn backwards.
+
+`environment` exists in the schema but is not yet accepted: there are no
+environment nodes to point at.
 
 ### `POST /projects/{project_id}/edges`
 ```json
 { "source_node_id": "uuid", "target_node_id": "uuid", "kind": "context" }
 ```
-`kind` defaults to `"context"`.
+`kind` defaults to `"context"`. Use `"tool"` for a tool node to agent link.
 
 → `201`
 ```json
@@ -233,7 +260,7 @@ three endpoints below return this same shape.
 |---|---|
 | That arrow already exists | `409` |
 | A node linked to itself, or the two nodes are in different projects | `422` |
-| `kind` other than `"context"` | `422` |
+| Wrong node kinds for the edge kind (e.g. `context` between a tool and an agent) | `422` |
 | Project or either node not yours | `404` |
 
 The same two nodes may be joined by more than one arrow, as long as the kinds
@@ -338,12 +365,137 @@ There is no endpoint to change it yet; set it in SQL.
 
 ---
 
+## Tools
+
+A tool node is a box that gives an agent a capability: a skill's instructions,
+an API call, or an MCP server's toolset. Draw a `tool` edge from it to an agent
+to make it callable there.
+
+| Method | Path | Auth | Description |
+|---|---|---|---|
+| `GET` | `/tool-types` | **yes** | The catalog of tool templates |
+| `POST` | `/projects/{project_id}/nodes` | **yes** | Provision a tool node (`kind: "tool"`) |
+| `POST` | `/projects/{project_id}/nodes/{node_id}/verify` | **yes** | Re-run the connectivity check |
+| `GET` | `/projects/{project_id}/nodes/{node_id}/tool-calls` | **yes** | Audit log for one tool node |
+
+### `GET /tool-types`
+→ `200`
+```json
+[
+  {
+    "id": "uuid",
+    "slug": "github",
+    "name": "GitHub",
+    "description": "Issues, pull requests, code search and repository files.",
+    "config_schema": {
+      "default_url": "https://api.githubcopilot.com/mcp/",
+      "fields": [
+        { "key": "auth_token", "label": "Personal access token", "type": "password",
+          "required": true,
+          "help": "github.com > Settings > Developer settings > Personal access tokens" }
+      ]
+    },
+    "secret_fields": ["auth_token"]
+  }
+]
+```
+
+**`config_schema.fields` drives the config form**: key, label, input type, and
+whether it's required. `secret_fields` marks which of those keys are secrets.
+
+### `POST /projects/{project_id}/nodes` (`kind: "tool"`)
+```json
+{
+  "kind": "tool",
+  "tool_slug": "github",
+  "config": { "auth_token": "ghp_..." },
+  "name": "GitHub"
+}
+```
+
+- Any key in `secret_fields` is written to Supabase Vault, not `nodes.config`,
+  and is **never returned by any endpoint**.
+- A key that is in neither `config_schema.fields` nor `secret_fields` is `422`.
+- If the catalog row has a non-empty `default_url` and the request doesn't set
+  `url`, the default is copied into the node's own config at creation. The
+  node stays correct even if the catalog's default later changes.
+- Verify runs automatically as part of creation.
+
+→ `201`
+```json
+{
+  "id": "uuid",
+  "project_id": "uuid",
+  "name": "GitHub",
+  "kind": "tool",
+  "tool_slug": "github",
+  "config": { "url": "https://api.githubcopilot.com/mcp/" },
+  "status": "ready",
+  "status_detail": null,
+  "secrets_set": ["auth_token"]
+}
+```
+
+`404` if the project is not yours or `tool_slug` is unknown. `422` if
+`tool_slug` is missing, or for an unknown config key.
+
+### `POST /projects/{project_id}/nodes/{node_id}/verify`
+
+Re-runs the tool's readiness check and persists `status` and `status_detail`.
+For an MCP-backed tool (`mcp_server`, `github`, `obsidian`, `gmail`), a
+successful check also caches the server's tool list into
+`config.discovered_tools`.
+
+**Never raises.** A bad key, an unreachable server, anything: the response is
+still `200`, with `status: "error"` and the reason in `status_detail`.
+
+→ `200`, same shape as node creation. `404` if the node is not yours.
+
+### `GET /projects/{project_id}/nodes/{node_id}/tool-calls`
+
+The audit log for one tool node, newest first.
+
+→ `200`
+```json
+[
+  {
+    "id": "uuid", "project_id": "uuid", "conversation_id": "uuid",
+    "agent_node_id": "uuid", "tool_node_id": "uuid",
+    "tool_call_id": "call_abc123", "tool_name": "search_issues",
+    "arguments": { "query": "is:open" },
+    "status": "ok", "result": "...", "error": null,
+    "duration_ms": 412,
+    "created_at": "2026-09-08T10:15:00Z", "updated_at": "2026-09-08T10:15:01Z"
+  }
+]
+```
+
+`status` is one of `pending_approval`, `running`, `ok`, `error`, `denied`.
+`?limit=` caps the page, default 50, max 200. `404` if the node is not yours.
+
+### The seeded tool types
+
+| Slug | Needs from the user |
+|---|---|
+| `brave_search` | An API key |
+| `skill` | Just instruction text, no credentials |
+| `mcp_server` | A server URL, and an optional auth token |
+| `github` | Just a personal access token: the endpoint is a real, public default |
+| `obsidian` | **No public endpoint.** Obsidian's MCP server runs locally over stdio; the user must run a bridge and paste its HTTP URL themselves |
+| `gmail` | **No public endpoint.** Needs a locally-run bridge holding Google OAuth credentials; same deal as Obsidian |
+
+A node for `obsidian` or `gmail` with no bridge running stays in
+`status: "error"` until one is reachable at the configured URL.
+
+---
+
 ## Chat
 
 | Method | Path | Auth | Description |
 |---|---|---|---|
 | `POST` | `/chat` | **yes** | Send a message to an agent node |
 | `POST` | `/chat/stream` | **yes** | The same, streamed as server-sent events |
+| `POST` | `/chat/resume` | **yes** | Continue a turn paused for tool approval |
 
 ### `POST /chat`
 ```json
@@ -411,6 +563,78 @@ ordering and history replay are unchanged. Unlike `/chat` it is **not**
 DBOS-checkpointed: a step checkpoints a return value and a stream has none. The
 assembled text is written once the stream drains.
 
+### Approval
+
+When a node's `tool_policy` is `"ask"`, a tool call the agent wants to make
+pauses the turn instead of running it.
+
+**`POST /chat` returns `ApprovalRequiredResponse` instead of `ChatResponse`.**
+A client tells them apart by the `paused` field, present and `true` only on
+the paused shape:
+
+```json
+// ChatResponse
+{
+  "node_id": "uuid", "conversation_id": "uuid", "output": "...",
+  "user_message": { "...": "..." }, "assistant_message": { "...": "..." }
+}
+```
+```json
+// ApprovalRequiredResponse
+{
+  "paused": true,
+  "node_id": "uuid",
+  "conversation_id": "uuid",
+  "pending_calls": [
+    { "tool_call_id": "call_abc123", "tool_name": "delete_issue",
+      "arguments": { "issue_number": 4 } }
+  ]
+}
+```
+
+**`/chat/stream` emits `event: approval_required` and then ends the stream
+with no `done` event.** This is the thing a frontend will break on if it
+assumes every stream ends in `done`:
+
+```
+event: start              data: {"conversation_id": "...", "user_message": {...}}
+event: chunk               data: {"text": "I'll need to"}
+event: approval_required   data: {"conversation_id": "...", "pending_calls": [...]}
+```
+
+### `POST /chat/resume`
+
+Continues a paused turn. There is **no new user prompt**, only decisions on
+the pending calls:
+
+```json
+{
+  "node_id": "uuid",
+  "approvals": { "call_abc123": true, "call_def456": false }
+}
+```
+
+→ `200`, `ResumeResponse` (**no `user_message` field**: the prompt was already
+persisted on the turn that paused):
+```json
+{
+  "node_id": "uuid",
+  "conversation_id": "uuid",
+  "output": "...",
+  "assistant_message": { "id": "uuid", "role": "assistant", "content": "...",
+    "seq": 3, "status": "complete", "created_at": "..." }
+}
+```
+
+Denied calls are marked `status: "denied"` in the tool-calls log rather than
+run. `409` if there is nothing parked for that node, or the pause is more than
+an hour old. `422` if an `approvals` key isn't a pending `tool_call_id` for
+that conversation.
+
+**A resumed run can pause again** (another `tool_policy: "ask"` call further
+in the same turn): the response is then `ApprovalRequiredResponse`, same shape
+as above, and resume again.
+
 ---
 
 ## Status codes
@@ -423,6 +647,7 @@ assembled text is written once the stream drains.
 | `204` | No content (logout) |
 | `401` | Missing, invalid or expired token; bad credentials |
 | `404` | Not found, **or** not yours |
+| `409` | Conflict: duplicate edge or project name, no pending approval, or approval expired |
 | `422` | Request body failed validation |
 | `500` | Server misconfiguration, e.g. `OAUTH_REDIRECT_URL` unset |
 
@@ -437,8 +662,6 @@ The schema supports these; the API does not expose them:
 
 - **The retrieval tool.** A context edge gives the downstream agent a summary,
   but no way to ask the upstream agent for detail the summary lost.
-- Tool and environment nodes, and tool credential configuration
+- Environment nodes
 - Changing an edge's `summary_max_words` over the API
 - Listing a conversation's history without sending a message
-- Node positions are stored but not returned by `GET .../nodes`, so a canvas
-  cannot yet restore its layout
