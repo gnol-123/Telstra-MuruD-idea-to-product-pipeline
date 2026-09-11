@@ -395,13 +395,43 @@ to make it callable there.
           "help": "github.com > Settings > Developer settings > Personal access tokens" }
       ]
     },
-    "secret_fields": ["auth_token"]
+    "secret_fields": ["auth_token"],
+    "auth_kind": "token"
   }
 ]
 ```
 
 **`config_schema.fields` drives the config form**: key, label, input type, and
 whether it's required. `secret_fields` marks which of those keys are secrets.
+
+**`auth_kind` decides how the client collects credentials.** `token` renders the
+fields above. `oauth2` renders a Connect button instead: the user types nothing,
+and `config_schema.fields` is empty. Currently only `gmail` is `oauth2`.
+
+### `POST /projects/{project_id}/nodes/{node_id}/authorize`
+
+Only for `auth_kind: "oauth2"` nodes. Returns a consent URL for the client to
+open. It does not redirect.
+
+→ `200`
+```json
+{ "url": "https://accounts.google.com/o/oauth2/v2/auth?..." }
+```
+
+`404` if the node is not yours. `422` if the tool type is not `oauth2`.
+
+### `GET /oauth/callback`
+
+Google redirects the browser here after consent. **Unauthenticated**: the user
+arrives from Google with no bearer token, so a signed `state` parameter is the
+only trust. It carries the node id and owner id, is signed with
+`OAUTH_STATE_SECRET`, and expires in ten minutes.
+
+The backend exchanges the code server-side, so the client secret never reaches
+the browser, stores the refresh token in Supabase Vault, runs verify, and then
+`302`s to `FRONTEND_URL` with an `oauth=connected` or `oauth=error` query param.
+
+`400` for a missing, malformed, tampered or expired state.
 
 ### `POST /projects/{project_id}/nodes` (`kind: "tool"`)
 ```json
