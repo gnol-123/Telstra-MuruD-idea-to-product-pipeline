@@ -233,6 +233,13 @@ callable by that agent. Direction is fixed and enforced twice, by the router
 `environment` exists in the schema but is not yet accepted: there are no
 environment nodes to point at.
 
+| Method | Path | Auth | Description |
+|---|---|---|---|
+| `POST` | `/projects/{project_id}/edges` | **yes** | Draw an arrow between two nodes |
+| `GET` | `/projects/{project_id}/edges` | **yes** | List a project's arrows, with staleness |
+| `POST` | `/projects/{project_id}/edges/{edge_id}/refresh` | **yes** | Regenerate a context edge's summary |
+| `DELETE` | `/projects/{project_id}/edges/{edge_id}` | **yes** | Remove an arrow |
+
 ### `POST /projects/{project_id}/edges`
 ```json
 { "source_node_id": "uuid", "target_node_id": "uuid", "kind": "context" }
