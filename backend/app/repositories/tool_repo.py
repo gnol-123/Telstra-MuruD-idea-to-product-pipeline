@@ -10,7 +10,7 @@ from typing import Any
 
 from app.services.supabase import get_service_client
 
-_TOOL_TYPE_COLUMNS = "id, slug, name, description, config_schema, secret_fields"
+_TOOL_TYPE_COLUMNS = "id, slug, name, description, config_schema, secret_fields, auth_kind"
 _TOOL_NODE_COLUMNS = (
     "id, project_id, name, tool_type_id, config, status, status_detail, tool_types(slug)"
 )
@@ -28,6 +28,7 @@ class ToolType:
     description: str | None
     config_schema: dict[str, Any]
     secret_fields: list[str]
+    auth_kind: str = "token"
 
 
 @dataclass(frozen=True)
@@ -50,6 +51,7 @@ def _to_tool_type(row: dict[str, Any]) -> ToolType:
         description=row.get("description"),
         config_schema=row.get("config_schema") or {},
         secret_fields=row.get("secret_fields") or [],
+        auth_kind=row.get("auth_kind") or "token",
     )
 
 
@@ -353,6 +355,65 @@ class ToolRepository:
         return payload, datetime.fromisoformat(at)
 
 
+def get_tool_node_for_owner(node_id: str, owner_id: str) -> ToolNode | None:
+    """Read a tool node with no caller JWT, for the oauth callback.
+
+    Service-role client, filtered by the owner_id a verified signed state
+    already proved. Same shape as ToolRepository.get_tool_node, minus the
+    caller-scoped client.
+    """
+    client = get_service_client()
+    rows = (
+        client.table("nodes")
+        .select(_TOOL_NODE_COLUMNS)
+        .eq("id", node_id)
+        .eq("owner_id", owner_id)
+        .eq("kind", "tool")
+        .limit(1)
+        .execute()
+    ).data
+    return _to_tool_node(rows[0]) if rows else None
+
+
+def secret_keys_for_owner(node_id: str, owner_id: str) -> list[str]:
+    """Secret key names with no caller JWT, for the oauth callback."""
+    client = get_service_client()
+    rows = (
+        client.table("node_secrets")
+        .select("key")
+        .eq("node_id", node_id)
+        .eq("owner_id", owner_id)
+        .execute()
+    ).data
+    return [r["key"] for r in rows]
+
+
+def set_node_status_for_owner(node_id: str, owner_id: str, status: str, detail: str | None) -> None:
+    """Write node status with no caller JWT, for the oauth callback."""
+    client = get_service_client()
+    (
+        client.table("nodes")
+        .update({"status": status, "status_detail": detail})
+        .eq("id", node_id)
+        .eq("owner_id", owner_id)
+        .eq("kind", "tool")
+        .execute()
+    )
+
+
+def set_node_config_for_owner(node_id: str, owner_id: str, config: dict[str, Any]) -> None:
+    """Write node config with no caller JWT, for the oauth callback."""
+    client = get_service_client()
+    (
+        client.table("nodes")
+        .update({"config": config})
+        .eq("id", node_id)
+        .eq("owner_id", owner_id)
+        .eq("kind", "tool")
+        .execute()
+    )
+
+
 def load_node_secrets(node_id: str, keys: list[str]) -> dict[str, str]:
     """Decrypt a tool node's secrets.
 
@@ -383,3 +444,18 @@ def load_node_secrets(node_id: str, keys: list[str]) -> dict[str, str]:
         if value:
             out[key] = value
     return out
+
+
+def set_node_secret_as(node_id: str, owner_id: str, key: str, value: str) -> None:
+    """Write a node secret with no caller JWT, for the oauth callback.
+
+    Uses the service-role client against set_node_secret_as, the twin of
+    set_node_secret that checks the given owner_id instead of auth.uid().
+    Call only after verifying a signed state proves owner_id, never with a
+    caller-supplied owner_id.
+    """
+    client = get_service_client()
+    client.rpc(
+        "set_node_secret_as",
+        {"p_node_id": node_id, "p_owner_id": owner_id, "p_key": key, "p_value": value},
+    ).execute()

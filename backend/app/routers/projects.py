@@ -21,6 +21,7 @@ from app.repositories.tool_repo import ToolNode, ToolType, load_node_secrets
 from app.routers.deps import ChatRepo, ToolRepo
 from app.services.agent import summarise_conversation
 from app.tools.base import ToolContext
+from app.tools.oauth_refresh import TokenExchangeError, with_access_token
 from app.tools.registry import get_spec
 
 router = APIRouter(tags=["projects"])
@@ -138,6 +139,8 @@ class ToolTypeResponse(BaseModel):
     description: str | None = None
     config_schema: dict[str, Any]
     secret_fields: list[str]
+    # token: render a password field. oauth2: render a Connect button.
+    auth_kind: str = "token"
 
     @classmethod
     def of(cls, t: ToolType) -> "ToolTypeResponse":
@@ -148,6 +151,7 @@ class ToolTypeResponse(BaseModel):
             description=t.description,
             config_schema=t.config_schema,
             secret_fields=t.secret_fields,
+            auth_kind=t.auth_kind,
         )
 
 
@@ -373,6 +377,17 @@ async def _verify_tool_node(node_id: str, tool_repo: ToolRepo) -> None:
     except RuntimeError:
         await to_thread.run_sync(
             lambda: tool_repo.set_node_status(node.id, "error", "Secrets are unavailable")
+        )
+        return
+
+    try:
+        secrets = await with_access_token(node.tool_slug, node.id, secrets)
+    except TokenExchangeError:
+        # Revoked at Google. Never retry, let the node go to error.
+        await to_thread.run_sync(
+            lambda: tool_repo.set_node_status(
+                node.id, "error", "Access was revoked. Reconnect the node."
+            )
         )
         return
 
