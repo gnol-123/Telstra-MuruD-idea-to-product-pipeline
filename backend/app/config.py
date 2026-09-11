@@ -22,6 +22,13 @@ class Settings(BaseSettings):
     # Where Supabase sends the browser back after Google sign-in.
     # Add frontend url to allowedlist on supabase to use Google sign-in.
     oauth_redirect_url: str = ""
+    # Google OAuth client, for tool node connect flows (Gmail etc), not sign-in.
+    google_oauth_client_id: str = ""
+    google_oauth_client_secret: str = ""
+    # Signs the state param on the connect flow. Empty disables oauth2 tool nodes.
+    oauth_state_secret: str = ""
+    # Frontend origin, to redirect the browser back after the oauth callback.
+    frontend_url: str = ""
 
     @property
     def cors_origin_list(self) -> list[str]:
