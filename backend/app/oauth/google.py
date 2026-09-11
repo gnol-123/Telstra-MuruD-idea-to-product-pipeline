@@ -9,7 +9,7 @@ from app.config import settings
 from app.oauth.base import TokenSet
 
 AUTH_URL = "https://accounts.google.com/o/oauth2/v2/auth"
-TOKEN_URL = "https://oauth2.googleapis.com/token"  # noqa: S105 - endpoint url, not a secret
+TOKEN_URL = "https://oauth2.googleapis.com/token"  # noqa: S105  # nosec B105
 
 
 class TokenExchangeError(Exception):
