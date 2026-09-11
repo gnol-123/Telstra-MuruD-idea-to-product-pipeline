@@ -40,7 +40,7 @@ async def _inbound_toolsets(repo: ChatRepo, tool_repo: ToolRepo, node) -> Assemb
         for n in (await to_thread.run_sync(lambda: [tool_repo.get_tool_node(i) for i in node_ids]))
         if n is not None
     ]
-    return assemble(tool_repo, nodes, ask=node.tool_policy == "ask")
+    return await assemble(tool_repo, nodes, ask=node.tool_policy == "ask")
 
 
 class ChatRequest(BaseModel):
