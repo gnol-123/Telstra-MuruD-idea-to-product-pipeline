@@ -39,7 +39,7 @@ export default function LoginScreen({ onLoggedIn }: { onLoggedIn: () => void }) 
         className="w-80 bg-panel border border-border rounded-xl p-6 space-y-4"
       >
         <div>
-          <div className="text-sm font-semibold">Agent Mesh</div>
+          <div className="text-sm font-semibold">AI Workspace</div>
           <div className="text-xs text-muted">
             {mode === "login" ? "Log in to your workspace" : "Create an account"}
           </div>

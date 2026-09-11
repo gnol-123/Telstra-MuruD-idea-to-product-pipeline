@@ -9,8 +9,9 @@ import {
   ChatResponse,
 } from "./types";
 
-const API_URL =
-  process.env.NEXT_PUBLIC_API_URL ?? "http://localhost:8000";
+const API_URL = (
+  process.env.NEXT_PUBLIC_API_URL ?? "http://localhost:8000"
+).replace(/\/$/, "");
 
 class ApiError extends Error {
   status: number;
@@ -49,7 +50,7 @@ async function request<T>(
   return data as T;
 }
 
-// Auth 
+// Auth
 
 export async function signup(email: string, password: string) {
   return request<{ message: string }>("/auth/signup", {
@@ -90,13 +91,13 @@ export function googleLoginUrl(redirectTo?: string) {
   return request<{ url: string; provider: string }>(`/auth/login/google${qs}`);
 }
 
-// Agent types (catalog) 
+// Agent types (catalog)
 
 export async function getAgentTypes() {
   return request<AgentType[]>("/agent-types", { auth: true });
 }
 
-// Projects 
+// Projects
 
 export async function listProjects() {
   return request<Project[]>("/projects", { auth: true });
@@ -114,7 +115,7 @@ export async function deleteProject(projectId: string) {
   return request<void>(`/projects/${projectId}`, { method: "DELETE", auth: true });
 }
 
-// Nodes 
+// Nodes
 
 export async function listNodes(projectId: string) {
   return request<AgentNode[]>(`/projects/${projectId}/nodes`, { auth: true });
@@ -132,7 +133,7 @@ export async function createNode(
   });
 }
 
-// x_position/y_position 
+// x_position/y_position
 export async function updateNode(
   projectId: string,
   nodeId: string,
@@ -152,7 +153,7 @@ export async function deleteNode(projectId: string, nodeId: string) {
   });
 }
 
-// Chat 
+// Chat
 
 export async function sendChat(nodeId: string, prompt: string, clientToken?: string) {
   return request<ChatResponse>("/chat", {
