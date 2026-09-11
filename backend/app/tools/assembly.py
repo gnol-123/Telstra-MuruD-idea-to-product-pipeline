@@ -19,6 +19,7 @@ from pydantic_ai.toolsets.abstract import ToolsetTool
 
 from app.repositories.tool_repo import ToolNode, load_node_secrets
 from app.tools.base import ToolContext
+from app.tools.oauth_refresh import with_access_token
 from app.tools.registry import get_spec
 
 _PREFIX_SAFE = re.compile(r"[^a-z0-9_]+")
@@ -110,7 +111,7 @@ class RecordingToolset(WrapperToolset):
         return result
 
 
-def assemble(repo, tool_nodes: list[ToolNode], *, ask: bool) -> AssembledTools:
+async def assemble(repo, tool_nodes: list[ToolNode], *, ask: bool) -> AssembledTools:
     toolsets: list[AbstractToolset] = []
     owner_by_tool: dict[str, str] = {}
     owner_by_toolset: list[str] = []
@@ -127,8 +128,16 @@ def assemble(repo, tool_nodes: list[ToolNode], *, ask: bool) -> AssembledTools:
             continue
 
         try:
-            keys = repo.secret_keys(node.id) if repo is not None else []
-            secrets = load_node_secrets(node.id, keys) if keys else {}
+            keys = await to_thread.run_sync(
+                lambda n=node: repo.secret_keys(n.id) if repo is not None else []
+            )
+            secrets = (
+                await to_thread.run_sync(lambda n=node, k=keys: load_node_secrets(n.id, k))
+                if keys
+                else {}
+            )
+            # oauth2 nodes need a live access token before build, which is sync.
+            secrets = await with_access_token(node.tool_slug, node.id, secrets)
             built = spec.build(
                 ToolContext(
                     node_id=node.id,
