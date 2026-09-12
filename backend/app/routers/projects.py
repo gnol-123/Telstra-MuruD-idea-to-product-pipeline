@@ -9,6 +9,7 @@ from fastapi import APIRouter, HTTPException, Query, status
 from postgrest.exceptions import APIError
 from pydantic import BaseModel, Field
 
+from app.environments import lifecycle
 from app.repositories.chat_repo import (
     AgentType,
     DuplicateEdge,
@@ -19,6 +20,7 @@ from app.repositories.chat_repo import (
 )
 from app.repositories.tool_repo import ToolNode, ToolType, load_node_secrets
 from app.routers.deps import ChatRepo, EnvRepo, ToolRepo
+from app.routers.environments import EnvironmentNodeResponse, create_environment_node
 from app.services.agent import summarise_conversation
 from app.tools.base import ToolContext
 from app.tools.oauth_refresh import TokenExchangeError, with_access_token
@@ -68,8 +70,14 @@ async def list_projects(repo: ChatRepo) -> list[ProjectResponse]:
 
 
 @router.delete("/projects/{project_id}", status_code=status.HTTP_204_NO_CONTENT)
-async def delete_project(project_id: UUID, repo: ChatRepo) -> None:
+async def delete_project(project_id: UUID, repo: ChatRepo, env_repo: EnvRepo) -> None:
     """Delete a project, cascading to its nodes, edges, conversations and messages."""
+    # Every environment on the canvas, before the rows cascade away and the
+    # sandbox ids go with them.
+    environments = await to_thread.run_sync(env_repo.list_environment_nodes, str(project_id))
+    for env in environments:
+        await lifecycle.teardown(env_repo, env)
+
     deleted = await to_thread.run_sync(repo.delete_project, str(project_id))
     if not deleted:
         raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Project not found")
@@ -89,7 +97,7 @@ class AgentTypeResponse(BaseModel):
 
 
 class CreateNodeRequest(BaseModel):
-    kind: Literal["agent", "tool"] = "agent"
+    kind: Literal["agent", "tool", "environment"] = "agent"
     # The catalog slug, so the frontend need not resolve UUIDs to provision.
     # Required for kind='agent'.
     agent_slug: str | None = Field(default=None, min_length=1, max_length=50)
@@ -209,7 +217,7 @@ async def list_agent_types(repo: ChatRepo) -> list[AgentTypeResponse]:
 
 @router.post(
     "/projects/{project_id}/nodes",
-    response_model=NodeResponse | ToolNodeResponse,
+    response_model=NodeResponse | ToolNodeResponse | EnvironmentNodeResponse,
     status_code=status.HTTP_201_CREATED,
 )
 async def create_node(
@@ -218,14 +226,17 @@ async def create_node(
     repo: ChatRepo,
     tool_repo: ToolRepo,
     env_repo: EnvRepo,
-) -> NodeResponse | ToolNodeResponse:
-    """Provision a box on a project's canvas. kind='agent' (default) or 'tool'."""
+) -> NodeResponse | ToolNodeResponse | EnvironmentNodeResponse:
+    """Provision a box on a project's canvas: kind='agent', 'tool' or 'environment'."""
     project = await to_thread.run_sync(repo.get_project, str(project_id))
     if project is None:
         raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Project not found")
 
     if req.kind == "tool":
         return await _create_tool_node(project_id, req, tool_repo)
+
+    if req.kind == "environment":
+        return await create_environment_node(project_id, req, env_repo)
 
     if not req.agent_slug:
         raise HTTPException(
@@ -299,8 +310,14 @@ async def update_node(
     "/projects/{project_id}/nodes/{node_id}",
     status_code=status.HTTP_204_NO_CONTENT,
 )
-async def delete_node(project_id: UUID, node_id: UUID, repo: ChatRepo) -> None:
+async def delete_node(project_id: UUID, node_id: UUID, repo: ChatRepo, env_repo: EnvRepo) -> None:
     """Remove a node of any kind, cascading to its conversation, transcript and secrets."""
+    # Kill the sandbox first: the row is about to go, and nothing else knows
+    # the id. teardown never raises, so a dead E2B cannot block the delete.
+    env = await to_thread.run_sync(env_repo.get_environment_node, str(node_id))
+    if env is not None:
+        await lifecycle.teardown(env_repo, env)
+
     deleted = await to_thread.run_sync(repo.delete_node, str(node_id))
     if not deleted:
         raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Node not found")
