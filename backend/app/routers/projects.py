@@ -116,10 +116,20 @@ class NodeResponse(BaseModel):
     position_x: float
     position_y: float
     kind: str = "agent"
+    # Lifecycle. Agents and tools are 'ready';
+    # pending, provisioning, ready, error and stopped.
+    status: str = "ready"
+    status_detail: str | None = None
+    # Role variable for envNodes user | scratch
+    # scratch is the default env that all agents have to spin up artifacts
+    # user is the user provisioned environment for any task requiring an environment
+    role: str | None = None
+    runtime: str | None = None
 
     @classmethod
     def of(cls, n: Node, agent_slug: str | None = None) -> "NodeResponse":
         """agent_slug defaults to the node's join; pass it on create, before the re-read."""
+        config = n.config if n.kind == "environment" else {}
         return cls(
             id=UUID(n.id),
             project_id=UUID(n.project_id),
@@ -129,6 +139,10 @@ class NodeResponse(BaseModel):
             position_x=n.position_x,
             position_y=n.position_y,
             kind=n.kind,
+            status=n.status,
+            status_detail=n.status_detail,
+            role=config.get("role"),
+            runtime=config.get("runtime"),
         )
 
 
