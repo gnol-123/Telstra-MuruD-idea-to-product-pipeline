@@ -24,7 +24,7 @@ _CLAIMABLE = ["pending", "error", "stopped"]
 
 @dataclass(frozen=True)
 class EnvNode:
-    """One environment box. Identity lives in config, not in a catalog table."""
+    """Configurations for each individual environment node."""
 
     id: str
     project_id: str
