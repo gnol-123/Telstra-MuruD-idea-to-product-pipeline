@@ -18,7 +18,7 @@ from app.repositories.chat_repo import (
     Project,
 )
 from app.repositories.tool_repo import ToolNode, ToolType, load_node_secrets
-from app.routers.deps import ChatRepo, ToolRepo
+from app.routers.deps import ChatRepo, EnvRepo, ToolRepo
 from app.services.agent import summarise_conversation
 from app.tools.base import ToolContext
 from app.tools.oauth_refresh import TokenExchangeError, with_access_token
@@ -45,7 +45,9 @@ class ProjectResponse(BaseModel):
 
 
 @router.post("/projects", response_model=ProjectResponse, status_code=status.HTTP_201_CREATED)
-async def create_project(req: CreateProjectRequest, repo: ChatRepo) -> ProjectResponse:
+async def create_project(
+    req: CreateProjectRequest, repo: ChatRepo, env_repo: EnvRepo
+) -> ProjectResponse:
     try:
         project = await to_thread.run_sync(lambda: repo.create_project(req.name, req.description))
     except DuplicateProjectName as exc:
@@ -53,6 +55,9 @@ async def create_project(req: CreateProjectRequest, repo: ChatRepo) -> ProjectRe
             status_code=status.HTTP_409_CONFLICT,
             detail=f"You already have a project named '{req.name}'",
         ) from exc
+
+    # Every project owns a scratch space. Not provisioned yet: pending costs nothing.
+    await to_thread.run_sync(lambda: env_repo.ensure_scratch_node(project.id))
     return ProjectResponse.of(project)
 
 
@@ -212,6 +217,7 @@ async def create_node(
     req: CreateNodeRequest,
     repo: ChatRepo,
     tool_repo: ToolRepo,
+    env_repo: EnvRepo,
 ) -> NodeResponse | ToolNodeResponse:
     """Provision a box on a project's canvas. kind='agent' (default) or 'tool'."""
     project = await to_thread.run_sync(repo.get_project, str(project_id))
@@ -243,6 +249,15 @@ async def create_node(
             position_y=req.position_y,
         )
     )
+
+    # Access requires an edge, so the scratch space is wired like any other
+    # environment. The frontend hides this one rather than drawing it.
+    scratch = await to_thread.run_sync(lambda: env_repo.ensure_scratch_node(str(project_id)))
+    try:
+        await to_thread.run_sync(lambda: repo.create_edge(scratch.id, node_id, "environment"))
+    except DuplicateEdge:
+        # A retried create. The wiring is already there.
+        pass
 
     node = await to_thread.run_sync(repo.get_agent_node, node_id)
     if node is None:
@@ -464,10 +479,18 @@ async def list_tool_calls(
 # -- EDGES ---------------------------------------------------------------------
 
 
+# Each edge kind runs between one pair of node kinds, source first.
+_EDGE_ENDPOINTS: dict[str, tuple[str, str]] = {
+    "context": ("agent", "agent"),
+    "tool": ("tool", "agent"),
+    "environment": ("environment", "agent"),
+}
+
+
 class CreateEdgeRequest(BaseModel):
     source_node_id: UUID
     target_node_id: UUID
-    kind: Literal["context", "tool"] = "context"
+    kind: Literal["context", "tool", "environment"] = "context"
 
 
 class EdgeResponse(BaseModel):
@@ -499,7 +522,11 @@ class EdgeResponse(BaseModel):
     "/projects/{project_id}/edges", response_model=EdgeResponse, status_code=status.HTTP_201_CREATED
 )
 async def create_edge(
-    project_id: UUID, req: CreateEdgeRequest, repo: ChatRepo, tool_repo: ToolRepo
+    project_id: UUID,
+    req: CreateEdgeRequest,
+    repo: ChatRepo,
+    tool_repo: ToolRepo,
+    env_repo: EnvRepo,
 ) -> EdgeResponse:
     """Create an edge between two nodes on the canvas."""
 
@@ -509,7 +536,7 @@ async def create_edge(
 
     # Load both endpoints, check they belong to this project, then check the
     # kind pair this edge kind allows.
-    required_kinds = ("tool", "agent") if req.kind == "tool" else ("agent", "agent")
+    required_kinds = _EDGE_ENDPOINTS[req.kind]
     node_ids = (req.source_node_id, req.target_node_id)
     actual_kinds: list[str] = []
     for node_id in node_ids:
@@ -520,6 +547,10 @@ async def create_edge(
         tool_node = await to_thread.run_sync(tool_repo.get_tool_node, str(node_id))
         if tool_node is not None and tool_node.project_id == str(project_id):
             actual_kinds.append("tool")
+            continue
+        env_node = await to_thread.run_sync(env_repo.get_environment_node, str(node_id))
+        if env_node is not None and env_node.project_id == str(project_id):
+            actual_kinds.append("environment")
             continue
         raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Node not found")
 
