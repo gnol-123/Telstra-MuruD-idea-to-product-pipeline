@@ -5,6 +5,7 @@ from typing import Annotated
 from fastapi import Depends
 
 from app.repositories.chat_repo import ChatRepository
+from app.repositories.environment_repo import EnvironmentRepository
 from app.repositories.tool_repo import ToolRepository
 from app.routers.auth import CurrentAuth
 from app.services.supabase import get_user_client
@@ -28,3 +29,11 @@ def get_tool_repository(auth: CurrentAuth) -> ToolRepository:
 
 
 ToolRepo = Annotated[ToolRepository, Depends(get_tool_repository)]
+
+
+def get_environment_repository(auth: CurrentAuth) -> EnvironmentRepository:
+    """Environment repository scoped to the caller, so RLS applies."""
+    return EnvironmentRepository(get_user_client(auth.token), auth.user.id)
+
+
+EnvRepo = Annotated[EnvironmentRepository, Depends(get_environment_repository)]

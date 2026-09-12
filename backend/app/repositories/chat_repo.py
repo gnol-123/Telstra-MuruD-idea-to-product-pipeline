@@ -448,6 +448,18 @@ class ChatRepository:
         ).data
         return [r["source_node_id"] for r in rows]
 
+    def list_inbound_environment_node_ids(self, node_id: str) -> list[str]:
+        """Environment nodes whose arrows point at this agent."""
+        rows = (
+            self._db.table("edges")
+            .select("source_node_id")
+            .eq("target_node_id", node_id)
+            .eq("kind", "environment")
+            .eq("owner_id", self._user_id)
+            .execute()
+        ).data
+        return [r["source_node_id"] for r in rows]
+
     def delete_edge(self, edge_id: str) -> bool:
         rows = (
             self._db.table("edges")
