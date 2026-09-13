@@ -4,13 +4,19 @@ import {
   User,
   AgentType,
   Project,
-  AgentNode,
+  ProjectNode,
   ToolPolicy,
-  ChatResponse,
+  Edge,
+  EdgeKind,
+  ToolType,
+  ToolCall,
+  SendChatResult,
+  ResumeResult,
 } from "./types";
 
-const API_URL =
-  process.env.NEXT_PUBLIC_API_URL ?? "http://localhost:8000";
+const API_URL = (
+  process.env.NEXT_PUBLIC_API_URL ?? "http://localhost:8000"
+).replace(/\/$/, "");
 
 class ApiError extends Error {
   status: number;
@@ -49,7 +55,7 @@ async function request<T>(
   return data as T;
 }
 
-// Auth 
+// Auth
 
 export async function signup(email: string, password: string) {
   return request<{ message: string }>("/auth/signup", {
@@ -85,18 +91,24 @@ export async function passwordReset(email: string) {
   return request<void>("/auth/password-reset", { method: "POST", body: { email } });
 }
 
-export function googleLoginUrl(redirectTo?: string) {
+export async function googleLoginUrl(redirectTo?: string) {
   const qs = redirectTo ? `?redirect_to=${encodeURIComponent(redirectTo)}` : "";
   return request<{ url: string; provider: string }>(`/auth/login/google${qs}`);
 }
 
-// Agent types (catalog) 
+// Agent types (catalog)
 
 export async function getAgentTypes() {
   return request<AgentType[]>("/agent-types", { auth: true });
 }
 
-// Projects 
+// Tool types (catalog)
+
+export async function getToolTypes() {
+  return request<ToolType[]>("/tool-types", { auth: true });
+}
+
+// Projects
 
 export async function listProjects() {
   return request<Project[]>("/projects", { auth: true });
@@ -114,31 +126,53 @@ export async function deleteProject(projectId: string) {
   return request<void>(`/projects/${projectId}`, { method: "DELETE", auth: true });
 }
 
-// Nodes 
+// Nodes — agents and tools are mixed together on a project's canvas,
+// distinguished by `kind`.
 
 export async function listNodes(projectId: string) {
-  return request<AgentNode[]>(`/projects/${projectId}/nodes`, { auth: true });
+  return request<ProjectNode[]>(`/projects/${projectId}/nodes`, { auth: true });
 }
 
-export async function createNode(
+export async function createAgentNode(
   projectId: string,
   agentSlug: string,
   opts: { name?: string; position_x?: number; position_y?: number } = {}
 ) {
-  return request<AgentNode>(`/projects/${projectId}/nodes`, {
+  return request<ProjectNode>(`/projects/${projectId}/nodes`, {
     method: "POST",
     auth: true,
-    body: { agent_slug: agentSlug, ...opts },
+    body: { kind: "agent", agent_slug: agentSlug, ...opts },
   });
 }
 
-// x_position/y_position 
+export async function createToolNode(
+  projectId: string,
+  toolSlug: string,
+  opts: {
+    name?: string;
+    config?: Record<string, unknown>;
+    position_x?: number;
+    position_y?: number;
+  } = {}
+) {
+  return request<ProjectNode>(`/projects/${projectId}/nodes`, {
+    method: "POST",
+    auth: true,
+    body: { kind: "tool", tool_slug: toolSlug, ...opts },
+  });
+}
+
 export async function updateNode(
   projectId: string,
   nodeId: string,
-  patch: Partial<{ position_x: number; position_y: number; name: string; tool_policy: ToolPolicy }>
+  patch: Partial<{
+    position_x: number;
+    position_y: number;
+    name: string;
+    tool_policy: ToolPolicy;
+  }>
 ) {
-  return request<AgentNode>(`/projects/${projectId}/nodes/${nodeId}`, {
+  return request<ProjectNode>(`/projects/${projectId}/nodes/${nodeId}`, {
     method: "PATCH",
     auth: true,
     body: patch,
@@ -152,13 +186,88 @@ export async function deleteNode(projectId: string, nodeId: string) {
   });
 }
 
-// Chat 
+export async function verifyNode(projectId: string, nodeId: string) {
+  return request<ProjectNode>(`/projects/${projectId}/nodes/${nodeId}/verify`, {
+    method: "POST",
+    auth: true,
+  });
+}
 
-export async function sendChat(nodeId: string, prompt: string, clientToken?: string) {
-  return request<ChatResponse>("/chat", {
+export async function authorizeNode(projectId: string, nodeId: string) {
+  return request<{ url: string }>(
+    `/projects/${projectId}/nodes/${nodeId}/authorize`,
+    { method: "POST", auth: true }
+  );
+}
+
+export async function listToolCalls(
+  projectId: string,
+  nodeId: string,
+  limit?: number
+) {
+  const qs = limit ? `?limit=${limit}` : "";
+  return request<ToolCall[]>(
+    `/projects/${projectId}/nodes/${nodeId}/tool-calls${qs}`,
+    { auth: true }
+  );
+}
+
+// Edges — arrows between nodes. `context` shares a summary agent-to-agent;
+// `tool` makes a tool node's toolset callable by an agent.
+
+export async function listEdges(projectId: string) {
+  return request<Edge[]>(`/projects/${projectId}/edges`, { auth: true });
+}
+
+export async function createEdge(
+  projectId: string,
+  sourceNodeId: string,
+  targetNodeId: string,
+  kind: EdgeKind = "context"
+) {
+  return request<Edge>(`/projects/${projectId}/edges`, {
+    method: "POST",
+    auth: true,
+    body: { source_node_id: sourceNodeId, target_node_id: targetNodeId, kind },
+  });
+}
+
+export async function refreshEdge(projectId: string, edgeId: string) {
+  return request<Edge>(`/projects/${projectId}/edges/${edgeId}/refresh`, {
+    method: "POST",
+    auth: true,
+  });
+}
+
+export async function deleteEdge(projectId: string, edgeId: string) {
+  return request<void>(`/projects/${projectId}/edges/${edgeId}`, {
+    method: "DELETE",
+    auth: true,
+  });
+}
+
+// Chat
+
+export async function sendChat(
+  nodeId: string,
+  prompt: string,
+  clientToken?: string
+): Promise<SendChatResult> {
+  return request<SendChatResult>("/chat", {
     method: "POST",
     auth: true,
     body: { node_id: nodeId, prompt, client_token: clientToken },
+  });
+}
+
+export async function resumeChat(
+  nodeId: string,
+  approvals: Record<string, boolean>
+): Promise<ResumeResult> {
+  return request<ResumeResult>("/chat/resume", {
+    method: "POST",
+    auth: true,
+    body: { node_id: nodeId, approvals },
   });
 }
 
@@ -170,6 +279,9 @@ export interface StreamHandlers {
   onChunk?: (text: string) => void;
   onDone?: (data: any) => void;
   onError?: (data: any) => void;
+  // Emitted instead of onDone when a tool call needs approval; the stream
+  // ends here with no `done` event, per API.md.
+  onApprovalRequired?: (data: any) => void;
 }
 
 export async function streamChat(
@@ -219,6 +331,7 @@ export async function streamChat(
       else if (event === "chunk") handlers.onChunk?.(parsed.text);
       else if (event === "done") handlers.onDone?.(parsed);
       else if (event === "error") handlers.onError?.(parsed);
+      else if (event === "approval_required") handlers.onApprovalRequired?.(parsed);
     }
   }
 }

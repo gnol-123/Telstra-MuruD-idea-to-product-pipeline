@@ -1,7 +1,7 @@
 "use client";
 
 import { useEffect, useState } from "react";
-import { listProjects, createProject, logout } from "@/lib/api";
+import { listProjects, createProject, deleteProject, logout, ApiError } from "@/lib/api";
 import { Project } from "@/lib/types";
 
 export default function ProjectsScreen({
@@ -14,6 +14,8 @@ export default function ProjectsScreen({
   const [projects, setProjects] = useState<Project[] | null>(null);
   const [name, setName] = useState("");
   const [error, setError] = useState<string | null>(null);
+  const [confirmingId, setConfirmingId] = useState<string | null>(null);
+  const [deletingId, setDeletingId] = useState<string | null>(null);
 
   useEffect(() => {
     listProjects()
@@ -30,6 +32,20 @@ export default function ProjectsScreen({
       setName("");
     } catch (e: any) {
       setError(e.message);
+    }
+  }
+
+  async function handleDelete(project: Project) {
+    setDeletingId(project.id);
+    setError(null);
+    try {
+      await deleteProject(project.id);
+      setProjects((p) => (p ?? []).filter((x) => x.id !== project.id));
+    } catch (e) {
+      setError(e instanceof ApiError ? e.message : "Could not delete project");
+    } finally {
+      setDeletingId(null);
+      setConfirmingId(null);
     }
   }
 
@@ -69,16 +85,44 @@ export default function ProjectsScreen({
       ) : (
         <div className="space-y-2">
           {projects.map((p) => (
-            <button
+            <div
               key={p.id}
-              onClick={() => onOpen(p)}
-              className="w-full text-left bg-panel border border-border rounded-lg px-4 py-3 hover:border-accent/40"
+              className="w-full flex items-center gap-2 bg-panel border border-border rounded-lg px-4 py-3 hover:border-accent/40"
             >
-              <div className="text-sm font-medium">{p.name}</div>
-              {p.description && (
-                <div className="text-xs text-muted mt-0.5">{p.description}</div>
+              <button onClick={() => onOpen(p)} className="flex-1 min-w-0 text-left">
+                <div className="text-sm font-medium">{p.name}</div>
+                {p.description && (
+                  <div className="text-xs text-muted mt-0.5">{p.description}</div>
+                )}
+              </button>
+
+              {confirmingId === p.id ? (
+                <div className="flex items-center gap-2 shrink-0">
+                  <span className="text-[10px] text-muted">Delete? Cascades to its whole canvas.</span>
+                  <button
+                    onClick={() => handleDelete(p)}
+                    disabled={deletingId === p.id}
+                    className="text-[11px] text-red-400 border border-red-400/40 rounded-md px-2 py-1 disabled:opacity-50"
+                  >
+                    {deletingId === p.id ? "Deleting…" : "Delete"}
+                  </button>
+                  <button
+                    onClick={() => setConfirmingId(null)}
+                    className="text-[11px] text-muted hover:text-text px-1"
+                  >
+                    Cancel
+                  </button>
+                </div>
+              ) : (
+                <button
+                  onClick={() => setConfirmingId(p.id)}
+                  title="Delete project"
+                  className="shrink-0 text-white/30 hover:text-red-400 text-sm px-1"
+                >
+                  ×
+                </button>
               )}
-            </button>
+            </div>
           ))}
         </div>
       )}
