@@ -22,6 +22,7 @@ FAKE_USER = UserResponse(
     id="00000000-0000-0000-0000-000000000001", email="test@example.com"
 )
 FAKE_PROJECT_ID = "00000000-0000-0000-0000-0000000000aa"
+FAKE_NODE_ID = "00000000-0000-0000-0000-0000000000cc"
 
 
 def fake_user():
@@ -104,10 +105,10 @@ class TestAddToolNode:
             config_schema={"fields": [{"key": "api_key"}], "default_url": None},
             secret_fields=["api_key"],
         )
-        mock_tool_repo.create_tool_node.return_value = "new-node-id"
+        mock_tool_repo.create_tool_node.return_value = FAKE_NODE_ID
         mock_tool_repo.get_tool_node.return_value = mock_with_name(
             "Brave Search",
-            id="new-node-id",
+            id=FAKE_NODE_ID,
             project_id=FAKE_PROJECT_ID,
             tool_slug="brave_search",
             config={},
