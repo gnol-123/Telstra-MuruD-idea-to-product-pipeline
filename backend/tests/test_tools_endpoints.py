@@ -161,3 +161,4 @@ class TestAddToolNode:
             app.dependency_overrides.clear()
 
         assert response.status_code == 404
+        
