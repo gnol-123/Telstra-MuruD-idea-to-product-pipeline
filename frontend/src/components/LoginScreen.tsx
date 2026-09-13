@@ -1,7 +1,7 @@
 "use client";
 
 import { useState } from "react";
-import { login, signup, ApiError } from "@/lib/api";
+import { login, signup, googleLoginUrl, ApiError } from "@/lib/api";
 
 export default function LoginScreen({ onLoggedIn }: { onLoggedIn: () => void }) {
   const [mode, setMode] = useState<"login" | "signup">("login");
@@ -10,6 +10,16 @@ export default function LoginScreen({ onLoggedIn }: { onLoggedIn: () => void }) 
   const [message, setMessage] = useState<string | null>(null);
   const [error, setError] = useState<string | null>(null);
   const [busy, setBusy] = useState(false);
+
+  async function handleGoogle() {
+    setError(null);
+    try {
+      const { url } = await googleLoginUrl(window.location.origin);
+      window.location.href = url;
+    } catch (err) {
+      setError(err instanceof ApiError ? err.message : "Could not start Google sign-in");
+    }
+  }
 
   async function handleSubmit(e: React.FormEvent) {
     e.preventDefault();
@@ -80,6 +90,20 @@ export default function LoginScreen({ onLoggedIn }: { onLoggedIn: () => void }) 
           className="w-full text-xs text-muted hover:text-text"
         >
           {mode === "login" ? "Need an account? Sign up" : "Already have one? Log in"}
+        </button>
+
+        <div className="flex items-center gap-3 text-[10px] text-muted">
+          <div className="flex-1 h-px bg-border" />
+          or
+          <div className="flex-1 h-px bg-border" />
+        </div>
+
+        <button
+          type="button"
+          onClick={handleGoogle}
+          className="w-full border border-border rounded-md py-2 text-sm text-text/80 hover:border-accent/40"
+        >
+          Continue with Google
         </button>
       </form>
     </div>
