@@ -230,8 +230,9 @@ A `tool -> agent` arrow is `kind: "tool"`: it makes the tool node's toolset
 callable by that agent. Direction is fixed and enforced twice, by the router
 (`422`) and by a database trigger, so a tool edge can never be drawn backwards.
 
-`environment` exists in the schema but is not yet accepted: there are no
-environment nodes to point at.
+An `environment -> agent` arrow is `kind: "environment"`: it gives that agent
+a place to execute code. Like a tool edge, direction is fixed and enforced by
+the router and by a database trigger.
 
 | Method | Path | Auth | Description |
 |---|---|---|---|
@@ -526,6 +527,181 @@ A node for `obsidian` or `gmail` with no bridge running stays in
 
 ---
 
+## Environments
+
+An environment node is a real sandbox: a shell, a filesystem, and a URL for
+whatever gets served on a port. Draw an `environment` edge from it to an agent
+to make it callable there. Every project gets one automatically, a shared
+scratch space every agent in that project can reach; provisioning more is
+what this section covers.
+
+| Method | Path | Auth | Description |
+|---|---|---|---|
+| `POST` | `/projects/{project_id}/nodes` | **yes** | Provision an environment node (`kind: "environment"`) |
+| `GET` | `/projects/{project_id}/environments/{node_id}` | **yes** | One environment, with its lifecycle state |
+| `PATCH` | `/projects/{project_id}/environments/{node_id}` | **yes** | Rename, move, or change the approval policy |
+| `POST` | `/projects/{project_id}/environments/{node_id}/start` | **yes** | Provision or restart the sandbox |
+| `POST` | `/projects/{project_id}/environments/{node_id}/stop` | **yes** | Kill the sandbox. The filesystem is gone |
+| `POST` | `/projects/{project_id}/environments/{node_id}/verify` | **yes** | Re-check that the sandbox is reachable |
+| `GET` | `/projects/{project_id}/environments/{node_id}/files` | **yes** | List a directory, one level deep |
+| `GET` | `/projects/{project_id}/environments/{node_id}/files/content` | **yes** | Read one text file |
+| `GET` | `/projects/{project_id}/environments/{node_id}/preview` | **yes** | A public URL for a port the sandbox is serving |
+| `WS` | `/projects/{project_id}/environments/{node_id}/terminal` | **yes**, via `?token=` | A real shell, streamed both ways |
+
+### `POST /projects/{project_id}/nodes` (`kind: "environment"`)
+```json
+{
+  "kind": "environment",
+  "name": "Build Box",
+  "config": { "idle_timeout_s": 900, "description": "the API repo" }
+}
+```
+
+`config` accepts only `template`, `idle_timeout_s` (60-3600), `preview_ports`
+(up to 10, each 1-65535) and `description` (up to 500 characters). Anything
+else, `sandbox_id` included, is `422`. Creating an environment does **not**
+provision it: the sandbox comes from `/start` or the first turn that reaches
+it, so an unused box costs nothing.
+
+→ `201`
+```json
+{
+  "id": "uuid",
+  "project_id": "uuid",
+  "kind": "environment",
+  "name": "Build Box",
+  "runtime": "e2b",
+  "role": "user",
+  "status": "pending",
+  "status_detail": null,
+  "tool_policy": "ask",
+  "position_x": 0,
+  "position_y": 0,
+  "sandbox_id": null,
+  "template": "base",
+  "idle_timeout_s": 900,
+  "preview_ports": [],
+  "description": "the API repo"
+}
+```
+
+`role` is always `"user"` for one created this way: `"scratch"` is reserved
+for the one node every project gets automatically and cannot be requested.
+
+### `GET /projects/{project_id}/environments/{node_id}`
+
+→ `200`, same shape as creation. `404` if the node is not yours or belongs to
+a different project.
+
+### `PATCH /projects/{project_id}/environments/{node_id}`
+```json
+{ "name": "Renamed", "tool_policy": "auto" }
+```
+
+`status`, `config` and `kind` are not client writable. An empty body is a
+no-op. `404` if the node is not yours. `422` for an unknown `tool_policy`.
+
+### `POST /projects/{project_id}/environments/{node_id}/start`
+
+Provisions the sandbox, or restarts a stopped one. This is the **only** way a
+stopped environment comes back: a turn deliberately leaves a stopped node
+alone, since stopping destroyed its filesystem and only the user should choose
+to pay for a new one.
+
+**Always `200`.** Provisioning can fail; the client reads `status` and
+`status_detail` to find out, the same way a tool node reports a failed verify.
+
+→ `200`, same shape as creation, `status: "ready"` and `sandbox_id` set on
+success.
+
+### `POST /projects/{project_id}/environments/{node_id}/stop`
+
+Kills the sandbox and clears `sandbox_id`. The filesystem is gone; the next
+`/start` begins empty.
+
+→ `200`. `409` if the environment is currently `provisioning`: its sandbox id
+is not written back yet, so killing now would leak it. Retry in a moment.
+
+### `POST /projects/{project_id}/environments/{node_id}/verify`
+
+Re-checks that the recorded sandbox is actually reachable and persists
+`status` and `status_detail`. **Never raises**, same contract as a tool node's
+verify.
+
+→ `200`, same shape as creation.
+
+### `GET /projects/{project_id}/environments/{node_id}/files`
+`?path=` (default the workspace root)
+
+→ `200`
+```json
+{
+  "path": "/home/user/workspace",
+  "entries": [
+    { "name": "app", "type": "dir", "path": "/home/user/workspace/app", "size": 0 },
+    { "name": "notes.md", "type": "file", "path": "/home/user/workspace/notes.md", "size": 42 }
+  ]
+}
+```
+
+`type` is `dir`, `file`, or `symlink`. `409` if the environment is not
+`ready`, naming the actual status. `502` if the sandbox cannot be reached,
+which also marks the node `error` so the canvas reflects it immediately. `404`
+for a path that does not exist.
+
+### `GET /projects/{project_id}/environments/{node_id}/files/content`
+`?path=` (required)
+
+→ `200`
+```json
+{ "path": "/home/user/workspace/notes.md", "content": "...", "truncated": false }
+```
+
+Capped at `environment_max_file_chars`; `truncated` says whether it was cut.
+`404` if the file does not exist. `415` if it is not valid text.
+
+### `GET /projects/{project_id}/environments/{node_id}/preview`
+`?port=` (required, 1-65535)
+
+→ `200`
+```json
+{ "port": 3000, "url": "https://3000-<sandbox-id>.e2b.app" }
+```
+
+Connecting first resumes a paused sandbox, so the link works even if nothing
+has touched the environment in a while.
+
+### `WS /projects/{project_id}/environments/{node_id}/terminal`
+`?token=<access_token>&cols=&rows=`
+
+A real shell. Browsers cannot set a bearer header on a WebSocket, so the token
+travels in the query string instead, which is why this must be `wss://` in
+anything but local development.
+
+Send raw bytes for keystrokes, or a JSON text frame:
+```json
+{ "type": "input", "data": "ls\n" }
+{ "type": "resize", "cols": 120, "rows": 40 }
+```
+
+Receives raw bytes for terminal output, and one final text frame when the
+shell exits:
+```json
+{ "type": "exit", "code": 0 }
+```
+
+Closes with an application code rather than a generic failure:
+
+| Code | Meaning |
+|---|---|
+| `4401` | Missing or invalid token |
+| `4403` | Not `wss://` outside localhost |
+| `4404` | Environment not found |
+| `4409` | Environment is not `ready` |
+| `4502` | Sandbox unreachable |
+
+---
+
 ## Chat
 
 | Method | Path | Auth | Description |
@@ -699,6 +875,5 @@ The schema supports these; the API does not expose them:
 
 - **The retrieval tool.** A context edge gives the downstream agent a summary,
   but no way to ask the upstream agent for detail the summary lost.
-- Environment nodes
 - Changing an edge's `summary_max_words` over the API
 - Listing a conversation's history without sending a message
