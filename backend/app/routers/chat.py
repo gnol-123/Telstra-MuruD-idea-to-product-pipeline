@@ -14,8 +14,8 @@ from pydantic_ai.messages import ModelMessagesTypeAdapter
 
 from app.config import settings
 from app.environments.assembly import assemble_environments, merge_assembled
-from app.repositories.chat_repo import Message
-from app.routers.deps import ChatRepo, EnvRepo, ToolRepo
+from app.repositories.project_repo import Message
+from app.routers.deps import EnvRepo, ProjectRepo, ToolRepo
 from app.tools.assembly import AssembledTools, assemble, record_calls, unavailable_note
 from app.workflows import build_context_instructions, resume_agent, run_turn, stream_turn
 
@@ -25,14 +25,14 @@ router = APIRouter(prefix="/chat", tags=["chat"])
 _PENDING_RUN_MAX_AGE = timedelta(hours=1)
 
 
-async def _inbound_instructions(repo: ChatRepo, node_id: str) -> str | None:
+async def _inbound_instructions(repo: ProjectRepo, node_id: str) -> str | None:
     """Summaries from agents pointing at this node. Stale ones included: refresh is manual."""
     context = await to_thread.run_sync(repo.list_inbound_context, node_id)
     return build_context_instructions(context)
 
 
 async def _inbound_toolsets(
-    repo: ChatRepo, tool_repo: ToolRepo, env_repo: EnvRepo, node
+    repo: ProjectRepo, tool_repo: ToolRepo, env_repo: EnvRepo, node
 ) -> AssembledTools:
     """Toolsets from the tool and environment nodes pointing at this agent."""
     tools = AssembledTools()
@@ -184,7 +184,7 @@ async def _park_pending_run(tool_repo: ToolRepo, conversation_id: str, messages:
 
 @router.post("", response_model=None)
 async def chat(
-    req: ChatRequest, repo: ChatRepo, tool_repo: ToolRepo, env_repo: EnvRepo
+    req: ChatRequest, repo: ProjectRepo, tool_repo: ToolRepo, env_repo: EnvRepo
 ) -> ChatResponse | ApprovalRequiredResponse:
     node = await to_thread.run_sync(repo.get_agent_node, str(req.node_id))
 
@@ -249,7 +249,7 @@ async def chat(
 
 @router.post("/stream")
 async def chat_stream(
-    req: ChatRequest, repo: ChatRepo, tool_repo: ToolRepo, env_repo: EnvRepo
+    req: ChatRequest, repo: ProjectRepo, tool_repo: ToolRepo, env_repo: EnvRepo
 ) -> StreamingResponse:
     """Stream a turn as SSE.
 
@@ -329,7 +329,7 @@ class ResumeRequest(BaseModel):
 
 @router.post("/resume", response_model=None)
 async def chat_resume(
-    req: ResumeRequest, repo: ChatRepo, tool_repo: ToolRepo, env_repo: EnvRepo
+    req: ResumeRequest, repo: ProjectRepo, tool_repo: ToolRepo, env_repo: EnvRepo
 ) -> ResumeResponse | ApprovalRequiredResponse:
     """Resume a turn that paused for tool approval.
 

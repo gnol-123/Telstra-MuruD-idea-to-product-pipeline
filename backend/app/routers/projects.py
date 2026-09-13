@@ -10,7 +10,7 @@ from postgrest.exceptions import APIError
 from pydantic import BaseModel, Field
 
 from app.environments import lifecycle
-from app.repositories.chat_repo import (
+from app.repositories.project_repo import (
     AgentType,
     DuplicateEdge,
     DuplicateProjectName,
@@ -19,7 +19,7 @@ from app.repositories.chat_repo import (
     Project,
 )
 from app.repositories.tool_repo import ToolNode, ToolType, load_node_secrets
-from app.routers.deps import ChatRepo, EnvRepo, ToolRepo
+from app.routers.deps import EnvRepo, ProjectRepo, ToolRepo
 from app.routers.environments import EnvironmentNodeResponse, create_environment_node
 from app.services.agent import summarise_conversation
 from app.tools.base import ToolContext
@@ -48,7 +48,7 @@ class ProjectResponse(BaseModel):
 
 @router.post("/projects", response_model=ProjectResponse, status_code=status.HTTP_201_CREATED)
 async def create_project(
-    req: CreateProjectRequest, repo: ChatRepo, env_repo: EnvRepo
+    req: CreateProjectRequest, repo: ProjectRepo, env_repo: EnvRepo
 ) -> ProjectResponse:
     try:
         project = await to_thread.run_sync(lambda: repo.create_project(req.name, req.description))
@@ -64,13 +64,13 @@ async def create_project(
 
 
 @router.get("/projects", response_model=list[ProjectResponse])
-async def list_projects(repo: ChatRepo) -> list[ProjectResponse]:
+async def list_projects(repo: ProjectRepo) -> list[ProjectResponse]:
     projects = await to_thread.run_sync(repo.list_projects)
     return [ProjectResponse.of(p) for p in projects]
 
 
 @router.delete("/projects/{project_id}", status_code=status.HTTP_204_NO_CONTENT)
-async def delete_project(project_id: UUID, repo: ChatRepo, env_repo: EnvRepo) -> None:
+async def delete_project(project_id: UUID, repo: ProjectRepo, env_repo: EnvRepo) -> None:
     """Delete a project, cascading to its nodes, edges, conversations and messages."""
     # Every environment on the canvas, before the rows cascade away and the
     # sandbox ids go with them.
@@ -209,7 +209,7 @@ class ToolNodeResponse(BaseModel):
 
 
 @router.get("/agent-types", response_model=list[AgentTypeResponse])
-async def list_agent_types(repo: ChatRepo) -> list[AgentTypeResponse]:
+async def list_agent_types(repo: ProjectRepo) -> list[AgentTypeResponse]:
     """The palette of agent templates a node can be provisioned from."""
     types = await to_thread.run_sync(repo.list_agent_types)
     return [AgentTypeResponse.of(t) for t in types]
@@ -223,7 +223,7 @@ async def list_agent_types(repo: ChatRepo) -> list[AgentTypeResponse]:
 async def create_node(
     project_id: UUID,
     req: CreateNodeRequest,
-    repo: ChatRepo,
+    repo: ProjectRepo,
     tool_repo: ToolRepo,
     env_repo: EnvRepo,
 ) -> NodeResponse | ToolNodeResponse | EnvironmentNodeResponse:
@@ -280,7 +280,7 @@ async def create_node(
 
 
 @router.get("/projects/{project_id}/nodes", response_model=list[NodeResponse])
-async def list_nodes(project_id: UUID, repo: ChatRepo) -> list[NodeResponse]:
+async def list_nodes(project_id: UUID, repo: ProjectRepo) -> list[NodeResponse]:
     """List every box on a project's canvas, agents and tools."""
     project = await to_thread.run_sync(repo.get_project, str(project_id))
     if project is None:
@@ -295,7 +295,7 @@ async def update_node(
     project_id: UUID,
     node_id: UUID,
     req: UpdateNodeRequest,
-    repo: ChatRepo,
+    repo: ProjectRepo,
 ) -> NodeResponse:
     """Move, rename, or set the tool policy. An empty body is a no-op."""
     node = await to_thread.run_sync(
@@ -310,7 +310,9 @@ async def update_node(
     "/projects/{project_id}/nodes/{node_id}",
     status_code=status.HTTP_204_NO_CONTENT,
 )
-async def delete_node(project_id: UUID, node_id: UUID, repo: ChatRepo, env_repo: EnvRepo) -> None:
+async def delete_node(
+    project_id: UUID, node_id: UUID, repo: ProjectRepo, env_repo: EnvRepo
+) -> None:
     """Remove a node of any kind, cascading to its conversation, transcript and secrets."""
     # Kill the sandbox first: the row is about to go, and nothing else knows
     # the id. teardown never raises, so a dead E2B cannot block the delete.
@@ -541,7 +543,7 @@ class EdgeResponse(BaseModel):
 async def create_edge(
     project_id: UUID,
     req: CreateEdgeRequest,
-    repo: ChatRepo,
+    repo: ProjectRepo,
     tool_repo: ToolRepo,
     env_repo: EnvRepo,
 ) -> EdgeResponse:
@@ -608,7 +610,7 @@ async def create_edge(
 
 
 @router.get("/projects/{project_id}/edges", response_model=list[EdgeResponse])
-async def list_edges(project_id: UUID, repo: ChatRepo) -> list[EdgeResponse]:
+async def list_edges(project_id: UUID, repo: ProjectRepo) -> list[EdgeResponse]:
     """List the edges on a project's canvas."""
     # Check the project before listing edges.
     project = await to_thread.run_sync(repo.get_project, str(project_id))
@@ -631,7 +633,7 @@ async def list_edges(project_id: UUID, repo: ChatRepo) -> list[EdgeResponse]:
 
 
 @router.delete("/projects/{project_id}/edges/{edge_id}", status_code=status.HTTP_204_NO_CONTENT)
-async def delete_edge(project_id: UUID, edge_id: UUID, repo: ChatRepo) -> None:
+async def delete_edge(project_id: UUID, edge_id: UUID, repo: ProjectRepo) -> None:
     """Remove an edge from the canvas."""
     # Check the project before deleting.
     project = await to_thread.run_sync(repo.get_project, str(project_id))
@@ -646,7 +648,7 @@ async def delete_edge(project_id: UUID, edge_id: UUID, repo: ChatRepo) -> None:
 
 
 @router.post("/projects/{project_id}/edges/{edge_id}/refresh", response_model=EdgeResponse)
-async def refresh_edge_summary(project_id: UUID, edge_id: UUID, repo: ChatRepo) -> EdgeResponse:
+async def refresh_edge_summary(project_id: UUID, edge_id: UUID, repo: ProjectRepo) -> EdgeResponse:
     """Regenerate a context edge's summary from its source conversation."""
     project = await to_thread.run_sync(repo.get_project, str(project_id))
     if project is None:

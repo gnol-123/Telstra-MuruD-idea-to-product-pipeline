@@ -14,7 +14,7 @@ from pydantic_ai.models.google import GoogleModel
 from pydantic_ai.providers.google import GoogleProvider
 
 from app.config import settings
-from app.repositories.chat_repo import Message
+from app.repositories.project_repo import Message
 
 
 @lru_cache(maxsize=32)

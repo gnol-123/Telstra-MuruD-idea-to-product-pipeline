@@ -15,7 +15,7 @@ from dbos import DBOS
 from pydantic_ai import DeferredToolRequests, DeferredToolResults
 from pydantic_ai.messages import ModelMessage
 
-from app.repositories.chat_repo import ChatRepository, InboundContext, Message
+from app.repositories.project_repo import InboundContext, Message, ProjectRepository
 from app.services.agent import get_agent_for, to_model_messages
 
 
@@ -156,7 +156,7 @@ async def run_agent_step(
 
 
 async def run_turn(
-    repo: ChatRepository,
+    repo: ProjectRepository,
     conversation_id: str,
     system_prompt: str,
     model: str,
@@ -225,7 +225,7 @@ async def run_turn(
 
 
 async def stream_turn(
-    repo: ChatRepository,
+    repo: ProjectRepository,
     conversation_id: str,
     system_prompt: str,
     model: str,

@@ -128,7 +128,7 @@ def _to_edge(row: dict[str, Any]) -> Edge:
     )
 
 
-class ChatRepository:
+class ProjectRepository:
     """PostgREST access scoped to one user."""
 
     def __init__(self, client: Client, user_id: str) -> None:
