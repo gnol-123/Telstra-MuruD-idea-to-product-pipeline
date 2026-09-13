@@ -255,7 +255,7 @@ async def chat_stream(
 
     Events: ``start``, ``chunk``, ``done``, ``error``, and ``approval_required``
     when a tool needs approval. That last one ends the stream with no ``done``.
-    Never DBOS-checkpointed; setup and persistence otherwise match POST /chat.
+    Checkpointed on the same terms as POST /chat: DBOS configured and no tools.
     """
     node = await to_thread.run_sync(repo.get_agent_node, str(req.node_id))
     if node is None:
@@ -285,6 +285,7 @@ async def chat_stream(
             node.model,
             req.prompt,
             client_token=req.client_token,
+            durable=bool(settings.dbos_database_url),
             instructions=instructions,
             toolsets=toolsets,
         ):
