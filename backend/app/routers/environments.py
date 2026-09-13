@@ -5,15 +5,18 @@ agents and tools, because the canvas creates all three the same way. Only
 create_environment_node is exported for that; everything else is a route here.
 """
 
+import posixpath
 from typing import Any, Literal
 from uuid import UUID
 
 from anyio import to_thread
-from fastapi import APIRouter, HTTPException, status
+from e2b import AsyncSandbox, FileNotFoundException, FileType
+from fastapi import APIRouter, HTTPException, Query, status
 from pydantic import BaseModel, Field
 
 from app.config import settings
-from app.environments import lifecycle
+from app.environments import e2b, lifecycle
+from app.environments.base import WORKSPACE_ROOT, EnvContext
 from app.repositories.environment_repo import EnvNode
 from app.routers.deps import EnvRepo
 
@@ -72,6 +75,29 @@ class UpdateEnvironmentRequest(BaseModel):
     tool_policy: Literal["ask", "auto"] | None = None
 
 
+class FileEntry(BaseModel):
+    name: str
+    type: str
+    path: str
+    size: int = 0
+
+
+class FileListResponse(BaseModel):
+    path: str
+    entries: list[FileEntry]
+
+
+class FileContentResponse(BaseModel):
+    path: str
+    content: str
+    truncated: bool = False
+
+
+class PreviewResponse(BaseModel):
+    port: int
+    url: str
+
+
 async def _load(project_id: UUID, node_id: UUID, env_repo: EnvRepo) -> EnvNode:
     """The node, or 404. Also refuses a node from another project."""
     node = await to_thread.run_sync(env_repo.get_environment_node, str(node_id))
@@ -79,6 +105,50 @@ async def _load(project_id: UUID, node_id: UUID, env_repo: EnvRepo) -> EnvNode:
         raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Environment not found")
     return node
 
+
+async def _load_ready(project_id: UUID, node_id: UUID, env_repo: EnvRepo) -> EnvNode:
+    """A node with a live sandbox, or 409 naming the status it is actually in."""
+    node = await _load(project_id, node_id, env_repo)
+    if node.status != "ready" or not node.sandbox_id:
+        raise HTTPException(
+            status_code=status.HTTP_409_CONFLICT,
+            detail=f"Environment is {node.status}. Start it first.",
+        )
+    return node
+
+
+async def _sandbox_or_502(env_repo: EnvRepo, node: EnvNode) -> AsyncSandbox:
+    """Connect, resuming a paused sandbox, or record the failure and 502.
+        Ensure node errors this turn not the next.
+    """
+    ctx = EnvContext(
+        node_id=node.id,
+        project_id=node.project_id,
+        name=node.name,
+        config=node.config,
+        status=node.status,
+    )
+    try:
+        return await e2b.connect(ctx)
+    except Exception as exc:
+        detail = f"{type(exc).__name__}: {exc}"[:500]
+        await to_thread.run_sync(lambda: env_repo.set_status(node.id, "error", detail))
+        raise HTTPException(
+            status_code=status.HTTP_502_BAD_GATEWAY,
+            detail=f"Environment unreachable: {detail}",
+        ) from exc
+
+
+def _resolve(path: str) -> str:
+    """
+    Normalise a browsing path. Absolute paths are allowed on purpose.
+    """
+    if "\x00" in path:
+        raise HTTPException(status_code=status.HTTP_422_UNPROCESSABLE_ENTITY, detail="Invalid path")
+    return posixpath.normpath(path)
+
+
+# -- ROUTES ---------------------------------------------------------------
 
 @router.get("/{node_id}", response_model=EnvironmentNodeResponse)
 async def get_environment(
@@ -141,6 +211,92 @@ async def verify_environment(
     """Re-check that the sandbox is reachable and record the answer."""
     node = await _load(project_id, node_id, env_repo)
     return EnvironmentNodeResponse.of(await lifecycle.verify(env_repo, node))
+
+
+_ENTRY_TYPES = {
+    FileType.DIR: "dir",
+    FileType.FILE: "file",
+    FileType.SYMLINK: "symlink",
+}
+
+
+@router.get("/{node_id}/files", response_model=FileListResponse)
+async def list_environment_files(
+    project_id: UUID,
+    node_id: UUID,
+    env_repo: EnvRepo,
+    path: str = Query(default=WORKSPACE_ROOT, max_length=4096),
+) -> FileListResponse:
+    """One directory, one level deep. The tree view walks it a level at a time."""
+    node = await _load_ready(project_id, node_id, env_repo)
+    resolved = _resolve(path)
+    sandbox = await _sandbox_or_502(env_repo, node)
+    try:
+        entries = await sandbox.files.list(resolved, depth=1)
+    except FileNotFoundException as exc:
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND, detail=f"No such directory: {path}"
+        ) from exc
+
+    return FileListResponse(
+        path=resolved,
+        entries=[
+            FileEntry(
+                name=e.name,
+                type=_ENTRY_TYPES.get(e.type, "file"),
+                path=e.path,
+                size=getattr(e, "size", 0) or 0,
+            )
+            for e in entries
+        ],
+    )
+
+
+@router.get("/{node_id}/files/content", response_model=FileContentResponse)
+async def read_environment_file(
+    project_id: UUID,
+    node_id: UUID,
+    env_repo: EnvRepo,
+    path: str = Query(min_length=1, max_length=4096),
+) -> FileContentResponse:
+    """One text file, capped. Binary is refused rather than mangled."""
+    node = await _load_ready(project_id, node_id, env_repo)
+    resolved = _resolve(path)
+    sandbox = await _sandbox_or_502(env_repo, node)
+    try:
+        content = await sandbox.files.read(resolved)
+    except FileNotFoundException as exc:
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND, detail=f"No such file: {path}"
+        ) from exc
+    except UnicodeDecodeError as exc:
+        raise HTTPException(
+            status_code=status.HTTP_415_UNSUPPORTED_MEDIA_TYPE,
+            detail=f"Binary file, cannot display as text: {path}",
+        ) from exc
+
+    cap = settings.environment_max_file_chars
+    truncated = len(content) > cap
+    return FileContentResponse(
+        path=resolved, content=content[:cap] if truncated else content, truncated=truncated
+    )
+
+
+@router.get("/{node_id}/preview", response_model=PreviewResponse)
+async def preview_environment_port(
+    project_id: UUID,
+    node_id: UUID,
+    env_repo: EnvRepo,
+    port: int = Query(ge=1, le=65535),
+) -> PreviewResponse:
+    """A public URL for whatever the agent is serving on that port.
+
+    Connecting first is deliberate: it resumes a paused sandbox, so the link
+    works rather than 502ing on the viewer's first request.
+    """
+    node = await _load_ready(project_id, node_id, env_repo)
+    sandbox = await _sandbox_or_502(env_repo, node)
+    return PreviewResponse(port=port, url=f"https://{sandbox.get_host(port)}")
 
 
 # -- creation, called from the shared node endpoint ---------------------------
