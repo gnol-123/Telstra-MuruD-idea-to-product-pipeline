@@ -5,25 +5,36 @@ CI tests for:
   - POST /projects/{id}/nodes with kind='tool' (the "add tool" endpoint)
 
 Written against dependency_overrides, since get_current_user / get_tool_repository
-are FastAPI Depends() — no real Supabase call needed for these three cases.
+are FastAPI Depends() -- no real Supabase call needed for these three cases.
 If your suite already has an auth fixture, use that instead of `fake_user` below;
 the assertions are the part that matters.
 """
 
-from unittest.mock import MagicMock
+from unittest.mock import AsyncMock, MagicMock
 
 from app.main import app
 from app.routers.auth import UserResponse, get_current_user
-from app.routers.deps import get_tool_repository
+from app.routers.deps import get_chat_repository, get_tool_repository
 
-# `client` fixture comes from conftest.py — no need to redefine it here.
+# `client` fixture comes from conftest.py -- no need to redefine it here.
 
-FAKE_USER = UserResponse(id="00000000-0000-0000-0000-000000000001", email="test@example.com")
+FAKE_USER = UserResponse(
+    id="00000000-0000-0000-0000-000000000001", email="test@example.com"
+)
 FAKE_PROJECT_ID = "00000000-0000-0000-0000-0000000000aa"
 
 
 def fake_user():
     return FAKE_USER
+
+
+def mock_with_name(name: str, **attrs) -> MagicMock:
+    """MagicMock(name=...) sets the mock's repr, not a real attribute --
+    this sets `.name` as an actual attribute afterwards instead.
+    """
+    mock = MagicMock(**attrs)
+    mock.name = name
+    return mock
 
 
 class TestUnauthenticated:
@@ -49,18 +60,17 @@ class TestListToolTypes:
     """GET /tool-types returns the catalog for the palette."""
 
     def test_returns_catalog_entries(self, client):
+        mock_tool_type = mock_with_name(
+            "Brave Search",
+            id="00000000-0000-0000-0000-0000000000bb",
+            slug="brave_search",
+            description="Search the web",
+            config_schema={"fields": []},
+            secret_fields=["api_key"],
+            auth_kind="token",
+        )
         mock_repo = MagicMock()
-        mock_repo.list_tool_types.return_value = [
-            MagicMock(
-                id="00000000-0000-0000-0000-0000000000bb",
-                slug="brave_search",
-                name="Brave Search",
-                description="Search the web",
-                config_schema={"fields": []},
-                secret_fields=["api_key"],
-                auth_kind="token",
-            )
-        ]
+        mock_repo.list_tool_types.return_value = [mock_tool_type]
 
         app.dependency_overrides[get_current_user] = fake_user
         app.dependency_overrides[get_tool_repository] = lambda: mock_repo
@@ -75,6 +85,7 @@ class TestListToolTypes:
         body = response.json()
         assert len(body) == 1
         assert body[0]["slug"] == "brave_search"
+        assert body[0]["name"] == "Brave Search"
         assert body[0]["auth_kind"] == "token"
 
 
@@ -86,18 +97,18 @@ class TestAddToolNode:
         mock_chat_repo.get_project.return_value = MagicMock(id=FAKE_PROJECT_ID)
 
         mock_tool_repo = MagicMock()
-        mock_tool_repo.get_tool_type.return_value = MagicMock(
+        mock_tool_repo.get_tool_type.return_value = mock_with_name(
+            "Brave Search",
             id="00000000-0000-0000-0000-0000000000bb",
             slug="brave_search",
-            name="Brave Search",
             config_schema={"fields": [{"key": "api_key"}], "default_url": None},
             secret_fields=["api_key"],
         )
         mock_tool_repo.create_tool_node.return_value = "new-node-id"
-        mock_tool_repo.get_tool_node.return_value = MagicMock(
+        mock_tool_repo.get_tool_node.return_value = mock_with_name(
+            "Brave Search",
             id="new-node-id",
             project_id=FAKE_PROJECT_ID,
-            name="Brave Search",
             tool_slug="brave_search",
             config={},
             status="pending",
@@ -105,15 +116,14 @@ class TestAddToolNode:
         )
         mock_tool_repo.secret_keys.return_value = ["api_key"]
 
-        from app.routers.deps import get_chat_repository
-
         app.dependency_overrides[get_current_user] = fake_user
         app.dependency_overrides[get_chat_repository] = lambda: mock_chat_repo
         app.dependency_overrides[get_tool_repository] = lambda: mock_tool_repo
-        # Skip the real network call inside _verify_tool_node.
+        # _verify_tool_node is `async def` -- an AsyncMock is required so the
+        # route's `await` gets a coroutine back instead of a bare None.
         monkeypatch.setattr(
             "app.routers.projects._verify_tool_node",
-            lambda *a, **kw: None,
+            AsyncMock(return_value=None),
         )
         try:
             response = client.post(
@@ -140,8 +150,6 @@ class TestAddToolNode:
         mock_chat_repo.get_project.return_value = MagicMock(id=FAKE_PROJECT_ID)
         mock_tool_repo = MagicMock()
         mock_tool_repo.get_tool_type.return_value = None
-
-        from app.routers.deps import get_chat_repository
 
         app.dependency_overrides[get_current_user] = fake_user
         app.dependency_overrides[get_chat_repository] = lambda: mock_chat_repo
