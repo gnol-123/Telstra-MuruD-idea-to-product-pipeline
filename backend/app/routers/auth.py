@@ -6,6 +6,7 @@ from typing import Annotated
 
 from fastapi import APIRouter, Depends, HTTPException, status
 from fastapi.security import HTTPAuthorizationCredentials, HTTPBearer
+from httpx import RemoteProtocolError
 from pydantic import BaseModel, EmailStr, Field
 from supabase import ClientOptions, create_client
 
@@ -71,7 +72,18 @@ async def get_current_user(
         raise _credentials_error("Not authenticated")
 
     try:
-        response = get_client().auth.get_user(credentials.credentials)
+        try:
+            response = get_client().auth.get_user(credentials.credentials)
+        except RemoteProtocolError:
+            # retry stale pool HTTP/2 connection
+            response = get_client().auth.get_user(credentials.credentials)
+    except RemoteProtocolError as exc:
+        # retry failed too, so it's the upstream not the token
+        logger.warning("supabase auth unreachable", exc_info=True)
+        raise HTTPException(
+            status_code=status.HTTP_502_BAD_GATEWAY,
+            detail="Auth service unavailable",
+        ) from exc
     except Exception as exc:  # noqa: BLE001 - any auth failure is a 401
         raise _credentials_error("Invalid or expired token") from exc
 
