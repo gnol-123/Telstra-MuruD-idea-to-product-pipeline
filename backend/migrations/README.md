@@ -8,7 +8,9 @@ creates, so run it second.
 | `init.sql` | Tables, indexes, triggers, and the seeded catalogs. Run first. |
 | `rls.sql` | Row Level Security policies. Run second. |
 | `tools.sql` | Tool call audit, the approval pause, and vault-backed secrets. Run third. |
-| `apply.py` | Runs all three, in order, in one transaction. |
+| `oauth.sql` | OAuth token storage for tool nodes that connect rather than take a key. Run fourth. |
+| `environments.sql` | Environment edge validation, one scratch space per project, and backfills. Run fifth. |
+| `apply.py` | Runs them all, in order, in one transaction. |
 
 ## Applying
 

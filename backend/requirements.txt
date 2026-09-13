@@ -4,6 +4,7 @@ pydantic-settings==2.7.1
 email-validator==2.2.0
 python-dotenv==1.2.3
 pydantic-ai-slim[google,mcp]==2.32.1
+e2b==2.49.1
 supabase==2.31.0
 dbos==2.30.0
 httpx==0.28.1
