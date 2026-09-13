@@ -18,9 +18,7 @@ from app.routers.deps import get_chat_repository, get_tool_repository
 
 # `client` fixture comes from conftest.py -- no need to redefine it here.
 
-FAKE_USER = UserResponse(
-    id="00000000-0000-0000-0000-000000000001", email="test@example.com"
-)
+FAKE_USER = UserResponse(id="00000000-0000-0000-0000-000000000001", email="test@example.com")
 FAKE_PROJECT_ID = "00000000-0000-0000-0000-0000000000aa"
 FAKE_NODE_ID = "00000000-0000-0000-0000-0000000000cc"
 
@@ -76,9 +74,7 @@ class TestListToolTypes:
         app.dependency_overrides[get_current_user] = fake_user
         app.dependency_overrides[get_tool_repository] = lambda: mock_repo
         try:
-            response = client.get(
-                "/tool-types", headers={"Authorization": "Bearer fake-token"}
-            )
+            response = client.get("/tool-types", headers={"Authorization": "Bearer fake-token"})
         finally:
             app.dependency_overrides.clear()
 
