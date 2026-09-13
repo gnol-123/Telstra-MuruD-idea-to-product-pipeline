@@ -17,6 +17,9 @@ import {
 const API_URL = (
   process.env.NEXT_PUBLIC_API_URL ?? "http://localhost:8000"
 ).replace(/\/$/, "");
+const API_URL = (
+  process.env.NEXT_PUBLIC_API_URL ?? "http://localhost:8000"
+).replace(/\/$/, "");
 
 class ApiError extends Error {
   status: number;
@@ -84,6 +87,7 @@ async function request<T>(
 }
 
 // Auth
+// Auth
 
 export async function signup(email: string, password: string) {
   return request<{ message: string }>("/auth/signup", {
@@ -125,6 +129,7 @@ export async function googleLoginUrl(redirectTo?: string) {
 }
 
 // Agent types (catalog)
+// Agent types (catalog)
 
 export async function getAgentTypes() {
   return request<AgentType[]>("/agent-types", { auth: true });
@@ -136,6 +141,7 @@ export async function getToolTypes() {
   return request<ToolType[]>("/tool-types", { auth: true });
 }
 
+// Projects
 // Projects
 
 export async function listProjects() {
@@ -274,6 +280,7 @@ export async function deleteEdge(projectId: string, edgeId: string) {
   });
 }
 
+// Chat
 // Chat
 
 export async function sendChat(
