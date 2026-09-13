@@ -17,9 +17,6 @@ import {
 const API_URL = (
   process.env.NEXT_PUBLIC_API_URL ?? "http://localhost:8000"
 ).replace(/\/$/, "");
-const API_URL = (
-  process.env.NEXT_PUBLIC_API_URL ?? "http://localhost:8000"
-).replace(/\/$/, "");
 
 class ApiError extends Error {
   status: number;
@@ -29,29 +26,9 @@ class ApiError extends Error {
   }
 }
 
-// Refreshes the stored access token using the stored refresh token.
-// Returns true if it worked (and saves the new tokens), false otherwise.
-async function doRefresh(): Promise<boolean> {
-  const stored = loadAuth();
-  if (!stored) return false;
-  try {
-    const res = await fetch(`${API_URL}/auth/refresh`, {
-      method: "POST",
-      headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({ refresh_token: stored.refresh_token }),
-    });
-    if (!res.ok) return false;
-    const tokens = await res.json();
-    saveAuth({ access_token: tokens.access_token, refresh_token: tokens.refresh_token });
-    return true;
-  } catch {
-    return false;
-  }
-}
-
 async function request<T>(
   path: string,
-  opts: { method?: string; body?: unknown; auth?: boolean; _retried?: boolean } = {}
+  opts: { method?: string; body?: unknown; auth?: boolean } = {}
 ): Promise<T> {
   const headers: Record<string, string> = { "Content-Type": "application/json" };
 
@@ -72,21 +49,12 @@ async function request<T>(
   const data = await res.json().catch(() => ({}));
 
   if (!res.ok) {
-    // A dead access token isn't fatal mid-session — refresh once and
-    // replay the exact same call before giving up.
-    if (res.status === 401 && opts.auth && !opts._retried) {
-      const refreshed = await doRefresh();
-      if (refreshed) return request<T>(path, { ...opts, _retried: true });
-      // Refresh token is dead too — nothing left to do but log out locally.
-      clearAuth();
-    }
     // 404 means "not found, or not yours" per API.md — never assume which.
     throw new ApiError(res.status, data?.detail ?? res.statusText);
   }
   return data as T;
 }
 
-// Auth
 // Auth
 
 export async function signup(email: string, password: string) {
@@ -129,7 +97,6 @@ export async function googleLoginUrl(redirectTo?: string) {
 }
 
 // Agent types (catalog)
-// Agent types (catalog)
 
 export async function getAgentTypes() {
   return request<AgentType[]>("/agent-types", { auth: true });
@@ -141,7 +108,6 @@ export async function getToolTypes() {
   return request<ToolType[]>("/tool-types", { auth: true });
 }
 
-// Projects
 // Projects
 
 export async function listProjects() {
@@ -280,7 +246,6 @@ export async function deleteEdge(projectId: string, edgeId: string) {
   });
 }
 
-// Chat
 // Chat
 
 export async function sendChat(
