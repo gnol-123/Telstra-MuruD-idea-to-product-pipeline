@@ -7,7 +7,7 @@ CI tests for:
 Written against dependency_overrides, since get_current_user / get_tool_repository
 are FastAPI Depends() -- no real Supabase call needed for these three cases.
 If your suite already has an auth fixture, use that instead of `fake_user` below;
-the assertions are the part that matters.
+the assertions are the part that matters
 """
 
 from unittest.mock import AsyncMock, MagicMock
