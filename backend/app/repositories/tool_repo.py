@@ -11,6 +11,7 @@ from typing import Any
 from app.services.supabase import get_service_client
 
 _TOOL_TYPE_COLUMNS = "id, slug, name, description, config_schema, secret_fields, auth_kind"
+_TOOL_PRESET_COLUMNS = "id, slug, name, description, tool_type_id, config, tool_types(slug)"
 _TOOL_NODE_COLUMNS = (
     "id, project_id, name, tool_type_id, config, status, status_detail, tool_types(slug)"
 )
@@ -29,6 +30,19 @@ class ToolType:
     config_schema: dict[str, Any]
     secret_fields: list[str]
     auth_kind: str = "token"
+
+
+@dataclass(frozen=True)
+class ToolPreset:
+    """A library entry: a tool type plus the config to instantiate it with."""
+
+    id: str
+    slug: str
+    name: str
+    description: str | None
+    tool_type_id: str
+    tool_slug: str
+    config: dict[str, Any]
 
 
 @dataclass(frozen=True)
@@ -52,6 +66,19 @@ def _to_tool_type(row: dict[str, Any]) -> ToolType:
         config_schema=row.get("config_schema") or {},
         secret_fields=row.get("secret_fields") or [],
         auth_kind=row.get("auth_kind") or "token",
+    )
+
+
+def _to_tool_preset(row: dict[str, Any]) -> ToolPreset:
+    tool_type = row.get("tool_types") or {}
+    return ToolPreset(
+        id=row["id"],
+        slug=row["slug"],
+        name=row["name"],
+        description=row.get("description"),
+        tool_type_id=row["tool_type_id"],
+        tool_slug=tool_type.get("slug", ""),
+        config=row.get("config") or {},
     )
 
 
@@ -95,6 +122,29 @@ class ToolRepository:
             .execute()
         ).data
         return _to_tool_type(rows[0]) if rows else None
+
+    # -- presets ------------------------------------------------------------
+
+    def list_presets(self) -> list[ToolPreset]:
+        rows = (
+            self._db.table("tool_presets")
+            .select(_TOOL_PRESET_COLUMNS)
+            .eq("is_active", True)
+            .order("sort_order")
+            .execute()
+        ).data
+        return [_to_tool_preset(r) for r in rows]
+
+    def get_preset(self, slug: str) -> ToolPreset | None:
+        rows = (
+            self._db.table("tool_presets")
+            .select(_TOOL_PRESET_COLUMNS)
+            .eq("slug", slug)
+            .eq("is_active", True)
+            .limit(1)
+            .execute()
+        ).data
+        return _to_tool_preset(rows[0]) if rows else None
 
     # -- nodes ----------------------------------------------------------------
 

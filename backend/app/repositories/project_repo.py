@@ -38,6 +38,8 @@ class AgentType:
     name: str
     system_prompt: str
     model: str
+    # Preset slugs wired on creation. Unknown slugs are skipped by the router.
+    default_presets: list[str] = field(default_factory=list)
 
 
 @dataclass(frozen=True)
@@ -140,7 +142,7 @@ class ProjectRepository:
     def list_agent_types(self) -> list[AgentType]:
         rows = (
             self._db.table("agent_types")
-            .select("id, slug, name, system_prompt, model")
+            .select("id, slug, name, system_prompt, model, default_presets")
             .eq("is_active", True)
             .order("sort_order")
             .execute()
@@ -152,6 +154,7 @@ class ProjectRepository:
                 name=r["name"],
                 system_prompt=r["system_prompt"],
                 model=r["model"],
+                default_presets=r.get("default_presets") or [],
             )
             for r in rows
         ]
@@ -159,7 +162,7 @@ class ProjectRepository:
     def get_agent_type(self, slug: str) -> AgentType | None:
         rows = (
             self._db.table("agent_types")
-            .select("id, slug, name, system_prompt, model")
+            .select("id, slug, name, system_prompt, model, default_presets")
             .eq("slug", slug)
             .eq("is_active", True)
             .limit(1)
@@ -174,6 +177,7 @@ class ProjectRepository:
             name=r["name"],
             system_prompt=r["system_prompt"],
             model=r["model"],
+            default_presets=r.get("default_presets") or [],
         )
 
     # -- projects -----------------------------------------------------------
