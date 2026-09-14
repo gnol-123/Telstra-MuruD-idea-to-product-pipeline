@@ -14,6 +14,8 @@ class Settings(BaseSettings):
     cors_origins: str = "*"
     gemini_api_key: str = ""
     gemini_model: str = "gemini-3-flash-preview"
+    # Platform keys for default tools. A user's own node secret overrides these.
+    brave_api_key: str = ""
     supabase_url: str = ""
     supabase_key: str = ""
     # Service role key. Bypasses RLS. Required for Supabase Vault

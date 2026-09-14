@@ -24,7 +24,7 @@ from app.routers.environments import EnvironmentNodeResponse, create_environment
 from app.services.agent import summarise_conversation
 from app.tools.base import ToolContext
 from app.tools.oauth_refresh import TokenExchangeError, with_access_token
-from app.tools.registry import get_spec
+from app.tools.registry import get_spec, platform_secrets
 
 router = APIRouter(tags=["projects"])
 
@@ -193,9 +193,12 @@ class ToolNodeResponse(BaseModel):
     status_detail: str | None = None
     # Names only. Values are never returned.
     secrets_set: list[str] = []
+    # Platform keys in effect that the user has not overridden.
+    platform_provided: list[str] = []
 
     @classmethod
     def of(cls, n: ToolNode, secrets_set: list[str]) -> "ToolNodeResponse":
+        provided = sorted(k for k in platform_secrets(n.tool_slug) if k not in secrets_set)
         return cls(
             id=UUID(n.id),
             project_id=UUID(n.project_id),
@@ -205,6 +208,7 @@ class ToolNodeResponse(BaseModel):
             status=n.status,
             status_detail=n.status_detail,
             secrets_set=secrets_set,
+            platform_provided=provided,
         )
 
 
@@ -428,6 +432,7 @@ async def _verify_tool_node(node_id: str, tool_repo: ToolRepo) -> None:
         )
         return
 
+    secrets = {**platform_secrets(node.tool_slug), **secrets}
     try:
         secrets = await with_access_token(node.tool_slug, node.id, secrets)
     except TokenExchangeError:
