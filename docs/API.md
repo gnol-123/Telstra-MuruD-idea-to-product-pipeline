@@ -169,6 +169,15 @@ The node's conversation is created at the same time, so it can be chatted with
 immediately. **Several nodes may share one `agent_slug`**: that is how a
 project holds a team rather than one agent of each kind.
 
+**`kind='agent'` now provisions the agent type's `default_presets`**: one tool
+node per preset, each with a `tool` edge into the new agent, placed to its
+left. The response is still the agent's own node. Reload the canvas after
+creating an agent; one call now creates several nodes and edges. Unknown or
+failing presets are skipped and logged.
+
+**`kind='tool'` accepts `preset_slug`** as an alternative to `tool_slug`. The
+preset's `config` is the base and the request's `config` overrides it.
+
 `404` if the project is not yours or the slug is unknown. A missing project
 returns `404` rather than `403`, since `403` would confirm it exists.
 
