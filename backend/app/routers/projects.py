@@ -1,5 +1,6 @@
 """Projects and the agent nodes provisioned inside them."""
 
+import logging
 from datetime import datetime
 from typing import Any, Literal
 from uuid import UUID
@@ -27,6 +28,13 @@ from app.tools.oauth_refresh import TokenExchangeError, with_access_token
 from app.tools.registry import get_spec, platform_secrets
 
 router = APIRouter(tags=["projects"])
+
+log = logging.getLogger(__name__)
+
+# Where default tool boxes land relative to their agent. Overlap is the
+# frontend's problem.
+_DEFAULT_TOOL_DX = -260
+_DEFAULT_TOOL_DY = 90
 
 
 # -- PROJECTS ------------------------------------------------------------------
@@ -297,6 +305,8 @@ async def create_node(
         # A retried create. The wiring is already there.
         pass
 
+    await _wire_default_presets(project_id, node_id, agent_type, req, repo, tool_repo)
+
     node = await to_thread.run_sync(repo.get_agent_node, node_id)
     if node is None:
         raise HTTPException(
@@ -476,6 +486,48 @@ async def _create_tool_node(
         )
     secrets_set = await to_thread.run_sync(tool_repo.secret_keys, node_id)
     return ToolNodeResponse.of(node, secrets_set)
+
+
+async def _wire_default_presets(
+    project_id: UUID,
+    node_id: str,
+    agent_type: AgentType,
+    req: CreateNodeRequest,
+    repo: ProjectRepo,
+    tool_repo: ToolRepo,
+) -> None:
+    """Create and connect the presets an agent type lists.
+
+    Each preset is independent: an unknown slug or a failed create is logged
+    and skipped, never raised, so a typo in a seed cannot block creating an
+    agent. Not transactional, by the same reasoning as the scratch edge: a
+    half-wired agent is visible and deletable.
+    """
+    for i, slug in enumerate(agent_type.default_presets):
+        preset = await to_thread.run_sync(tool_repo.get_preset, slug)
+        if preset is None:
+            log.warning("agent type %s lists unknown preset %s", agent_type.slug, slug)
+            continue
+        tool_type = await to_thread.run_sync(tool_repo.get_tool_type, preset.tool_slug)
+        if tool_type is None:
+            log.warning("preset %s names unknown tool type %s", slug, preset.tool_slug)
+            continue
+        try:
+            tool_id = await _provision_tool_node(
+                project_id,
+                tool_type,
+                preset.name,
+                dict(preset.config),
+                {},
+                position_x=req.position_x + _DEFAULT_TOOL_DX,
+                position_y=req.position_y + i * _DEFAULT_TOOL_DY,
+                tool_repo=tool_repo,
+            )
+            await to_thread.run_sync(lambda t=tool_id: repo.create_edge(t, node_id, "tool"))
+        except DuplicateEdge:
+            pass
+        except Exception:
+            log.exception("default preset %s failed for agent %s", slug, node_id)
 
 
 async def _verify_tool_node(node_id: str, tool_repo: ToolRepo) -> None:
