@@ -17,12 +17,14 @@ _REGISTRY: dict[str, ToolSpec] = {
     "mcp_server": ToolSpec(kind="mcp", build=generic.build, verify=generic.verify),
     "github": ToolSpec(kind="mcp", build=github.build, verify=github.verify),
     "gmail": ToolSpec(kind="mcp", build=gmail.build, verify=gmail.verify),
+    "context7": ToolSpec(kind="mcp", build=generic.build, verify=generic.verify),
 }
 
 # Operator-supplied keys, keyed as each handler reads them from ctx.secrets.
 # A slug absent here has no platform key.
 _PLATFORM_KEYS: dict[str, dict[str, str]] = {
     "brave_search": {"api_key": "brave_api_key"},
+    "context7": {"auth_token": "context7_api_key"},
 }
 
 
