@@ -17,7 +17,7 @@ import sys
 import psycopg
 from dotenv import dotenv_values
 
-MIGRATIONS = ["init.sql", "rls.sql", "tools.sql", "oauth.sql", "environments.sql"]
+MIGRATIONS = ["init.sql", "rls.sql", "tools.sql", "oauth.sql", "environments.sql", "defaults.sql"]
 HERE = pathlib.Path(__file__).parent
 
 EXPECTED_TABLES = [
@@ -29,6 +29,7 @@ EXPECTED_TABLES = [
     "nodes",
     "projects",
     "tool_calls",
+    "tool_presets",
     "tool_types",
 ]
 
@@ -84,6 +85,9 @@ def report(cur) -> None:
 
     cur.execute("select slug from public.tool_types order by sort_order")
     print(f"tool types  : {[r[0] for r in cur.fetchall()]}")
+
+    cur.execute("select slug from public.tool_presets order by sort_order")
+    print(f"presets     : {[r[0] for r in cur.fetchall()]}")
 
 
 def main() -> int:
