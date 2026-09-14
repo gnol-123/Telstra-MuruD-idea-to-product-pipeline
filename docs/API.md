@@ -117,7 +117,7 @@ conversation.
 [ { "id": "uuid", "slug": "market_research", "name": "Market Research",
     "default_presets": ["brave_search", "research_method"] } ]
 ```
-Seeded: `market_research`, `project_scoping`, `coding`. Adding one is a SQL
+Seeded: `market_research`, `project_scoping`, `coding`, `ux_ui`. Adding one is a SQL
 insert, not a deploy. See `backend/migrations/README.md`.
 
 `default_presets` is a list of preset slugs this agent type comes pre-equipped
@@ -173,7 +173,9 @@ project holds a team rather than one agent of each kind.
 node per preset, each with a `tool` edge into the new agent, placed to its
 left. The response is still the agent's own node. Reload the canvas after
 creating an agent; one call now creates several nodes and edges. Unknown or
-failing presets are skipped and logged.
+failing presets are skipped and logged. The call is not idempotent: a retried or
+double-sent request creates a second agent and a second set of default tools,
+so clients must debounce.
 
 **`kind='tool'` accepts `preset_slug`** as an alternative to `tool_slug`. The
 preset's `config` is the base and the request's `config` overrides it.

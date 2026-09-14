@@ -441,6 +441,11 @@ async def _create_tool_node(
             status_code=status.HTTP_422_UNPROCESSABLE_ENTITY,
             detail="tool_slug or preset_slug is required for kind='tool'",
         )
+    if req.tool_slug and req.preset_slug:
+        raise HTTPException(
+            status_code=status.HTTP_422_UNPROCESSABLE_ENTITY,
+            detail="Send tool_slug or preset_slug, not both",
+        )
 
     preset = None
     tool_slug = req.tool_slug
@@ -501,9 +506,11 @@ async def _wire_default_presets(
     Each preset is independent: an unknown slug or a failed create is logged
     and skipped, never raised, so a typo in a seed cannot block creating an
     agent. Not transactional, by the same reasoning as the scratch edge: a
-    half-wired agent is visible and deletable.
+    half-wired agent is visible and deletable. Nothing here is idempotent: a
+    retried request creates a second agent and a second set of defaults.
     """
-    for i, slug in enumerate(agent_type.default_presets):
+    created: list[str] = []
+    for slug in agent_type.default_presets:
         preset = await to_thread.run_sync(tool_repo.get_preset, slug)
         if preset is None:
             log.warning("agent type %s lists unknown preset %s", agent_type.slug, slug)
@@ -520,14 +527,18 @@ async def _wire_default_presets(
                 dict(preset.config),
                 {},
                 position_x=req.position_x + _DEFAULT_TOOL_DX,
-                position_y=req.position_y + i * _DEFAULT_TOOL_DY,
+                position_y=req.position_y + len(created) * _DEFAULT_TOOL_DY,
                 tool_repo=tool_repo,
             )
-            await to_thread.run_sync(lambda t=tool_id: repo.create_edge(t, node_id, "tool"))
-        except DuplicateEdge:
-            pass
         except Exception:
             log.exception("default preset %s failed for agent %s", slug, node_id)
+            continue
+        created.append(tool_id)
+        try:
+            await to_thread.run_sync(lambda t=tool_id: repo.create_edge(t, node_id, "tool"))
+        except Exception:
+            # The tool node exists with no edge. Named so it can be cleaned up.
+            log.exception("edge for preset %s failed; orphan tool node %s", slug, tool_id)
 
 
 async def _verify_tool_node(node_id: str, tool_repo: ToolRepo) -> None:

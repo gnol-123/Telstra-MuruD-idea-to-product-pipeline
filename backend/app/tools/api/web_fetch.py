@@ -5,7 +5,10 @@ view of this tool.
 """
 
 import html as html_lib
+import ipaddress
 import re
+import socket
+from urllib.parse import urlparse
 
 import httpx
 from pydantic_ai.toolsets import FunctionToolset
@@ -13,8 +16,9 @@ from pydantic_ai.toolsets import FunctionToolset
 from app.tools.base import ToolContext, VerifyResult
 
 _TIMEOUT = 15.0
-_MAX_BYTES = 2_000_000
+_MAX_BYTES = 500_000
 _MAX_CHARS = 20_000
+_MAX_REDIRECTS = 5
 
 _SLUG_SAFE = re.compile(r"[^a-z0-9_]+")
 _MAX_NAME = 64
@@ -46,6 +50,22 @@ def _transport() -> httpx.AsyncBaseTransport | None:
     return None
 
 
+def _is_public(url: str) -> bool:
+    """False for anything that resolves to loopback, private, link-local or reserved space."""
+    host = urlparse(url).hostname
+    if not host:
+        return False
+    try:
+        infos = socket.getaddrinfo(host, None)
+    except OSError:
+        return False
+    for info in infos:
+        ip = ipaddress.ip_address(info[4][0])
+        if ip.is_private or ip.is_loopback or ip.is_link_local or ip.is_reserved:
+            return False
+    return bool(infos)
+
+
 def build(ctx: ToolContext) -> FunctionToolset:
     async def web_fetch(url: str) -> str:
         """Fetch a web page and return its readable text.
@@ -55,21 +75,33 @@ def build(ctx: ToolContext) -> FunctionToolset:
         """
         if not url.lower().startswith(("http://", "https://")):
             return "Only http and https URLs can be fetched."
+        # ponytail: resolve-then-connect leaves a DNS rebinding window; pinning
+        # the resolved IP needs a custom transport, add if this ever faces the internet.
         try:
             async with httpx.AsyncClient(
-                timeout=_TIMEOUT, follow_redirects=True, transport=_transport()
+                timeout=_TIMEOUT, follow_redirects=False, transport=_transport()
             ) as http:
-                async with http.stream("GET", url) as response:
-                    if response.status_code >= 400:
-                        return f"Fetch failed: HTTP {response.status_code}."
-                    chunks: list[bytes] = []
-                    size = 0
-                    async for chunk in response.aiter_bytes():
-                        chunks.append(chunk)
-                        size += len(chunk)
-                        if size >= _MAX_BYTES:
-                            break
-                    body = b"".join(chunks).decode(response.encoding or "utf-8", "replace")
+                for _ in range(_MAX_REDIRECTS + 1):
+                    if not _is_public(url):
+                        return "That address is not reachable from here."
+                    async with http.stream("GET", url) as response:
+                        if response.is_redirect:
+                            target = response.headers.get("location", "")
+                            url = str(response.url.join(target))
+                            continue
+                        if response.status_code >= 400:
+                            return f"Fetch failed: HTTP {response.status_code}."
+                        chunks: list[bytes] = []
+                        size = 0
+                        async for chunk in response.aiter_bytes():
+                            if size + len(chunk) > _MAX_BYTES:
+                                break
+                            chunks.append(chunk)
+                            size += len(chunk)
+                        body = b"".join(chunks).decode(response.encoding or "utf-8", "replace")
+                        break
+                else:
+                    return "Fetch failed: too many redirects."
         except httpx.HTTPError as exc:
             return f"Fetch failed: {type(exc).__name__}."
 
