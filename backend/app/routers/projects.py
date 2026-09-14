@@ -18,7 +18,7 @@ from app.repositories.project_repo import (
     Node,
     Project,
 )
-from app.repositories.tool_repo import ToolNode, ToolType, load_node_secrets
+from app.repositories.tool_repo import ToolNode, ToolPreset, ToolType, load_node_secrets
 from app.routers.deps import EnvRepo, ProjectRepo, ToolRepo
 from app.routers.environments import EnvironmentNodeResponse, create_environment_node
 from app.services.agent import summarise_conversation
@@ -90,10 +90,11 @@ class AgentTypeResponse(BaseModel):
     id: UUID
     slug: str
     name: str
+    default_presets: list[str] = []
 
     @classmethod
     def of(cls, a: AgentType) -> "AgentTypeResponse":
-        return cls(id=UUID(a.id), slug=a.slug, name=a.name)
+        return cls(id=UUID(a.id), slug=a.slug, name=a.name, default_presets=a.default_presets)
 
 
 class CreateNodeRequest(BaseModel):
@@ -103,6 +104,8 @@ class CreateNodeRequest(BaseModel):
     agent_slug: str | None = Field(default=None, min_length=1, max_length=50)
     # Required for kind='tool'.
     tool_slug: str | None = Field(default=None, min_length=1, max_length=50)
+    # kind='tool' alternative to tool_slug: instantiate a library preset.
+    preset_slug: str | None = Field(default=None, min_length=1, max_length=50)
     # kind='tool' only. Non-secret keys go to nodes.config, secret keys to the vault.
     config: dict[str, Any] = Field(default_factory=dict)
     # Defaults to the template's name if omitted.
@@ -179,6 +182,26 @@ class ToolTypeResponse(BaseModel):
             config_schema=t.config_schema,
             secret_fields=t.secret_fields,
             auth_kind=t.auth_kind,
+        )
+
+
+class ToolPresetResponse(BaseModel):
+    id: UUID
+    slug: str
+    name: str
+    description: str | None = None
+    tool_slug: str
+    config: dict[str, Any]
+
+    @classmethod
+    def of(cls, p: ToolPreset) -> "ToolPresetResponse":
+        return cls(
+            id=UUID(p.id),
+            slug=p.slug,
+            name=p.name,
+            description=p.description,
+            tool_slug=p.tool_slug,
+            config=p.config,
         )
 
 
@@ -357,41 +380,36 @@ def _split_tool_config(
     return plain, secrets
 
 
-async def _create_tool_node(
+async def _provision_tool_node(
     project_id: UUID,
-    req: CreateNodeRequest,
+    tool_type: ToolType,
+    name: str,
+    config: dict[str, Any],
+    secrets: dict[str, str],
+    *,
+    position_x: float,
+    position_y: float,
     tool_repo: ToolRepo,
-) -> ToolNodeResponse:
-    """Provision a tool box: split config, seed the default url, verify."""
-    if not req.tool_slug:
-        raise HTTPException(
-            status_code=status.HTTP_422_UNPROCESSABLE_ENTITY,
-            detail="tool_slug is required for kind='tool'",
-        )
+) -> str:
+    """Create a tool row, store its secrets, verify it. Returns the node id.
 
-    tool_type = await to_thread.run_sync(tool_repo.get_tool_type, req.tool_slug)
-    if tool_type is None:
-        raise HTTPException(
-            status_code=status.HTTP_404_NOT_FOUND,
-            detail=f"Unknown tool '{req.tool_slug}'",
-        )
-
-    plain_config, secrets = _split_tool_config(tool_type, req.config)
-
-    # Copy the catalog default url when the request omits one, keeping the node
+    Shared by the request path and default wiring. ``config`` is already
+    split: plain fields only, with any preset config merged in.
+    """
+    # Copy the catalog default url when config omits one, keeping the node
     # self-contained against later catalog edits.
     default_url = tool_type.config_schema.get("default_url")
-    if default_url and not plain_config.get("url"):
-        plain_config["url"] = default_url
+    if default_url and not config.get("url"):
+        config = {**config, "url": default_url}
 
     node_id = await to_thread.run_sync(
         lambda: tool_repo.create_tool_node(
             str(project_id),
             tool_type.id,
-            req.name or tool_type.name,
-            plain_config,
-            position_x=req.position_x,
-            position_y=req.position_y,
+            name,
+            config,
+            position_x=position_x,
+            position_y=position_y,
         )
     )
 
@@ -399,6 +417,56 @@ async def _create_tool_node(
         await to_thread.run_sync(lambda k=key, v=value: tool_repo.set_secret(node_id, k, v))
 
     await _verify_tool_node(node_id, tool_repo)
+    return node_id
+
+
+async def _create_tool_node(
+    project_id: UUID,
+    req: CreateNodeRequest,
+    tool_repo: ToolRepo,
+) -> ToolNodeResponse:
+    """Provision a tool box from a type or a preset: split config, verify."""
+    if not req.tool_slug and not req.preset_slug:
+        raise HTTPException(
+            status_code=status.HTTP_422_UNPROCESSABLE_ENTITY,
+            detail="tool_slug or preset_slug is required for kind='tool'",
+        )
+
+    preset = None
+    tool_slug = req.tool_slug
+    if req.preset_slug:
+        preset = await to_thread.run_sync(tool_repo.get_preset, req.preset_slug)
+        if preset is None:
+            raise HTTPException(
+                status_code=status.HTTP_404_NOT_FOUND,
+                detail=f"Unknown preset '{req.preset_slug}'",
+            )
+        tool_slug = preset.tool_slug
+
+    tool_type = await to_thread.run_sync(tool_repo.get_tool_type, tool_slug)
+    if tool_type is None:
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND,
+            detail=f"Unknown tool '{tool_slug}'",
+        )
+
+    plain_config, secrets = _split_tool_config(tool_type, req.config)
+    if preset is not None:
+        # Preset is the base, the request overrides. Preset config is trusted
+        # and merged after the split, so it is not checked against the form.
+        plain_config = {**preset.config, **plain_config}
+
+    name = req.name or (preset.name if preset else tool_type.name)
+    node_id = await _provision_tool_node(
+        project_id,
+        tool_type,
+        name,
+        plain_config,
+        secrets,
+        position_x=req.position_x,
+        position_y=req.position_y,
+        tool_repo=tool_repo,
+    )
 
     node = await to_thread.run_sync(tool_repo.get_tool_node, node_id)
     if node is None:
@@ -461,6 +529,13 @@ async def list_tool_types(tool_repo: ToolRepo) -> list[ToolTypeResponse]:
     """The palette of tool templates a node can be provisioned from."""
     types = await to_thread.run_sync(tool_repo.list_tool_types)
     return [ToolTypeResponse.of(t) for t in types]
+
+
+@router.get("/tool-presets", response_model=list[ToolPresetResponse])
+async def list_tool_presets(tool_repo: ToolRepo) -> list[ToolPresetResponse]:
+    """The library of ready-to-instantiate tools and skills."""
+    presets = await to_thread.run_sync(tool_repo.list_presets)
+    return [ToolPresetResponse.of(p) for p in presets]
 
 
 @router.post(

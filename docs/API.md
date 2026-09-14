@@ -114,10 +114,14 @@ conversation.
 ### `GET /agent-types`
 → `200`
 ```json
-[ { "id": "uuid", "slug": "market_research", "name": "Market Research" } ]
+[ { "id": "uuid", "slug": "market_research", "name": "Market Research",
+    "default_presets": ["brave_search", "research_method"] } ]
 ```
 Seeded: `market_research`, `project_scoping`, `coding`. Adding one is a SQL
 insert, not a deploy. See `backend/migrations/README.md`.
+
+`default_presets` is a list of preset slugs this agent type comes pre-equipped
+with.
 
 ### `POST /projects`
 ```json
@@ -382,6 +386,7 @@ to make it callable there.
 | Method | Path | Auth | Description |
 |---|---|---|---|
 | `GET` | `/tool-types` | **yes** | The catalog of tool templates |
+| `GET` | `/tool-presets` | **yes** | The library of ready-to-instantiate tools |
 | `POST` | `/projects/{project_id}/nodes` | **yes** | Provision a tool node (`kind: "tool"`) |
 | `POST` | `/projects/{project_id}/nodes/{node_id}/verify` | **yes** | Re-run the connectivity check |
 | `GET` | `/projects/{project_id}/nodes/{node_id}/tool-calls` | **yes** | Audit log for one tool node |
@@ -415,6 +420,17 @@ whether it's required. `secret_fields` marks which of those keys are secrets.
 **`auth_kind` decides how the client collects credentials.** `token` renders the
 fields above. `oauth2` renders a Connect button instead: the user types nothing,
 and `config_schema.fields` is empty. Currently only `gmail` is `oauth2`.
+
+### `GET /tool-presets`
+→ `200`
+```json
+[{"id": "uuid", "slug": "research_method", "name": "Research Method",
+  "description": "How to research", "tool_slug": "skill",
+  "config": {"text": "Do research.", "description": "Load first."}}]
+```
+
+The library of ready-to-instantiate tools and skills. Each entry names the
+`tool_slug` it instantiates and the `config` copied onto a node created from it.
 
 ### `POST /projects/{project_id}/nodes/{node_id}/authorize`
 
