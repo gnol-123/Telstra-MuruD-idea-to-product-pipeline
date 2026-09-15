@@ -543,6 +543,8 @@ The audit log for one tool node, newest first.
 | Slug | Needs from the user |
 |---|---|
 | `brave_search` | An API key |
+| `web_fetch` | Just a URL; no credentials |
+| `context7` | Optional API key; uses platform key by default |
 | `skill` | Just instruction text, no credentials |
 | `mcp_server` | A server URL, and an optional auth token |
 | `github` | Just a personal access token: the endpoint is a real, public default |

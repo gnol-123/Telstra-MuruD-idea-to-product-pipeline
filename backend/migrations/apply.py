@@ -17,7 +17,15 @@ import sys
 import psycopg
 from dotenv import dotenv_values
 
-MIGRATIONS = ["init.sql", "rls.sql", "tools.sql", "oauth.sql", "environments.sql", "defaults.sql"]
+MIGRATIONS = [
+    "init.sql",
+    "rls.sql",
+    "tools.sql",
+    "oauth.sql",
+    "environments.sql",
+    "defaults.sql",
+    "parity.sql",
+]
 HERE = pathlib.Path(__file__).parent
 
 EXPECTED_TABLES = [

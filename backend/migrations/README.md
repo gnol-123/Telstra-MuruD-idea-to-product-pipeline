@@ -11,6 +11,7 @@ creates, so run it second.
 | `oauth.sql` | OAuth token storage for tool nodes that connect rather than take a key. Run fourth. |
 | `environments.sql` | Environment edge validation, one scratch space per project, and backfills. Run fifth. |
 | `defaults.sql` | Tool presets library, `agent_types.default_presets`, `web_fetch`, and the seeded skills. Run sixth. |
+| `parity.sql` | Context7 type and preset, ten process skills, agent default lists. Run seventh. |
 | `apply.py` | Runs them all, in order, in one transaction. |
 
 ## Applying
