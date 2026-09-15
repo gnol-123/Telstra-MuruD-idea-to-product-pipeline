@@ -274,10 +274,12 @@ class ProjectRepository:
     def update_node(self, node_id: str, changes: dict[str, Any]) -> Node | None:
         """Apply a partial update to an agent node.
         Only allowed fields are modifiable;
-        {"name", "position_x", "position_y", "tool_policy"}
+        {"name", "position_x", "position_y", "tool_policy", "model"}
         """
-        allowed = {"name", "position_x", "position_y", "tool_policy"}
+        allowed = {"name", "position_x", "position_y", "tool_policy", "model"}
         payload = {k: v for k, v in changes.items() if k in allowed and v is not None}
+        if payload.get("model") == "":
+            payload["model"] = None
         if not payload:
             # A drag that ends where it started is a no-op, not an error.
             return self.get_agent_node(node_id)
@@ -312,7 +314,7 @@ class ProjectRepository:
             self._db.table("nodes")
             .select(
                 "id, project_id, name, agent_type_id, tool_policy, kind,"
-                " position_x, position_y, status, status_detail, config,"
+                " position_x, position_y, status, status_detail, config, model,"
                 " agent_types(slug, system_prompt, model)"
             )
             .eq("project_id", project_id)
@@ -328,7 +330,7 @@ class ProjectRepository:
             self._db.table("nodes")
             .select(
                 "id, project_id, name, agent_type_id, tool_policy,"
-                " position_x, position_y,"
+                " position_x, position_y, model,"
                 " agent_types(slug, system_prompt, model)"
             )
             .eq("id", node_id)
@@ -629,7 +631,8 @@ def _to_node(row: dict[str, Any]) -> Node:
         name=row["name"],
         agent_type_id=row.get("agent_type_id"),
         system_prompt=template.get("system_prompt", ""),
-        model=template.get("model", ""),
+        # Node override first, template second. Null means inherit.
+        model=row.get("model") or template.get("model", ""),
         tool_policy=row.get("tool_policy", "ask"),
         position_x=row.get("position_x") or 0.0,
         position_y=row.get("position_y") or 0.0,
