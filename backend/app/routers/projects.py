@@ -23,6 +23,7 @@ from app.repositories.tool_repo import ToolNode, ToolPreset, ToolType, load_node
 from app.routers.deps import EnvRepo, ProjectRepo, ToolRepo
 from app.routers.environments import EnvironmentNodeResponse, create_environment_node
 from app.services.agent import summarise_conversation
+from app.services.models import ModelsUnavailable, list_models
 from app.tools.base import ToolContext
 from app.tools.oauth_refresh import TokenExchangeError, with_access_token
 from app.tools.registry import get_spec, platform_secrets
@@ -129,6 +130,7 @@ class UpdateNodeRequest(BaseModel):
     position_x: float | None = None
     position_y: float | None = None
     tool_policy: Literal["ask", "auto"] | None = None
+    model: str | None = Field(default=None, max_length=200)
 
 
 class NodeResponse(BaseModel):
@@ -149,6 +151,8 @@ class NodeResponse(BaseModel):
     # user is the user provisioned environment for any task requiring an environment
     role: str | None = None
     runtime: str | None = None
+    # The model this node actually runs on: its own override, else its type's.
+    model: str | None = None
 
     @classmethod
     def of(cls, n: Node, agent_slug: str | None = None) -> "NodeResponse":
@@ -167,6 +171,7 @@ class NodeResponse(BaseModel):
             status_detail=n.status_detail,
             role=config.get("role"),
             runtime=config.get("runtime"),
+            model=n.model or None,
         )
 
 
@@ -334,10 +339,27 @@ async def update_node(
     req: UpdateNodeRequest,
     repo: ProjectRepo,
 ) -> NodeResponse:
-    """Move, rename, or set the tool policy. An empty body is a no-op."""
-    node = await to_thread.run_sync(
-        lambda: repo.update_node(str(node_id), req.model_dump(exclude_none=True))
-    )
+    """Move, rename, set the tool policy, or set the model. Empty body is a no-op.
+
+    A model is checked against the provider's catalogue first, so a typo is a
+    422 here rather than a failed turn later. "" clears the override.
+    """
+    changes = req.model_dump(exclude_none=True)
+    if req.model:
+        try:
+            available = await list_models()
+        except ModelsUnavailable as exc:
+            raise HTTPException(
+                status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
+                detail="The model catalogue is unavailable, so a model cannot be validated.",
+            ) from exc
+        if req.model not in available:
+            raise HTTPException(
+                status_code=status.HTTP_422_UNPROCESSABLE_ENTITY,
+                detail=f"Unknown model '{req.model}'. Available: {', '.join(available)}",
+            )
+
+    node = await to_thread.run_sync(lambda: repo.update_node(str(node_id), changes))
     if node is None:
         raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Agent not found")
     return NodeResponse.of(node)
@@ -592,6 +614,18 @@ async def list_tool_types(tool_repo: ToolRepo) -> list[ToolTypeResponse]:
     """The palette of tool templates a node can be provisioned from."""
     types = await to_thread.run_sync(tool_repo.list_tool_types)
     return [ToolTypeResponse.of(t) for t in types]
+
+
+@router.get("/models", response_model=list[str])
+async def list_available_models() -> list[str]:
+    """Model names the configured provider serves, for a per-node model picker."""
+    try:
+        return await list_models()
+    except ModelsUnavailable as exc:
+        raise HTTPException(
+            status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
+            detail="The model catalogue is unavailable.",
+        ) from exc
 
 
 @router.get("/tool-presets", response_model=list[ToolPresetResponse])
