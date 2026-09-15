@@ -104,7 +104,7 @@ conversation.
 | `DELETE` | `/projects/{project_id}` | **yes** | Delete a project and its canvas |
 | `POST` | `/projects/{project_id}/nodes` | **yes** | Provision an agent node |
 | `GET` | `/projects/{project_id}/nodes` | **yes** | List a project's agent nodes |
-| `PATCH` | `/projects/{project_id}/nodes/{node_id}` | **yes** | Move, rename, or set tool policy |
+| `PATCH` | `/projects/{project_id}/nodes/{node_id}` | **yes** | Move, rename, set tool policy or model. **Agent nodes only** |
 | `DELETE` | `/projects/{project_id}/nodes/{node_id}` | **yes** | Remove a node |
 | `POST` | `/projects/{project_id}/edges` | **yes** | Draw an arrow between two nodes |
 | `GET` | `/projects/{project_id}/edges` | **yes** | List a project's arrows |
@@ -211,10 +211,28 @@ Every field optional; only what you send changes.
 { "position_x": 340, "position_y": 180 }   // dropped after a drag
 { "name": "Market Research (EU)" }          // rename
 { "tool_policy": "auto" }                   // ask | auto
+{ "model": "deepseek-v4-pro:0813" }         // per-node model override
+{ "model": "" }                             // clear it: inherit the type's model
 ```
 
-→ `200` with the updated node. An empty body is a no-op, not an error, so a
-drag that ends where it started is harmless.
+→ `200` with the updated node, including `model`: the node's own override if it
+has one, otherwise its agent type's. An empty body is a no-op, not an error, so
+a drag that ends where it started is harmless.
+
+`model` is validated against `GET /models` before anything is written, so a
+typo is a `422` naming the valid options rather than a turn that fails later.
+
+**This route updates agent nodes only.** Each kind has its own:
+
+| Node kind | Where to patch it |
+|---|---|
+| `agent` | here |
+| `environment` | `PATCH /projects/{project_id}/environments/{node_id}` |
+| `tool` | no patch route; re-check with `POST /projects/{project_id}/nodes/{node_id}/verify`, or delete and recreate to change config |
+
+Sending the wrong kind here returns `404` whose `detail` names the route that
+owns that node, so the mistake is self-correcting. A node that does not exist
+returns `404 "Node not found"`.
 
 **The conversation is untouched.** Moving a box does not affect its transcript.
 Send this on drop rather than during the drag: one request per gesture.

@@ -78,6 +78,24 @@ async def list_projects(repo: ProjectRepo) -> list[ProjectResponse]:
     return [ProjectResponse.of(p) for p in projects]
 
 
+async def _wrong_kind_detail(node_id: UUID, tool_repo: ToolRepo, env_repo: EnvRepo) -> str:
+    """Explain a PATCH miss: wrong route, or genuinely no such node."""
+    env = await to_thread.run_sync(env_repo.get_environment_node, str(node_id))
+    if env is not None:
+        return (
+            "That node is an environment, and this route updates agents. "
+            "Use PATCH /projects/{project_id}/environments/{node_id}."
+        )
+    tool = await to_thread.run_sync(tool_repo.get_tool_node, str(node_id))
+    if tool is not None:
+        return (
+            "That node is a tool, and this route updates agents. A tool node has no "
+            "patch route: re-check it with POST /projects/{project_id}/nodes/{node_id}/verify, "
+            "or delete it and create it again to change its config."
+        )
+    return "Node not found"
+
+
 @router.delete("/projects/{project_id}", status_code=status.HTTP_204_NO_CONTENT)
 async def delete_project(project_id: UUID, repo: ProjectRepo, env_repo: EnvRepo) -> None:
     """Delete a project, cascading to its nodes, edges, conversations and messages."""
@@ -338,6 +356,8 @@ async def update_node(
     node_id: UUID,
     req: UpdateNodeRequest,
     repo: ProjectRepo,
+    tool_repo: ToolRepo,
+    env_repo: EnvRepo,
 ) -> NodeResponse:
     """Move, rename, set the tool policy, or set the model. Empty body is a no-op.
 
@@ -361,7 +381,12 @@ async def update_node(
 
     node = await to_thread.run_sync(lambda: repo.update_node(str(node_id), changes))
     if node is None:
-        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Agent not found")
+        # This route only updates agents. A miss is usually the right node on
+        # the wrong URL, so say which route owns it rather than "not found".
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND,
+            detail=await _wrong_kind_detail(node_id, tool_repo, env_repo),
+        )
     return NodeResponse.of(node)
 
 
