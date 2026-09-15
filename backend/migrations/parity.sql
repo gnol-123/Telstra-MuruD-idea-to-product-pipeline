@@ -1,6 +1,14 @@
 -- Agent parity: Context7 docs on a platform key, distilled process skills,
 -- and the default lists that give each agent a standard agent's capabilities.
 -- Apply after defaults.sql.
+--
+-- OPERATOR NOTE: the backfill at the end of this file wires the new default
+-- presets onto agents that already exist. Those nodes land status 'pending',
+-- because SQL cannot run a tool's verify. assemble() skips any tool node that
+-- is not 'ready', so the new boxes appear on the canvas but no agent can call
+-- them until each one is verified: one
+-- POST /projects/{project_id}/nodes/{node_id}/verify per new node, triggered
+-- by the frontend or by the user. Until then the backfill is cosmetic.
 begin;
 
 -- ---------------------------------------------------------------------------
@@ -447,5 +455,104 @@ update public.agent_types set default_presets = array[
   'brainstorming', 'design_brief', 'prototype_design', 'accessibility_basics',
   'plain_writing', 'workspace_memory'
 ] where slug = 'ux_ui';
+
+-- ---------------------------------------------------------------------------
+-- Backfill: wire each agent type's default presets onto agents that already
+-- exist. _wire_default_presets runs only at creation time (routers/projects.py),
+-- so without this an agent provisioned before this migration keeps its old,
+-- smaller toolset forever.
+--
+-- Idempotent by preset name per agent: an agent that already has a tool node
+-- of that name is skipped, so re-applying adds nothing and a user who renamed
+-- or deleted a box does not get a duplicate.
+--
+-- New nodes land 'pending' and are inert until verified. See the operator
+-- note at the top of this file.
+--
+-- Node ids are generated here rather than taken from `returning`, so each new
+-- node stays paired with the agent that wanted it. Recovering that pairing
+-- afterwards by (project_id, name) would cross-wire any project holding two
+-- agents that want a same-named preset.
+--
+-- Do not collapse the two references to `wanted`. Postgres materialises a CTE
+-- referenced more than once, which is what makes gen_random_uuid() evaluate
+-- once per row and stay stable across both the node insert and the edge
+-- insert. Inlining it would regenerate ids and cross-wire the edges.
+-- ---------------------------------------------------------------------------
+with wanted as (
+  select
+    gen_random_uuid() as tool_id,
+    n.id              as agent_id,
+    n.project_id,
+    n.owner_id,
+    n.position_x,
+    n.position_y,
+    p.tool_type_id,
+    p.name            as preset_name,
+    p.config          as preset_config,
+    t.config_schema   as type_schema,
+    row_number() over (partition by n.id order by d.ord) - 1 as slot
+  from public.nodes n
+  join public.agent_types a on a.id = n.agent_type_id
+  join unnest(a.default_presets) with ordinality as d(slug, ord) on true
+  join public.tool_presets p on p.slug = d.slug and p.is_active
+  join public.tool_types  t on t.id = p.tool_type_id
+  where n.kind = 'agent'
+    and not exists (
+      select 1
+      from public.edges e
+      join public.nodes tn on tn.id = e.source_node_id
+      where e.target_node_id = n.id
+        and e.kind = 'tool'
+        and tn.name = p.name
+    )
+),
+created as (
+  insert into public.nodes
+    (id, project_id, owner_id, kind, tool_type_id, name, config,
+     position_x, position_y, status)
+  select
+    w.tool_id,
+    w.project_id,
+    w.owner_id,
+    'tool',
+    w.tool_type_id,
+    w.preset_name,
+    -- Same rule as _provision_tool_node: preset config is the base, and the
+    -- type's default_url fills in when the preset does not carry a url.
+    case
+      when (w.type_schema->>'default_url') is not null
+       and coalesce(w.preset_config->>'url', '') = ''
+      then w.preset_config || jsonb_build_object('url', w.type_schema->>'default_url')
+      else w.preset_config
+    end,
+    w.position_x - 260,
+    w.position_y + w.slot * 90,
+    'pending'
+  from wanted w
+  returning id
+)
+insert into public.edges (project_id, owner_id, source_node_id, target_node_id, kind)
+select w.project_id, w.owner_id, w.tool_id, w.agent_id, 'tool'
+from wanted w
+where w.tool_id in (select id from created)
+on conflict (source_node_id, target_node_id, kind) do nothing;
+
+-- ---------------------------------------------------------------------------
+-- A slug in default_presets that matches no preset is skipped silently at
+-- agent creation, so the box just never appears. Fail here instead.
+-- ---------------------------------------------------------------------------
+do $$
+declare
+  missing text[];
+begin
+  select array_agg(distinct s) into missing
+  from public.agent_types a, unnest(a.default_presets) s
+  where not exists (select 1 from public.tool_presets p where p.slug = s);
+
+  if missing is not null then
+    raise exception 'default_presets reference unknown presets: %', missing;
+  end if;
+end $$;
 
 commit;
