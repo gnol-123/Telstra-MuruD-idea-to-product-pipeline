@@ -1,5 +1,4 @@
-"""The provider's model catalogue.
-"""
+"""The provider's model catalogue."""
 
 import time
 

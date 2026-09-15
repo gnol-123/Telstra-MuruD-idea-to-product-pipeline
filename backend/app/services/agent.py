@@ -23,8 +23,7 @@ from app.repositories.project_repo import Message
 
 
 def _model(name: str) -> Model:
-    """Build a model for one name, for user defined model name defaulted to: deepseek v4.1 flash
-    """
+    """Build a model for one name, for user defined model name defaulted to: deepseek v4.1 flash"""
     if settings.llm_provider == "ollama":
         return OllamaModel(
             name,
@@ -33,6 +32,7 @@ def _model(name: str) -> Model:
             ),
         )
     return GoogleModel(name, provider=GoogleProvider(api_key=settings.gemini_api_key))
+
 
 @lru_cache(maxsize=256)
 def get_agent_for(system_prompt: str, model: str) -> Agent[None, str | DeferredToolRequests]:
