@@ -25,6 +25,7 @@ MIGRATIONS = [
     "environments.sql",
     "defaults.sql",
     "parity.sql",
+    "provider.sql",
 ]
 HERE = pathlib.Path(__file__).parent
 
@@ -93,6 +94,9 @@ def report(cur) -> None:
 
     cur.execute("select slug from public.tool_types order by sort_order")
     print(f"tool types  : {[r[0] for r in cur.fetchall()]}")
+
+    cur.execute("select distinct model from public.agent_types")
+    print(f"agent models: {[r[0] for r in cur.fetchall()]}")
 
     cur.execute("select slug from public.tool_presets order by sort_order")
     print(f"presets     : {[r[0] for r in cur.fetchall()]}")
