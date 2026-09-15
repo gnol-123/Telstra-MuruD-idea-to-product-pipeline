@@ -7,7 +7,7 @@ The Supabase client is synchronous, so async callers must dispatch these
 through ``anyio.to_thread.run_sync``.
 """
 
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from datetime import UTC, datetime
 from typing import Any
 
@@ -63,6 +63,12 @@ class Node:
     # None for a tool node row (agent_types join is null), or if the join
     # itself is absent from the select.
     agent_slug: str | None = None
+    # Lifecycle, for environment boxes. get_agent_node does not select these,
+    # so the defaults have to read as a live agent.
+    status: str = "ready"
+    status_detail: str | None = None
+    # Environment identity: runtime, role, sandbox id. Empty for other kinds.
+    config: dict[str, Any] = field(default_factory=dict)
 
 
 @dataclass(frozen=True)
@@ -122,7 +128,7 @@ def _to_edge(row: dict[str, Any]) -> Edge:
     )
 
 
-class ChatRepository:
+class ProjectRepository:
     """PostgREST access scoped to one user."""
 
     def __init__(self, client: Client, user_id: str) -> None:
@@ -302,7 +308,7 @@ class ChatRepository:
             self._db.table("nodes")
             .select(
                 "id, project_id, name, agent_type_id, tool_policy, kind,"
-                " position_x, position_y,"
+                " position_x, position_y, status, status_detail, config,"
                 " agent_types(slug, system_prompt, model)"
             )
             .eq("project_id", project_id)
@@ -443,6 +449,18 @@ class ChatRepository:
             .select("source_node_id")
             .eq("target_node_id", node_id)
             .eq("kind", "tool")
+            .eq("owner_id", self._user_id)
+            .execute()
+        ).data
+        return [r["source_node_id"] for r in rows]
+
+    def list_inbound_environment_node_ids(self, node_id: str) -> list[str]:
+        """Environment nodes whose arrows point at this agent."""
+        rows = (
+            self._db.table("edges")
+            .select("source_node_id")
+            .eq("target_node_id", node_id)
+            .eq("kind", "environment")
             .eq("owner_id", self._user_id)
             .execute()
         ).data
@@ -613,4 +631,7 @@ def _to_node(row: dict[str, Any]) -> Node:
         position_y=row.get("position_y") or 0.0,
         kind=row.get("kind", "agent"),
         agent_slug=template.get("slug"),
+        status=row.get("status") or "ready",
+        status_detail=row.get("status_detail"),
+        config=row.get("config") or {},
     )

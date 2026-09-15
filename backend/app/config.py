@@ -29,6 +29,16 @@ class Settings(BaseSettings):
     oauth_state_secret: str = ""
     # Frontend origin, to redirect the browser back after the oauth callback.
     frontend_url: str = ""
+    # E2B sandboxes. Empty key disables environments: provisioning writes an error status.
+    e2b_api_key: str = ""
+    e2b_template: str = "base"
+    # Sent as lifecycle.auto_resume. A setting so ops can turn it off if the tier rejects it.
+    e2b_auto_resume: bool = True
+    # Wall clock deadline, pushed on every use so it behaves as an idle timeout.
+    environment_idle_timeout_s: int = 300
+    environment_command_timeout_s: int = 120
+    environment_max_output_chars: int = 20_000
+    environment_max_file_chars: int = 200_000
 
     @property
     def cors_origin_list(self) -> list[str]:

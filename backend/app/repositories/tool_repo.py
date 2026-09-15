@@ -1,6 +1,6 @@
 """Tool node, secret and call access.
 
-Mirrors ChatRepository: the client is injected, and every query also filters
+Mirrors ProjectRepository: the client is injected, and every query also filters
 on ownership so a policy mistake cannot cross tenants.
 """
 
