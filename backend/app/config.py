@@ -12,9 +12,14 @@ class Settings(BaseSettings):
     app_name: str = "MuruDPipeline API"
     environment: str = "development"
     cors_origins: str = "*"
+    llm_provider: str = "ollama"
+    # Hosted Ollama. A local install is http://localhost:11434/v1.
+    ollama_base_url: str = "https://ollama.com/v1"
+    ollama_api_key: str = ""
+    summary_model: str = "deepseek-v4.1-flash"
     gemini_api_key: str = ""
     gemini_model: str = "gemini-3-flash-preview"
-    # Platform keys for default tools. A user's own node secret overrides these.
+    # Platform Keys for default tools:
     brave_api_key: str = ""
     context7_api_key: str = ""
     supabase_url: str = ""
