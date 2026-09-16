@@ -897,6 +897,111 @@ as above, and resume again.
 
 ---
 
+## Usage
+
+| Method | Path | Auth | Description |
+|---|---|---|---|
+| `GET` | `/usage` | **yes** | Your token totals across every project |
+| `GET` | `/projects/{project_id}/usage` | **yes** | Your token totals in one project |
+
+Both return the same shape, broken down by model. `project_id` is `null` on
+the account-wide route.
+
+### `GET /usage`
+
+What a per-user cap reads: every project you own, re-aggregated by model.
+
+→ `200`
+```json
+{
+  "project_id": null,
+  "by_model": [
+    {
+      "model": "deepseek-v4.1-flash",
+      "input_tokens": 12400, "output_tokens": 88100,
+      "reasoning_tokens": 61200,
+      "cache_read_tokens": 9800, "cache_write_tokens": 1200,
+      "requests": 143, "message_count": 96
+    }
+  ],
+  "input_tokens": 12400,
+  "output_tokens": 88100,
+  "message_count": 96
+}
+```
+
+### `GET /projects/{project_id}/usage`
+
+The same, filtered to one project. `404` if the project is not yours.
+
+### Reading these numbers
+
+**`reasoning_tokens` is a subset of `output_tokens`, not an addend.** Every
+provider bills thinking inside the output total (OpenAI and Ollama call it
+`reasoning_tokens`, Anthropic `thinking_tokens`, Google `thoughts_tokens`), so
+`output + reasoning` double-counts. It is broken out for attribution only: a
+120-word reply can report 2000 output tokens with 1900 of them spent thinking.
+
+**The top-level totals sum only what is safely additive** across models:
+`input_tokens`, `output_tokens`, `message_count`. There is deliberately no
+grand total of reasoning, and no cost.
+
+**These are token counts, never spend.** Prices differ per model, so a total
+across models is not a bill. `nodes.model` is a per-node override, which is
+why the breakdown is per model at all: one project can run several at once,
+and their counts are neither comparable nor equally priced.
+
+**Failed turns count.** They consumed tokens and cost money, which is separate
+from whether they are replayed as history.
+
+**Some calls are unmetered.** Context edge refreshes (`summarise_conversation`)
+and tool `verify` calls run their own agents and their usage is discarded, so
+a cap built on these numbers undercounts by whatever those cost.
+
+### How a token reaches these endpoints
+
+Four stages, and only the first is in the agent code:
+
+1. **Capture.** pydantic-ai returns a `RunUsage` on every agent run.
+   `_turn_from` in `app/workflows.py` lifts `input_tokens`, `output_tokens`,
+   `cache_read_tokens`, `cache_write_tokens` and `requests` off it onto an
+   `AgentTurn`. Reasoning has no typed field: each provider adapter puts it in
+   `usage.details` under its own name, so `_reasoning_from` checks all three.
+
+2. **Persist.** `repo.add_message(...)` writes those onto the `messages` row
+   for that turn, alongside `model` and `status`. One row per assistant turn.
+
+3. **Roll up.** A Postgres trigger, `messages_usage_rollup` in
+   `migrations/usage.sql`, fires on that insert and adds the row's tokens into
+   `usage_totals`, keyed `(project_id, owner_id, model)`. Nothing in Python
+   maintains this table: the write is the insert in stage 2, and the database
+   does the rest. This follows `conversations.message_count`, which is kept
+   current the same way rather than counted per request.
+
+4. **Read.** These endpoints select straight from `usage_totals`. No `sum()`
+   over `messages` on the read path. `/usage` re-aggregates a user's rows by
+   model in Python, since one model appears once per project.
+
+The trigger also handles `UPDATE`, adding only the delta between old and new
+values. Nothing in the current pipeline updates a `messages` row, so that
+branch is unused today; it exists so that a future write path that revises a
+row's token counts cannot silently double-count.
+
+### Where a paused turn's tokens go
+
+Nowhere, currently. A turn that pauses for tool approval has already made a
+model request and spent tokens, but the pause returns before `add_message`, so
+no row is written and that usage is dropped. `resume_agent` starts a fresh
+`RunUsage`, so the row eventually written for the resumed turn counts only the
+second request.
+
+`requests` is captured to make this visible: a turn showing `requests: 1` after
+an approval round-trip has lost the first request's tokens. Fixing it means
+persisting the pause's usage at park time, which is a schema question (a row in
+`awaiting_approval` with tokens but no content) rather than a capture one.
+
+---
+
 ## Status codes
 
 | Code | Meaning |
