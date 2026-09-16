@@ -12,8 +12,16 @@ class Settings(BaseSettings):
     app_name: str = "MuruDPipeline API"
     environment: str = "development"
     cors_origins: str = "*"
+    llm_provider: str = "ollama"
+    # Hosted Ollama. A local install is http://localhost:11434/v1.
+    ollama_base_url: str = "https://ollama.com/v1"
+    ollama_api_key: str = ""
+    summary_model: str = "deepseek-v4.1-flash"
     gemini_api_key: str = ""
     gemini_model: str = "gemini-3-flash-preview"
+    # Platform Keys for default tools:
+    brave_api_key: str = ""
+    context7_api_key: str = ""
     supabase_url: str = ""
     supabase_key: str = ""
     # Service role key. Bypasses RLS. Required for Supabase Vault
@@ -29,6 +37,16 @@ class Settings(BaseSettings):
     oauth_state_secret: str = ""
     # Frontend origin, to redirect the browser back after the oauth callback.
     frontend_url: str = ""
+    # E2B sandboxes. Empty key disables environments: provisioning writes an error status.
+    e2b_api_key: str = ""
+    e2b_template: str = "base"
+    # Sent as lifecycle.auto_resume. A setting so ops can turn it off if the tier rejects it.
+    e2b_auto_resume: bool = True
+    # Wall clock deadline, pushed on every use so it behaves as an idle timeout.
+    environment_idle_timeout_s: int = 300
+    environment_command_timeout_s: int = 120
+    environment_max_output_chars: int = 20_000
+    environment_max_file_chars: int = 200_000
 
     @property
     def cors_origin_list(self) -> list[str]:

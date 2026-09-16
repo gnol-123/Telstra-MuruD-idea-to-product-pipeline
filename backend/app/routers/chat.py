@@ -13,8 +13,9 @@ from pydantic_ai import DeferredToolRequests, DeferredToolResults
 from pydantic_ai.messages import ModelMessagesTypeAdapter
 
 from app.config import settings
-from app.repositories.chat_repo import Message
-from app.routers.deps import ChatRepo, ToolRepo
+from app.environments.assembly import assemble_environments, merge_assembled
+from app.repositories.project_repo import Message
+from app.routers.deps import EnvRepo, ProjectRepo, ToolRepo
 from app.tools.assembly import AssembledTools, assemble, record_calls, unavailable_note
 from app.workflows import build_context_instructions, resume_agent, run_turn, stream_turn
 
@@ -24,23 +25,51 @@ router = APIRouter(prefix="/chat", tags=["chat"])
 _PENDING_RUN_MAX_AGE = timedelta(hours=1)
 
 
-async def _inbound_instructions(repo: ChatRepo, node_id: str) -> str | None:
+async def _inbound_instructions(repo: ProjectRepo, node_id: str) -> str | None:
     """Summaries from agents pointing at this node. Stale ones included: refresh is manual."""
     context = await to_thread.run_sync(repo.list_inbound_context, node_id)
     return build_context_instructions(context)
 
 
-async def _inbound_toolsets(repo: ChatRepo, tool_repo: ToolRepo, node) -> AssembledTools:
-    """Toolsets from tool nodes whose arrows point at this agent."""
-    node_ids = await to_thread.run_sync(repo.list_inbound_tool_node_ids, node.id)
-    if not node_ids:
-        return AssembledTools()
-    nodes = [
-        n
-        for n in (await to_thread.run_sync(lambda: [tool_repo.get_tool_node(i) for i in node_ids]))
-        if n is not None
-    ]
-    return await assemble(tool_repo, nodes, ask=node.tool_policy == "ask")
+async def _inbound_toolsets(
+    repo: ProjectRepo, tool_repo: ToolRepo, env_repo: EnvRepo, node
+) -> AssembledTools:
+    """Toolsets from the tool and environment nodes pointing at this agent."""
+    tools = AssembledTools()
+
+    tool_ids = await to_thread.run_sync(repo.list_inbound_tool_node_ids, node.id)
+    if tool_ids:
+        tool_nodes = [
+            n
+            for n in (
+                await to_thread.run_sync(lambda: [tool_repo.get_tool_node(i) for i in tool_ids])
+            )
+            if n is not None
+        ]
+        tools = await assemble(tool_repo, tool_nodes, ask=node.tool_policy == "ask")
+
+    env_ids = await to_thread.run_sync(repo.list_inbound_environment_node_ids, node.id)
+    if env_ids:
+        env_nodes = [
+            n
+            for n in (
+                await to_thread.run_sync(
+                    lambda: [env_repo.get_environment_node(i) for i in env_ids]
+                )
+            )
+            if n is not None
+        ]
+        envs = await assemble_environments(env_repo, env_nodes, agent_node_id=node.id)
+        tools = merge_assembled(tools, envs)
+
+    return tools
+
+
+def _with_tool_notes(instructions: str | None, tools: AssembledTools) -> str | None:
+    """Fold the per turn tool notes into the agent's instructions."""
+    parts = [instructions, *tools.notes, unavailable_note(tools.unavailable)]
+    joined = "\n\n".join(p for p in parts if p)
+    return joined or None
 
 
 class ChatRequest(BaseModel):
@@ -155,7 +184,7 @@ async def _park_pending_run(tool_repo: ToolRepo, conversation_id: str, messages:
 
 @router.post("", response_model=None)
 async def chat(
-    req: ChatRequest, repo: ChatRepo, tool_repo: ToolRepo
+    req: ChatRequest, repo: ProjectRepo, tool_repo: ToolRepo, env_repo: EnvRepo
 ) -> ChatResponse | ApprovalRequiredResponse:
     node = await to_thread.run_sync(repo.get_agent_node, str(req.node_id))
 
@@ -168,10 +197,8 @@ async def chat(
 
     instructions = await _inbound_instructions(repo, node.id)
 
-    tools = await _inbound_toolsets(repo, tool_repo, node)
-    note = unavailable_note(tools.unavailable)
-    if note:
-        instructions = "\n\n".join(p for p in [instructions, note] if p)
+    tools = await _inbound_toolsets(repo, tool_repo, env_repo, node)
+    instructions = _with_tool_notes(instructions, tools)
     toolsets = record_calls(
         tools,
         repo=tool_repo,
@@ -221,12 +248,14 @@ async def chat(
 
 
 @router.post("/stream")
-async def chat_stream(req: ChatRequest, repo: ChatRepo, tool_repo: ToolRepo) -> StreamingResponse:
+async def chat_stream(
+    req: ChatRequest, repo: ProjectRepo, tool_repo: ToolRepo, env_repo: EnvRepo
+) -> StreamingResponse:
     """Stream a turn as SSE.
 
     Events: ``start``, ``chunk``, ``done``, ``error``, and ``approval_required``
     when a tool needs approval. That last one ends the stream with no ``done``.
-    Never DBOS-checkpointed; setup and persistence otherwise match POST /chat.
+    Checkpointed on the same terms as POST /chat: DBOS configured and no tools.
     """
     node = await to_thread.run_sync(repo.get_agent_node, str(req.node_id))
     if node is None:
@@ -238,10 +267,8 @@ async def chat_stream(req: ChatRequest, repo: ChatRepo, tool_repo: ToolRepo) -> 
 
     instructions = await _inbound_instructions(repo, node.id)
 
-    tools = await _inbound_toolsets(repo, tool_repo, node)
-    note = unavailable_note(tools.unavailable)
-    if note:
-        instructions = "\n\n".join(p for p in [instructions, note] if p)
+    tools = await _inbound_toolsets(repo, tool_repo, env_repo, node)
+    instructions = _with_tool_notes(instructions, tools)
     toolsets = record_calls(
         tools,
         repo=tool_repo,
@@ -258,6 +285,7 @@ async def chat_stream(req: ChatRequest, repo: ChatRepo, tool_repo: ToolRepo) -> 
             node.model,
             req.prompt,
             client_token=req.client_token,
+            durable=bool(settings.dbos_database_url),
             instructions=instructions,
             toolsets=toolsets,
         ):
@@ -302,7 +330,7 @@ class ResumeRequest(BaseModel):
 
 @router.post("/resume", response_model=None)
 async def chat_resume(
-    req: ResumeRequest, repo: ChatRepo, tool_repo: ToolRepo
+    req: ResumeRequest, repo: ProjectRepo, tool_repo: ToolRepo, env_repo: EnvRepo
 ) -> ResumeResponse | ApprovalRequiredResponse:
     """Resume a turn that paused for tool approval.
 
@@ -340,10 +368,8 @@ async def chat_resume(
     deferred_results = DeferredToolResults(approvals=req.approvals)
 
     instructions = await _inbound_instructions(repo, node.id)
-    tools = await _inbound_toolsets(repo, tool_repo, node)
-    note = unavailable_note(tools.unavailable)
-    if note:
-        instructions = "\n\n".join(p for p in [instructions, note] if p)
+    tools = await _inbound_toolsets(repo, tool_repo, env_repo, node)
+    instructions = _with_tool_notes(instructions, tools)
     toolsets = record_calls(
         tools,
         repo=tool_repo,

@@ -104,7 +104,7 @@ conversation.
 | `DELETE` | `/projects/{project_id}` | **yes** | Delete a project and its canvas |
 | `POST` | `/projects/{project_id}/nodes` | **yes** | Provision an agent node |
 | `GET` | `/projects/{project_id}/nodes` | **yes** | List a project's agent nodes |
-| `PATCH` | `/projects/{project_id}/nodes/{node_id}` | **yes** | Move, rename, or set tool policy |
+| `PATCH` | `/projects/{project_id}/nodes/{node_id}` | **yes** | Move, rename, set tool policy or model. **Agent nodes only** |
 | `DELETE` | `/projects/{project_id}/nodes/{node_id}` | **yes** | Remove a node |
 | `POST` | `/projects/{project_id}/edges` | **yes** | Draw an arrow between two nodes |
 | `GET` | `/projects/{project_id}/edges` | **yes** | List a project's arrows |
@@ -114,10 +114,14 @@ conversation.
 ### `GET /agent-types`
 → `200`
 ```json
-[ { "id": "uuid", "slug": "market_research", "name": "Market Research" } ]
+[ { "id": "uuid", "slug": "market_research", "name": "Market Research",
+    "default_presets": ["brave_search", "research_method"] } ]
 ```
-Seeded: `market_research`, `project_scoping`, `coding`. Adding one is a SQL
+Seeded: `market_research`, `project_scoping`, `coding`, `ux_ui`. Adding one is a SQL
 insert, not a deploy. See `backend/migrations/README.md`.
+
+`default_presets` is a list of preset slugs this agent type comes pre-equipped
+with.
 
 ### `POST /projects`
 ```json
@@ -165,6 +169,17 @@ The node's conversation is created at the same time, so it can be chatted with
 immediately. **Several nodes may share one `agent_slug`**: that is how a
 project holds a team rather than one agent of each kind.
 
+**`kind='agent'` now provisions the agent type's `default_presets`**: one tool
+node per preset, each with a `tool` edge into the new agent, placed to its
+left. The response is still the agent's own node. Reload the canvas after
+creating an agent; one call now creates several nodes and edges. Unknown or
+failing presets are skipped and logged. The call is not idempotent: a retried or
+double-sent request creates a second agent and a second set of default tools,
+so clients must debounce.
+
+**`kind='tool'` accepts `preset_slug`** as an alternative to `tool_slug`. The
+preset's `config` is the base and the request's `config` overrides it.
+
 `404` if the project is not yours or the slug is unknown. A missing project
 returns `404` rather than `403`, since `403` would confirm it exists.
 
@@ -196,10 +211,28 @@ Every field optional; only what you send changes.
 { "position_x": 340, "position_y": 180 }   // dropped after a drag
 { "name": "Market Research (EU)" }          // rename
 { "tool_policy": "auto" }                   // ask | auto
+{ "model": "deepseek-v4-pro:0813" }         // per-node model override
+{ "model": "" }                             // clear it: inherit the type's model
 ```
 
-→ `200` with the updated node. An empty body is a no-op, not an error, so a
-drag that ends where it started is harmless.
+→ `200` with the updated node, including `model`: the node's own override if it
+has one, otherwise its agent type's. An empty body is a no-op, not an error, so
+a drag that ends where it started is harmless.
+
+`model` is validated against `GET /models` before anything is written, so a
+typo is a `422` naming the valid options rather than a turn that fails later.
+
+**This route updates agent nodes only.** Each kind has its own:
+
+| Node kind | Where to patch it |
+|---|---|
+| `agent` | here |
+| `environment` | `PATCH /projects/{project_id}/environments/{node_id}` |
+| `tool` | no patch route; re-check with `POST /projects/{project_id}/nodes/{node_id}/verify`, or delete and recreate to change config |
+
+Sending the wrong kind here returns `404` whose `detail` names the route that
+owns that node, so the mistake is self-correcting. A node that does not exist
+returns `404 "Node not found"`.
 
 **The conversation is untouched.** Moving a box does not affect its transcript.
 Send this on drop rather than during the drag: one request per gesture.
@@ -230,8 +263,9 @@ A `tool -> agent` arrow is `kind: "tool"`: it makes the tool node's toolset
 callable by that agent. Direction is fixed and enforced twice, by the router
 (`422`) and by a database trigger, so a tool edge can never be drawn backwards.
 
-`environment` exists in the schema but is not yet accepted: there are no
-environment nodes to point at.
+An `environment -> agent` arrow is `kind: "environment"`: it gives that agent
+a place to execute code. Like a tool edge, direction is fixed and enforced by
+the router and by a database trigger.
 
 | Method | Path | Auth | Description |
 |---|---|---|---|
@@ -381,6 +415,7 @@ to make it callable there.
 | Method | Path | Auth | Description |
 |---|---|---|---|
 | `GET` | `/tool-types` | **yes** | The catalog of tool templates |
+| `GET` | `/tool-presets` | **yes** | The library of ready-to-instantiate tools |
 | `POST` | `/projects/{project_id}/nodes` | **yes** | Provision a tool node (`kind: "tool"`) |
 | `POST` | `/projects/{project_id}/nodes/{node_id}/verify` | **yes** | Re-run the connectivity check |
 | `GET` | `/projects/{project_id}/nodes/{node_id}/tool-calls` | **yes** | Audit log for one tool node |
@@ -414,6 +449,17 @@ whether it's required. `secret_fields` marks which of those keys are secrets.
 **`auth_kind` decides how the client collects credentials.** `token` renders the
 fields above. `oauth2` renders a Connect button instead: the user types nothing,
 and `config_schema.fields` is empty. Currently only `gmail` is `oauth2`.
+
+### `GET /tool-presets`
+→ `200`
+```json
+[{"id": "uuid", "slug": "research_method", "name": "Research Method",
+  "description": "How to research", "tool_slug": "skill",
+  "config": {"text": "Do research.", "description": "Load first."}}]
+```
+
+The library of ready-to-instantiate tools and skills. Each entry names the
+`tool_slug` it instantiates and the `config` copied onto a node created from it.
 
 ### `POST /projects/{project_id}/nodes/{node_id}/authorize`
 
@@ -515,6 +561,8 @@ The audit log for one tool node, newest first.
 | Slug | Needs from the user |
 |---|---|
 | `brave_search` | An API key |
+| `web_fetch` | Just a URL; no credentials |
+| `context7` | Optional API key; uses platform key by default |
 | `skill` | Just instruction text, no credentials |
 | `mcp_server` | A server URL, and an optional auth token |
 | `github` | Just a personal access token: the endpoint is a real, public default |
@@ -523,6 +571,181 @@ The audit log for one tool node, newest first.
 
 A node for `obsidian` or `gmail` with no bridge running stays in
 `status: "error"` until one is reachable at the configured URL.
+
+---
+
+## Environments
+
+An environment node is a real sandbox: a shell, a filesystem, and a URL for
+whatever gets served on a port. Draw an `environment` edge from it to an agent
+to make it callable there. Every project gets one automatically, a shared
+scratch space every agent in that project can reach; provisioning more is
+what this section covers.
+
+| Method | Path | Auth | Description |
+|---|---|---|---|
+| `POST` | `/projects/{project_id}/nodes` | **yes** | Provision an environment node (`kind: "environment"`) |
+| `GET` | `/projects/{project_id}/environments/{node_id}` | **yes** | One environment, with its lifecycle state |
+| `PATCH` | `/projects/{project_id}/environments/{node_id}` | **yes** | Rename, move, or change the approval policy |
+| `POST` | `/projects/{project_id}/environments/{node_id}/start` | **yes** | Provision or restart the sandbox |
+| `POST` | `/projects/{project_id}/environments/{node_id}/stop` | **yes** | Kill the sandbox. The filesystem is gone |
+| `POST` | `/projects/{project_id}/environments/{node_id}/verify` | **yes** | Re-check that the sandbox is reachable |
+| `GET` | `/projects/{project_id}/environments/{node_id}/files` | **yes** | List a directory, one level deep |
+| `GET` | `/projects/{project_id}/environments/{node_id}/files/content` | **yes** | Read one text file |
+| `GET` | `/projects/{project_id}/environments/{node_id}/preview` | **yes** | A public URL for a port the sandbox is serving |
+| `WS` | `/projects/{project_id}/environments/{node_id}/terminal` | **yes**, via `?token=` | A real shell, streamed both ways |
+
+### `POST /projects/{project_id}/nodes` (`kind: "environment"`)
+```json
+{
+  "kind": "environment",
+  "name": "Build Box",
+  "config": { "idle_timeout_s": 900, "description": "the API repo" }
+}
+```
+
+`config` accepts only `template`, `idle_timeout_s` (60-3600), `preview_ports`
+(up to 10, each 1-65535) and `description` (up to 500 characters). Anything
+else, `sandbox_id` included, is `422`. Creating an environment does **not**
+provision it: the sandbox comes from `/start` or the first turn that reaches
+it, so an unused box costs nothing.
+
+→ `201`
+```json
+{
+  "id": "uuid",
+  "project_id": "uuid",
+  "kind": "environment",
+  "name": "Build Box",
+  "runtime": "e2b",
+  "role": "user",
+  "status": "pending",
+  "status_detail": null,
+  "tool_policy": "ask",
+  "position_x": 0,
+  "position_y": 0,
+  "sandbox_id": null,
+  "template": "base",
+  "idle_timeout_s": 900,
+  "preview_ports": [],
+  "description": "the API repo"
+}
+```
+
+`role` is always `"user"` for one created this way: `"scratch"` is reserved
+for the one node every project gets automatically and cannot be requested.
+
+### `GET /projects/{project_id}/environments/{node_id}`
+
+→ `200`, same shape as creation. `404` if the node is not yours or belongs to
+a different project.
+
+### `PATCH /projects/{project_id}/environments/{node_id}`
+```json
+{ "name": "Renamed", "tool_policy": "auto" }
+```
+
+`status`, `config` and `kind` are not client writable. An empty body is a
+no-op. `404` if the node is not yours. `422` for an unknown `tool_policy`.
+
+### `POST /projects/{project_id}/environments/{node_id}/start`
+
+Provisions the sandbox, or restarts a stopped one. This is the **only** way a
+stopped environment comes back: a turn deliberately leaves a stopped node
+alone, since stopping destroyed its filesystem and only the user should choose
+to pay for a new one.
+
+**Always `200`.** Provisioning can fail; the client reads `status` and
+`status_detail` to find out, the same way a tool node reports a failed verify.
+
+→ `200`, same shape as creation, `status: "ready"` and `sandbox_id` set on
+success.
+
+### `POST /projects/{project_id}/environments/{node_id}/stop`
+
+Kills the sandbox and clears `sandbox_id`. The filesystem is gone; the next
+`/start` begins empty.
+
+→ `200`. `409` if the environment is currently `provisioning`: its sandbox id
+is not written back yet, so killing now would leak it. Retry in a moment.
+
+### `POST /projects/{project_id}/environments/{node_id}/verify`
+
+Re-checks that the recorded sandbox is actually reachable and persists
+`status` and `status_detail`. **Never raises**, same contract as a tool node's
+verify.
+
+→ `200`, same shape as creation.
+
+### `GET /projects/{project_id}/environments/{node_id}/files`
+`?path=` (default the workspace root)
+
+→ `200`
+```json
+{
+  "path": "/home/user/workspace",
+  "entries": [
+    { "name": "app", "type": "dir", "path": "/home/user/workspace/app", "size": 0 },
+    { "name": "notes.md", "type": "file", "path": "/home/user/workspace/notes.md", "size": 42 }
+  ]
+}
+```
+
+`type` is `dir`, `file`, or `symlink`. `409` if the environment is not
+`ready`, naming the actual status. `502` if the sandbox cannot be reached,
+which also marks the node `error` so the canvas reflects it immediately. `404`
+for a path that does not exist.
+
+### `GET /projects/{project_id}/environments/{node_id}/files/content`
+`?path=` (required)
+
+→ `200`
+```json
+{ "path": "/home/user/workspace/notes.md", "content": "...", "truncated": false }
+```
+
+Capped at `environment_max_file_chars`; `truncated` says whether it was cut.
+`404` if the file does not exist. `415` if it is not valid text.
+
+### `GET /projects/{project_id}/environments/{node_id}/preview`
+`?port=` (required, 1-65535)
+
+→ `200`
+```json
+{ "port": 3000, "url": "https://3000-<sandbox-id>.e2b.app" }
+```
+
+Connecting first resumes a paused sandbox, so the link works even if nothing
+has touched the environment in a while.
+
+### `WS /projects/{project_id}/environments/{node_id}/terminal`
+`?token=<access_token>&cols=&rows=`
+
+A real shell. Browsers cannot set a bearer header on a WebSocket, so the token
+travels in the query string instead, which is why this must be `wss://` in
+anything but local development.
+
+Send raw bytes for keystrokes, or a JSON text frame:
+```json
+{ "type": "input", "data": "ls\n" }
+{ "type": "resize", "cols": 120, "rows": 40 }
+```
+
+Receives raw bytes for terminal output, and one final text frame when the
+shell exits:
+```json
+{ "type": "exit", "code": 0 }
+```
+
+Closes with an application code rather than a generic failure:
+
+| Code | Meaning |
+|---|---|
+| `4401` | Missing or invalid token |
+| `4403` | Not `wss://` outside localhost |
+| `4404` | Environment not found |
+| `4409` | Environment is not `ready` |
+| `4502` | Sandbox unreachable |
 
 ---
 
@@ -699,6 +922,5 @@ The schema supports these; the API does not expose them:
 
 - **The retrieval tool.** A context edge gives the downstream agent a summary,
   but no way to ask the upstream agent for detail the summary lost.
-- Environment nodes
 - Changing an edge's `summary_max_words` over the API
 - Listing a conversation's history without sending a message

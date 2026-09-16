@@ -8,7 +8,12 @@ creates, so run it second.
 | `init.sql` | Tables, indexes, triggers, and the seeded catalogs. Run first. |
 | `rls.sql` | Row Level Security policies. Run second. |
 | `tools.sql` | Tool call audit, the approval pause, and vault-backed secrets. Run third. |
-| `apply.py` | Runs all three, in order, in one transaction. |
+| `oauth.sql` | OAuth token storage for tool nodes that connect rather than take a key. Run fourth. |
+| `environments.sql` | Environment edge validation, one scratch space per project, and backfills. Run fifth. |
+| `defaults.sql` | Tool presets library, `agent_types.default_presets`, `web_fetch`, and the seeded skills. Run sixth. |
+| `parity.sql` | Context7 type and preset, ten process skills, agent default lists. Run seventh. |
+| `provider.sql` | Switches the default model provider to Ollama, adds the per-node `model` override. Run eighth. |
+| `apply.py` | Runs them all, in order, in one transaction. |
 
 ## Applying
 

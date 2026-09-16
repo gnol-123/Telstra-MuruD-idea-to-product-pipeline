@@ -7,7 +7,7 @@ The Supabase client is synchronous, so async callers must dispatch these
 through ``anyio.to_thread.run_sync``.
 """
 
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from datetime import UTC, datetime
 from typing import Any
 
@@ -38,6 +38,8 @@ class AgentType:
     name: str
     system_prompt: str
     model: str
+    # Preset slugs wired on creation. Unknown slugs are skipped by the router.
+    default_presets: list[str] = field(default_factory=list)
 
 
 @dataclass(frozen=True)
@@ -63,6 +65,12 @@ class Node:
     # None for a tool node row (agent_types join is null), or if the join
     # itself is absent from the select.
     agent_slug: str | None = None
+    # Lifecycle, for environment boxes. get_agent_node does not select these,
+    # so the defaults have to read as a live agent.
+    status: str = "ready"
+    status_detail: str | None = None
+    # Environment identity: runtime, role, sandbox id. Empty for other kinds.
+    config: dict[str, Any] = field(default_factory=dict)
 
 
 @dataclass(frozen=True)
@@ -122,7 +130,7 @@ def _to_edge(row: dict[str, Any]) -> Edge:
     )
 
 
-class ChatRepository:
+class ProjectRepository:
     """PostgREST access scoped to one user."""
 
     def __init__(self, client: Client, user_id: str) -> None:
@@ -134,7 +142,7 @@ class ChatRepository:
     def list_agent_types(self) -> list[AgentType]:
         rows = (
             self._db.table("agent_types")
-            .select("id, slug, name, system_prompt, model")
+            .select("id, slug, name, system_prompt, model, default_presets")
             .eq("is_active", True)
             .order("sort_order")
             .execute()
@@ -146,6 +154,7 @@ class ChatRepository:
                 name=r["name"],
                 system_prompt=r["system_prompt"],
                 model=r["model"],
+                default_presets=r.get("default_presets") or [],
             )
             for r in rows
         ]
@@ -153,7 +162,7 @@ class ChatRepository:
     def get_agent_type(self, slug: str) -> AgentType | None:
         rows = (
             self._db.table("agent_types")
-            .select("id, slug, name, system_prompt, model")
+            .select("id, slug, name, system_prompt, model, default_presets")
             .eq("slug", slug)
             .eq("is_active", True)
             .limit(1)
@@ -168,6 +177,7 @@ class ChatRepository:
             name=r["name"],
             system_prompt=r["system_prompt"],
             model=r["model"],
+            default_presets=r.get("default_presets") or [],
         )
 
     # -- projects -----------------------------------------------------------
@@ -264,10 +274,12 @@ class ChatRepository:
     def update_node(self, node_id: str, changes: dict[str, Any]) -> Node | None:
         """Apply a partial update to an agent node.
         Only allowed fields are modifiable;
-        {"name", "position_x", "position_y", "tool_policy"}
+        {"name", "position_x", "position_y", "tool_policy", "model"}
         """
-        allowed = {"name", "position_x", "position_y", "tool_policy"}
+        allowed = {"name", "position_x", "position_y", "tool_policy", "model"}
         payload = {k: v for k, v in changes.items() if k in allowed and v is not None}
+        if payload.get("model") == "":
+            payload["model"] = None
         if not payload:
             # A drag that ends where it started is a no-op, not an error.
             return self.get_agent_node(node_id)
@@ -302,7 +314,7 @@ class ChatRepository:
             self._db.table("nodes")
             .select(
                 "id, project_id, name, agent_type_id, tool_policy, kind,"
-                " position_x, position_y,"
+                " position_x, position_y, status, status_detail, config, model,"
                 " agent_types(slug, system_prompt, model)"
             )
             .eq("project_id", project_id)
@@ -318,7 +330,7 @@ class ChatRepository:
             self._db.table("nodes")
             .select(
                 "id, project_id, name, agent_type_id, tool_policy,"
-                " position_x, position_y,"
+                " position_x, position_y, model,"
                 " agent_types(slug, system_prompt, model)"
             )
             .eq("id", node_id)
@@ -443,6 +455,18 @@ class ChatRepository:
             .select("source_node_id")
             .eq("target_node_id", node_id)
             .eq("kind", "tool")
+            .eq("owner_id", self._user_id)
+            .execute()
+        ).data
+        return [r["source_node_id"] for r in rows]
+
+    def list_inbound_environment_node_ids(self, node_id: str) -> list[str]:
+        """Environment nodes whose arrows point at this agent."""
+        rows = (
+            self._db.table("edges")
+            .select("source_node_id")
+            .eq("target_node_id", node_id)
+            .eq("kind", "environment")
             .eq("owner_id", self._user_id)
             .execute()
         ).data
@@ -607,10 +631,14 @@ def _to_node(row: dict[str, Any]) -> Node:
         name=row["name"],
         agent_type_id=row.get("agent_type_id"),
         system_prompt=template.get("system_prompt", ""),
-        model=template.get("model", ""),
+        # Node override first, template second. Null means inherit.
+        model=row.get("model") or template.get("model", ""),
         tool_policy=row.get("tool_policy", "ask"),
         position_x=row.get("position_x") or 0.0,
         position_y=row.get("position_y") or 0.0,
         kind=row.get("kind", "agent"),
         agent_slug=template.get("slug"),
+        status=row.get("status") or "ready",
+        status_detail=row.get("status_detail"),
+        config=row.get("config") or {},
     )
