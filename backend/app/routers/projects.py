@@ -18,6 +18,7 @@ from app.repositories.project_repo import (
     Edge,
     Node,
     Project,
+    UsageTotal,
 )
 from app.repositories.tool_repo import ToolNode, ToolPreset, ToolType, load_node_secrets
 from app.routers.deps import EnvRepo, ProjectRepo, ToolRepo
@@ -337,6 +338,67 @@ async def create_node(
             detail="Node could not be read back after creation",
         )
     return NodeResponse.of(node, agent_type.slug)
+
+
+class UsageModelResponse(BaseModel):
+    """Totals for one model. `reasoning_tokens` is inside `output_tokens`."""
+
+    model: str
+    input_tokens: int
+    output_tokens: int
+    reasoning_tokens: int
+    cache_read_tokens: int
+    cache_write_tokens: int
+    requests: int
+    message_count: int
+
+
+class UsageResponse(BaseModel):
+    """Per-model breakdown plus totals of the columns that are safely additive.
+
+    No grand total of output+reasoning: reasoning is a subset of output, so
+    adding them double-counts. Totals across models are token counts only,
+    never a cost: prices differ per model, so a cap set on these numbers is a
+    token budget, not a spend budget.
+
+    `project_id` is null on the account-wide route.
+    """
+
+    project_id: UUID | None = None
+    by_model: list[UsageModelResponse]
+    input_tokens: int
+    output_tokens: int
+    message_count: int
+
+    @classmethod
+    def of(cls, totals: list[UsageTotal], project_id: UUID | None = None) -> "UsageResponse":
+        return cls(
+            project_id=project_id,
+            by_model=[UsageModelResponse(**vars(t)) for t in totals],
+            input_tokens=sum(t.input_tokens for t in totals),
+            output_tokens=sum(t.output_tokens for t in totals),
+            message_count=sum(t.message_count for t in totals),
+        )
+
+
+@router.get("/usage", response_model=UsageResponse)
+async def get_user_usage(repo: ProjectRepo) -> UsageResponse:
+    """This user's token usage across every project. What a cap reads.
+
+    Already scoped to the caller: there is no route to another user's usage.
+    """
+    return UsageResponse.of(await to_thread.run_sync(repo.get_user_usage))
+
+
+@router.get("/projects/{project_id}/usage", response_model=UsageResponse)
+async def get_usage(project_id: UUID, repo: ProjectRepo) -> UsageResponse:
+    """This user's token usage in one project, broken down by model."""
+    project = await to_thread.run_sync(repo.get_project, str(project_id))
+    if project is None:
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Project not found")
+
+    totals = await to_thread.run_sync(repo.get_usage, str(project_id))
+    return UsageResponse.of(totals, project_id)
 
 
 @router.get("/projects/{project_id}/nodes", response_model=list[NodeResponse])
