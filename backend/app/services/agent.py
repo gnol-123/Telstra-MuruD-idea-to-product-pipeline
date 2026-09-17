@@ -9,6 +9,7 @@ including ``/health``, when the API key is unset.
 from functools import lru_cache
 from hashlib import sha256
 
+import httpx2
 from pydantic_ai import Agent, DeferredToolRequests
 from pydantic_ai.durable_exec.dbos import DBOSDurability
 from pydantic_ai.messages import ModelMessage, ModelRequest, ModelResponse, TextPart, UserPromptPart
@@ -25,10 +26,15 @@ from app.repositories.project_repo import Message
 def _model(name: str) -> Model:
     """Build a model for one name, for user defined model name defaulted to: deepseek v4.1 flash"""
     if settings.llm_provider == "ollama":
+        http = httpx2.AsyncClient(
+            timeout=httpx2.Timeout(settings.llm_read_timeout_s, connect=10.0),
+        )
         return OllamaModel(
             name,
             provider=OllamaProvider(
-                base_url=settings.ollama_base_url, api_key=settings.ollama_api_key
+                base_url=settings.ollama_base_url,
+                api_key=settings.ollama_api_key,
+                http_client=http,
             ),
         )
     return GoogleModel(name, provider=GoogleProvider(api_key=settings.gemini_api_key))
