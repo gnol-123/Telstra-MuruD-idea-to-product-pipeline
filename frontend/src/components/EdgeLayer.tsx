@@ -4,6 +4,7 @@ import { Edge, ProjectNode } from "@/lib/types";
 
 const CY = "#22e0f0";
 const AMBER = "#ffb74d";
+const GREEN = "#7ee787";
 
 export const CARD_W = 240;
 export const PORT_Y = 32;
@@ -46,6 +47,11 @@ export default function EdgeLayer({
 }) {
   const nodeById = (id: string) => nodes.find((n) => n.id === id);
 
+  // Tool attachment is now shown as a chip embedded directly on the agent
+  // card (see NodeCard), matching the design — so a `tool` edge draws no
+  // line or pill here at all; only `context` and `environment` do.
+  const visibleEdges = edges.filter((e) => e.kind !== "tool");
+
   return (
     <>
       <svg
@@ -60,7 +66,7 @@ export default function EdgeLayer({
           pointerEvents: "none",
         }}
       >
-        {edges.map((e) => {
+        {visibleEdges.map((e) => {
           const a = nodeById(e.source_node_id);
           const b = nodeById(e.target_node_id);
           if (!a || !b) return null;
@@ -69,19 +75,21 @@ export default function EdgeLayer({
           const d = curve(p1, p2);
           const hot = selectedId === e.source_node_id || selectedId === e.target_node_id;
           const stale = e.kind === "context" && e.is_stale;
-          const col = stale ? "rgba(255,183,77,.55)" : hot ? CY : "rgba(34,224,240,.32)";
+          const isEnv = e.kind === "environment";
+          const baseCol = isEnv ? GREEN : CY;
+          const col = stale ? "rgba(255,183,77,.55)" : hot ? baseCol : isEnv ? "rgba(126,231,135,.32)" : "rgba(34,224,240,.32)";
           return (
             <g key={e.id}>
               <path d={d} fill="none" stroke={col} strokeWidth={hot ? 2 : 1.5} />
               <path
                 d={d}
                 fill="none"
-                stroke={stale ? AMBER : hot ? "rgba(255,255,255,.85)" : "rgba(34,224,240,.5)"}
+                stroke={stale ? AMBER : hot ? "rgba(255,255,255,.85)" : isEnv ? "rgba(126,231,135,.5)" : "rgba(34,224,240,.5)"}
                 strokeWidth={1.5}
                 strokeDasharray="3 9"
                 style={{ animation: stale ? "none" : "dash 1.1s linear infinite" }}
               />
-              <circle cx={p2.x} cy={p2.y} r={3.5} fill={stale ? AMBER : hot ? CY : "rgba(34,224,240,.5)"} />
+              <circle cx={p2.x} cy={p2.y} r={3.5} fill={stale ? AMBER : hot ? baseCol : isEnv ? "rgba(126,231,135,.5)" : "rgba(34,224,240,.5)"} />
             </g>
           );
         })}
@@ -118,17 +126,18 @@ export default function EdgeLayer({
           pointerEvents: "none",
         }}
       >
-        {edges.map((e) => {
+        {visibleEdges.map((e) => {
           const a = nodeById(e.source_node_id);
           const b = nodeById(e.target_node_id);
           if (!a || !b) return null;
           const p1 = portOf(a, "out");
           const p2 = portOf(b, "in");
           const stale = e.kind === "context" && e.is_stale;
+          const isEnv = e.kind === "environment";
           const hot = selectedId === e.source_node_id || selectedId === e.target_node_id;
           const busy = refreshingId === e.id;
-          const label =
-            e.kind === "tool" ? "TOOL" : stale ? "CLEAR STALE" : "CONTEXT";
+          const label = isEnv ? "ENVIRONMENT" : stale ? "CLEAR STALE" : "CONTEXT";
+          const accentCol = isEnv ? GREEN : CY;
           return (
             <div
               key={e.id}
@@ -150,8 +159,8 @@ export default function EdgeLayer({
                   if (stale) onRefresh(e);
                 }}
                 title={
-                  e.kind === "tool"
-                    ? `${a.name} is callable by ${b.name}`
+                  isEnv
+                    ? `${b.name} can execute in ${a.name}`
                     : stale
                     ? `Stale — click to refresh ${a.name}'s summary for ${b.name}`
                     : `Context link — ${a.name} → ${b.name}`
@@ -161,13 +170,13 @@ export default function EdgeLayer({
                 style={{
                   fontWeight: stale ? 600 : 400,
                   background: stale ? AMBER : "#05080a",
-                  color: stale ? "#2b1a00" : hot ? CY : "rgba(255,255,255,.5)",
-                  border: `1px solid ${stale ? AMBER : hot ? "rgba(34,224,240,.5)" : "rgba(255,255,255,.16)"}`,
+                  color: stale ? "#2b1a00" : hot ? accentCol : "rgba(255,255,255,.5)",
+                  border: `1px solid ${stale ? AMBER : hot ? `${accentCol}80` : "rgba(255,255,255,.16)"}`,
                   boxShadow: stale ? "0 0 16px rgba(255,183,77,.35)" : "none",
                   cursor: e.kind === "context" ? "pointer" : "default",
                 }}
               >
-                <span>{e.kind === "tool" ? "⌗" : stale ? "⟳" : "◗"}</span>
+                <span>{isEnv ? "▣" : stale ? "⟳" : "◗"}</span>
                 {busy ? "REFRESHING…" : label}
               </button>
               <button
