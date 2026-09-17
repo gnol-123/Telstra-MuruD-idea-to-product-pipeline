@@ -42,6 +42,9 @@ class AssembledTools:
     # from, so a caller can wrap each toolset for recording without
     # re-deriving ownership from tool names.
     owner_by_toolset: list[str] = field(default_factory=list)
+    # Instruction text describing a group of toolsets to the model. Kept
+    # separate from unavailable so a caller composes them in one place.
+    notes: list[str] = field(default_factory=list)
 
 
 @dataclass
