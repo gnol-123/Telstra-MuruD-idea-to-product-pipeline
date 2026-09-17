@@ -29,6 +29,6 @@ class VerifyResult:
 @dataclass(frozen=True)
 class ToolSpec:
     #
-    kind: Literal["api", "mcp", "skill"]
+    kind: Literal["api", "mcp", "skill", "canvas"]
     build: Callable[[ToolContext], AbstractToolset]
     verify: Callable[[ToolContext], Awaitable[VerifyResult]]
