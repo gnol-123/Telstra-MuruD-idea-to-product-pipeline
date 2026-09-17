@@ -24,13 +24,13 @@ from app.workflows import refresh_outbound, run_turn
 log = logging.getLogger(__name__)
 
 CANVAS_SLUG = "canvas"
-TOOL_NAMES = ("list_canvas", "create_agent", "connect", "run_agent")
+TOOL_NAMES = ("list_canvas", "create_agent", "connect", "refresh_context", "run_agent")
 
 # Boundary box to keep margin between boxes
 _STAGE_DX = 520
 _STAGE_DY = 320
 _ROW_TOLERANCE = 150
-# Head of a stage reply returned to the orchestrator. 
+# Head of a stage reply returned to the orchestrator.
 _RESULT_HEAD = 6000
 
 UNATTENDED_INSTRUCTION = (
@@ -40,8 +40,15 @@ UNATTENDED_INSTRUCTION = (
 )
 
 
+def _is_stale(edge, source_head: int) -> bool:
+    """Same rule as GET /edges: never summarised, or the source moved on since."""
+    if edge.summarised_through_seq is None:
+        return True
+    return source_head > edge.summarised_through_seq
+
+
 class CanvasTools:
-    """The four functions, bound to one orchestrator node and its turn repos."""
+    """The five functions, bound to one orchestrator node and its turn repos."""
 
     def __init__(self, repos: TurnRepositories, orchestrator: Node) -> None:
         self._repos = repos
@@ -88,6 +95,7 @@ class CanvasTools:
                         "source_node_id": e.source_node_id,
                         "target_node_id": e.target_node_id,
                         "has_summary": bool(e.summary),
+                        "is_stale": _is_stale(e, heads.get(e.source_node_id, 0)),
                     }
                     for e in edges
                     if e.kind == "context"
@@ -168,6 +176,30 @@ class CanvasTools:
         log.info("canvas: %s connected %s -> %s", self._orch.id, src.id, tgt.id)
         return f"Connected: {src.name} -> {tgt.name} (summary up to {words} words)."
 
+    async def refresh_context(self, node_id: str) -> str:
+        """Regenerate the context summaries flowing OUT of one agent, so everything
+        downstream of it sees what it knows now. run_agent already does this for
+        the agent it ran, so you only need this when an agent's conversation moved
+        on some other way: the user chatted with it directly, or list_canvas shows
+        one of its outgoing edges as stale."""
+        repo = self._repos.project
+        node = await to_thread.run_sync(repo.get_agent_node, node_id)
+        if node is None or node.project_id != self._orch.project_id:
+            return f"Refused: agent {node_id} not found on this canvas."
+
+        edges = await to_thread.run_sync(repo.list_outbound_context_edges, node.id)
+        if not edges:
+            return f"{node.name} has no outgoing context edges, so there is nothing to refresh."
+
+        log.info("canvas: %s refreshing context out of %s", self._orch.id, node.id)
+        failed = await refresh_outbound(repo, node.id)
+        if failed:
+            return (
+                f"Refreshed {len(edges) - len(failed)} of {len(edges)} context edge(s) out of "
+                f"{node.name}. Failed: {', '.join(failed)}."
+            )
+        return f"Refreshed {len(edges)} context edge(s) out of {node.name}."
+
     async def run_agent(self, node_id: str, prompt: str) -> str:
         """Send prompt to an agent and wait for its reply. The agent runs unattended
         with its own tools and receives the context summaries wired into it.
@@ -243,7 +275,10 @@ async def assemble_canvas(
     """One canvas toolset for the turn. A second canvas box is reported unavailable.
 
     ``ask`` gates only run_agent: creating and wiring boxes is cheap and
-    reversible, running an agent is the step that spends.
+    reversible, running an agent is the step that spends. refresh_context is
+    on the cheap side too, a summariser call over one transcript, and gating
+    it would interrupt the pause/resume flow for bookkeeping the user has no
+    reason to adjudicate.
     """
     ready = [n for n in nodes if n.status == "ready"]
     if not ready:
