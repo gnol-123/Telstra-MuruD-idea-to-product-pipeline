@@ -596,6 +596,14 @@ draws context edges between them, runs each in order with the idea and the
 earlier decisions, and replies with a report. Each stage's full output is on
 that agent's own conversation: `GET /projects/{id}/nodes/{node_id}/messages`.
 
+**Context summaries stay current on their own** while the orchestrator drives
+the pipeline: running a stage refreshes the summaries flowing out of it before
+the next stage reads them. The exception is when **you** chat with a stage
+agent directly, which moves its conversation past the summary downstream
+agents hold. The orchestrator sees that as a stale edge and calls its
+`refresh_context` tool to regenerate those summaries before running anything
+that depends on them, so an edit you make by hand is not silently skipped.
+
 **Mode** is the orchestrator node's `tool_policy`:
 
 | `tool_policy` | Behaviour |

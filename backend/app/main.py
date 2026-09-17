@@ -30,6 +30,7 @@ setup_dbos(app)
 async def _join_detached_turns() -> None:
     await join_detached(settings.detached_join_timeout_s)
 
+
 app.add_event_handler("shutdown", _join_detached_turns)
 
 
