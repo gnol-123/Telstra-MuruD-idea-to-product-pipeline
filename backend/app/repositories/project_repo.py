@@ -104,6 +104,38 @@ def _to_message(row: dict[str, Any]) -> Message:
 
 
 @dataclass(frozen=True)
+class UsageTotal:
+    """Token totals for one project on one model.
+
+    Per model because `nodes.model` is an override: one project can run
+    several, and counts are neither comparable nor equally priced across them.
+    `reasoning_tokens` is a subset of `output_tokens`, not an addend.
+    """
+
+    model: str
+    input_tokens: int
+    output_tokens: int
+    reasoning_tokens: int
+    cache_read_tokens: int
+    cache_write_tokens: int
+    requests: int
+    message_count: int
+
+
+def _to_usage_total(row: dict[str, Any]) -> UsageTotal:
+    return UsageTotal(
+        model=row["model"],
+        input_tokens=row["input_tokens"],
+        output_tokens=row["output_tokens"],
+        reasoning_tokens=row["reasoning_tokens"],
+        cache_read_tokens=row["cache_read_tokens"],
+        cache_write_tokens=row["cache_write_tokens"],
+        requests=row["requests"],
+        message_count=row["message_count"],
+    )
+
+
+@dataclass(frozen=True)
 class Edge:
     """A connection between two nodes on the canvas."""
 
@@ -560,6 +592,9 @@ class ProjectRepository:
         input_tokens: int | None = None,
         output_tokens: int | None = None,
         reasoning_tokens: int | None = None,
+        cache_read_tokens: int | None = None,
+        cache_write_tokens: int | None = None,
+        requests: int | None = None,
         status: str = "complete",
         error: str | None = None,
     ) -> Message:
@@ -579,6 +614,9 @@ class ProjectRepository:
             ("input_tokens", input_tokens),
             ("output_tokens", output_tokens),
             ("reasoning_tokens", reasoning_tokens),
+            ("cache_read_tokens", cache_read_tokens),
+            ("cache_write_tokens", cache_write_tokens),
+            ("requests", requests),
             ("error", error),
         ):
             if value is not None:
@@ -620,6 +658,69 @@ class ProjectRepository:
             .execute()
         ).data
         return rows[0]["message_count"] if rows else 0
+
+    # -- usage -----------------------------------------------------------------
+
+    _USAGE_COLUMNS = (
+        "model, input_tokens, output_tokens, reasoning_tokens, "
+        "cache_read_tokens, cache_write_tokens, requests, message_count"
+    )
+
+    def get_usage(self, project_id: str) -> list[UsageTotal]:
+        """This user's token totals in one project, one row per model.
+
+        Read straight off the trigger-maintained rollup: no sum over messages.
+        Scoped to the caller, so a shared project shows their own spend rather
+        than everyone's.
+        """
+        rows = (
+            self._db.table("usage_totals")
+            .select(self._USAGE_COLUMNS)
+            .eq("owner_id", self._user_id)
+            .eq("project_id", project_id)
+            .order("output_tokens", desc=True)
+            .execute()
+        ).data
+        return [_to_usage_total(r) for r in rows]
+
+    def get_user_usage(self) -> list[UsageTotal]:
+        """This user's totals across every project, one row per model.
+
+        What a per-user cap reads. Rows are already per (project, owner, model),
+        so this re-aggregates by model in Python: the row count is bounded by
+        projects x models, small enough that a database-side sum is not worth
+        the view.
+        """
+        rows = (
+            self._db.table("usage_totals")
+            .select(self._USAGE_COLUMNS)
+            .eq("owner_id", self._user_id)
+            .execute()
+        ).data
+
+        summed = (
+            "input_tokens",
+            "output_tokens",
+            "reasoning_tokens",
+            "cache_read_tokens",
+            "cache_write_tokens",
+            "requests",
+            "message_count",
+        )
+        by_model: dict[str, dict[str, Any]] = {}
+        for r in rows:
+            acc = by_model.get(r["model"])
+            if acc is None:
+                by_model[r["model"]] = dict(r)
+                continue
+            for key in summed:
+                acc[key] += r[key]
+
+        return sorted(
+            (_to_usage_total(r) for r in by_model.values()),
+            key=lambda t: t.output_tokens,
+            reverse=True,
+        )
 
 
 def _to_node(row: dict[str, Any]) -> Node:

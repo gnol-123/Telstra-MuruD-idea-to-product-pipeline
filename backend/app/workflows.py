@@ -26,9 +26,13 @@ class AgentTurn:
     output: str
     model: str
     input_tokens: int | None = None
-    # Gemini counts reasoning here.
+    # Includes reasoning, on every provider. See _reasoning_from.
     output_tokens: int | None = None
     reasoning_tokens: int | None = None
+    cache_read_tokens: int | None = None
+    cache_write_tokens: int | None = None
+    # Model requests behind this turn: >1 when tool calls loop.
+    requests: int | None = None
     error: str | None = None
     # Set when the run paused for approval. Output is empty; do not persist it.
     pending: DeferredToolRequests | None = None
@@ -114,13 +118,32 @@ async def resume_agent(
     return _turn_from_result(result, model)
 
 
+def _reasoning_from(usage: object) -> int | None:
+    """Reasoning tokens, wherever the provider put them.
+
+    pydantic-ai has no typed field for this: each model adapter lifts it into
+    ``usage.details`` under its own name (OpenAI/Ollama ``reasoning_tokens``,
+    Anthropic ``thinking_tokens``, Google ``thoughts_tokens``). Always a subset
+    of ``output_tokens``, never additive, so never sum the two.
+    """
+    details = getattr(usage, "details", None) or {}
+    for key in ("reasoning_tokens", "thinking_tokens", "thoughts_tokens"):
+        value = details.get(key)
+        if isinstance(value, int):
+            return value
+    return None
+
+
 def _turn_from(output: str, model: str, usage: object) -> AgentTurn:
     return AgentTurn(
         output=output,
         model=model,
         input_tokens=getattr(usage, "input_tokens", None),
         output_tokens=getattr(usage, "output_tokens", None),
-        reasoning_tokens=getattr(usage, "output_reasoning_tokens", None),
+        reasoning_tokens=_reasoning_from(usage),
+        cache_read_tokens=getattr(usage, "cache_read_tokens", None),
+        cache_write_tokens=getattr(usage, "cache_write_tokens", None),
+        requests=getattr(usage, "requests", None),
     )
 
 
@@ -202,6 +225,9 @@ async def run_turn(
             input_tokens=turn.input_tokens,
             output_tokens=turn.output_tokens,
             reasoning_tokens=turn.reasoning_tokens,
+            cache_read_tokens=turn.cache_read_tokens,
+            cache_write_tokens=turn.cache_write_tokens,
+            requests=turn.requests,
             status="failed" if turn.failed else "complete",
             error=turn.error,
         )
@@ -314,12 +340,12 @@ async def _run_agent_durable(
 
 def _turn_from_result(result, model: str) -> AgentTurn:
     if isinstance(result.output, DeferredToolRequests):
-        return AgentTurn(
-            output="",
-            model=model,
-            pending=result.output,
-            all_messages=result.all_messages(),
-        )
+        # A pause still burned tokens. Carry the usage so the approval path can
+        # bill it; only `output` is unsafe to persist here.
+        turn = _turn_from("", model, result.usage)
+        turn.pending = result.output
+        turn.all_messages = result.all_messages()
+        return turn
     return _turn_from(result.output, model, result.usage)
 
 
@@ -403,6 +429,9 @@ async def stream_turn(
             input_tokens=turn.input_tokens,
             output_tokens=turn.output_tokens,
             reasoning_tokens=turn.reasoning_tokens,
+            cache_read_tokens=turn.cache_read_tokens,
+            cache_write_tokens=turn.cache_write_tokens,
+            requests=turn.requests,
             status="failed" if turn.failed else "complete",
             error=turn.error,
         )

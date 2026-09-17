@@ -436,6 +436,9 @@ async def chat_resume(
             input_tokens=turn.input_tokens,
             output_tokens=turn.output_tokens,
             reasoning_tokens=turn.reasoning_tokens,
+            cache_read_tokens=turn.cache_read_tokens,
+            cache_write_tokens=turn.cache_write_tokens,
+            requests=turn.requests,
             status="failed" if turn.failed else "complete",
             error=turn.error,
         )
