@@ -13,6 +13,8 @@ creates, so run it second.
 | `defaults.sql` | Tool presets library, `agent_types.default_presets`, `web_fetch`, and the seeded skills. Run sixth. |
 | `parity.sql` | Context7 type and preset, ten process skills, agent default lists. Run seventh. |
 | `provider.sql` | Switches the default model provider to Ollama, adds the per-node `model` override. Run eighth. |
+| `usage.sql` | Token usage columns on messages and the usage_totals rollup. Run ninth. |
+| `orchestrator.sql` | Canvas tool type and preset, the orchestrator agent type and its prompt. Run tenth. |
 | `apply.py` | Runs them all, in order, in one transaction. |
 
 ## Applying
