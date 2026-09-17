@@ -5,19 +5,25 @@ import {
   Project,
   AgentType,
   ToolType,
+  ToolPreset,
   ProjectNode,
   Edge,
   EdgeKind,
   ToolPolicy,
   isAgentNode,
   isToolNode,
+  isEnvironmentNode,
 } from "@/lib/types";
 import {
   getAgentTypes,
   getToolTypes,
+  getToolPresets,
   listNodes,
   createAgentNode,
+  createToolNode,
+  createEnvironmentNode,
   updateNode,
+  updateEnvironment,
   deleteNode,
   listEdges,
   createEdge,
@@ -26,7 +32,7 @@ import {
   ApiError,
 } from "@/lib/api";
 import Palette, { PaletteTab } from "./Palette";
-import NodeCard from "./NodeCard";
+import NodeCard, { AttachedTool } from "./NodeCard";
 import EdgeLayer, { LinkDraft, LAYER_W, LAYER_H } from "./EdgeLayer";
 import Inspector, { ChatState, defaultChatState } from "./Inspector";
 import ToolConfigModal from "./ToolConfigModal";
@@ -46,8 +52,10 @@ export default function MeshCanvas({
 }: {
   project: Project;
   onBack: () => void;
-}) {  const [agentTypes, setAgentTypes] = useState<AgentType[]>([]);
+}) {
+  const [agentTypes, setAgentTypes] = useState<AgentType[]>([]);
   const [toolTypes, setToolTypes] = useState<ToolType[]>([]);
+  const [toolPresets, setToolPresets] = useState<ToolPreset[]>([]);
   const [nodes, setNodes] = useState<ProjectNode[]>([]);
   const [edges, setEdges] = useState<Edge[]>([]);
   const [selectedId, setSelectedId] = useState<string | null>(null);
@@ -57,9 +65,11 @@ export default function MeshCanvas({
   const [link, setLink] = useState<LinkDraft | null>(null);
   const [hoverNodeId, setHoverNodeId] = useState<string | null>(null);
   const [refreshingEdgeId, setRefreshingEdgeId] = useState<string | null>(null);
-  const [toolModal, setToolModal] = useState<{ toolType: ToolType; position: { x: number; y: number } } | null>(
-    null
-  );
+  const [toolModal, setToolModal] = useState<{
+    toolType: ToolType;
+    position: { x: number; y: number };
+    attachToAgentId?: string;
+  } | null>(null);
   // Keyed by agent node id — kept here, above the Inspector, so a
   // conversation survives switching to another node and back. The API has
   // no endpoint to re-fetch a conversation's history (see API.md's "Not
@@ -67,9 +77,20 @@ export default function MeshCanvas({
   const [chatByNode, setChatByNode] = useState<Record<string, ChatState>>({});
   const canvasRef = useRef<HTMLDivElement | null>(null);
 
+  async function reloadCanvas() {
+    try {
+      const [ns, es] = await Promise.all([listNodes(project.id), listEdges(project.id)]);
+      setNodes(dedupeById(ns));
+      setEdges(dedupeById(es));
+    } catch (e) {
+      setError(e instanceof ApiError ? e.message : "Could not refresh the canvas");
+    }
+  }
+
   useEffect(() => {
     getAgentTypes().then(setAgentTypes).catch((e: ApiError) => setError(e.message));
     getToolTypes().then(setToolTypes).catch((e: ApiError) => setError(e.message));
+    getToolPresets().then(setToolPresets).catch((e: ApiError) => setError(e.message));
     listNodes(project.id)
       .then((ns) => setNodes(dedupeById(ns)))
       .catch((e: ApiError) => setError(e.message));
@@ -85,6 +106,14 @@ export default function MeshCanvas({
     return { x: e.clientX - r.left + c.scrollLeft, y: e.clientY - r.top + c.scrollTop };
   }
 
+  // Where a tool/preset lands visually if it's created near an agent it's
+  // being equipped on — mostly cosmetic since equipped tools show as chips
+  // on the card, but it keeps the node discoverable nearby if it's ever
+  // unequipped again.
+  function posNearAgent(agent: ProjectNode) {
+    return { x: agent.position_x ?? 0, y: (agent.position_y ?? 0) + 220 };
+  }
+
   async function handleAddAgent(agentSlug: string, pos?: { x: number; y: number }) {
     try {
       const offset = nodes.length * 40;
@@ -94,31 +123,133 @@ export default function MeshCanvas({
       });
       setNodes((n) => dedupeById([...n, node]));
       setSelectedId(node.id);
+
+      // "kind='agent' now provisions the agent type's default_presets": one
+      // tool node + tool edge per preset, created server-side alongside the
+      // agent. The response above is still just the agent's own node, so
+      // reload to pick up whatever else the backend just created.
+      const agentType = agentTypes.find((t) => t.slug === agentSlug);
+      await reloadCanvas();
+      if (agentType?.default_presets && agentType.default_presets.length > 0) {
+        setNotice(
+          `${agentType.name} came equipped with ${agentType.default_presets.length} default tool${
+            agentType.default_presets.length === 1 ? "" : "s"
+          } — see the chips on its card.`
+        );
+      }
     } catch (e) {
       setError(e instanceof ApiError ? e.message : "Could not add agent");
     }
   }
 
-  function openToolConfig(toolSlug: string, pos?: { x: number; y: number }) {
+  function openToolConfig(toolSlug: string, pos?: { x: number; y: number }, attachToAgentId?: string) {
     const toolType = toolTypes.find((t) => t.slug === toolSlug);
     if (!toolType) return;
     const offset = nodes.length * 40;
     setToolModal({
       toolType,
       position: pos ?? { x: 120 + offset, y: 100 + offset },
+      attachToAgentId,
     });
   }
 
-  function handleToolCreated(node: ProjectNode) {
+  async function handleAddPreset(
+    presetSlug: string,
+    pos?: { x: number; y: number },
+    attachToAgentId?: string
+  ) {
+    const preset = toolPresets.find((p) => p.slug === presetSlug);
+    if (!preset) return;
+    const offset = nodes.length * 40;
+    const position = pos ?? { x: 120 + offset, y: 100 + offset };
+    try {
+      const node = await createToolNode(project.id, {
+        presetSlug: preset.slug,
+        name: preset.name,
+        position_x: position.x,
+        position_y: position.y,
+      });
+      setNodes((n) => dedupeById([...n, node]));
+
+      if (attachToAgentId) {
+        try {
+          const edge = await createEdge(project.id, node.id, attachToAgentId, "tool");
+          setEdges((es) => dedupeById([...es, edge]));
+          setSelectedId(attachToAgentId);
+          return;
+        } catch (edgeErr) {
+          setError(
+            edgeErr instanceof ApiError
+              ? `${preset.name} was created, but couldn't attach it automatically: ${edgeErr.message}`
+              : `${preset.name} was created, but couldn't attach it automatically.`
+          );
+        }
+      }
+      setSelectedId(node.id);
+    } catch (e) {
+      setError(e instanceof ApiError ? e.message : "Could not add tool preset");
+    }
+  }
+
+  async function handleAddEnvironment(pos?: { x: number; y: number }) {
+    try {
+      const offset = nodes.length * 40;
+      const node = await createEnvironmentNode(project.id, {
+        position_x: pos?.x ?? 120 + offset,
+        position_y: pos?.y ?? 100 + offset,
+      });
+      setNodes((n) => dedupeById([...n, node]));
+      setSelectedId(node.id);
+    } catch (e) {
+      setError(e instanceof ApiError ? e.message : "Could not provision environment");
+    }
+  }
+
+  function handleToolCreated(node: ProjectNode, edge?: Edge) {
     setNodes((n) => dedupeById([...n, node]));
+    if (edge) {
+      setEdges((es) => dedupeById([...es, edge]));
+      setSelectedId(edge.target_node_id);
+    } else {
+      setSelectedId(node.id);
+    }
     setToolModal(null);
-    setSelectedId(node.id);
+  }
+
+  // Fired when a palette card is dropped directly on an agent's own card —
+  // the design's "drop a tool on top of a card to equip it" gesture. Tool
+  // types still collect config through the modal; presets (which already
+  // carry their config) attach immediately, no modal, matching the design.
+  function handleDropOnAgent(agent: ProjectNode, raw: string) {
+    const [dragKind, slug] = raw.split(":");
+    if (dragKind === "tool") {
+      openToolConfig(slug, posNearAgent(agent), agent.id);
+    } else if (dragKind === "preset") {
+      handleAddPreset(slug, posNearAgent(agent), agent.id);
+    }
+  }
+
+  // Each node kind has its own patch route (API.md's "Where to patch it"
+  // table): agents use the generic /nodes/{id} route, environments have
+  // their own /environments/{id} route, and — as of today's API — tool
+  // nodes have no patch route at all, so a tool's position never round-trips
+  // to the backend (it'll snap back to its last saved spot on reload). This
+  // is the single place that decides which route a position save takes, so
+  // dragging any node kind can't accidentally hit the wrong one again.
+  async function savePosition(node: ProjectNode, x: number, y: number) {
+    if (isEnvironmentNode(node)) {
+      await updateEnvironment(project.id, node.id, { position_x: x, position_y: y });
+    } else if (isToolNode(node)) {
+      return; // no patch route for tool nodes yet — nothing to save
+    } else {
+      await updateNode(project.id, node.id, { position_x: x, position_y: y });
+    }
   }
 
   async function handleDragEnd(node: ProjectNode, x: number, y: number) {
     setNodes((prev) => prev.map((n) => (n.id === node.id ? { ...n, position_x: x, position_y: y } : n)));
     try {
-      await updateNode(project.id, node.id, { position_x: x, position_y: y });
+      await savePosition(node, x, y);
     } catch (e) {
       setError(e instanceof ApiError ? e.message : "Could not save position");
     }
@@ -144,6 +275,7 @@ export default function MeshCanvas({
   function edgeKindFor(source: ProjectNode, target: ProjectNode): EdgeKind | null {
     if (isAgentNode(source) && isAgentNode(target)) return "context";
     if (isToolNode(source) && isAgentNode(target)) return "tool";
+    if (isEnvironmentNode(source) && isAgentNode(target)) return "environment";
     return null;
   }
 
@@ -158,14 +290,14 @@ export default function MeshCanvas({
         const kind = edgeKindFor(source, target);
         if (!kind) {
           setError(
-            "That link isn't supported — tools can only connect to agents, and agents only share context with other agents."
+            "That link isn't supported — tools and environments can only connect to agents, and agents only share context with other agents."
           );
         } else if (
           edges.some(
             (e) => e.source_node_id === source.id && e.target_node_id === target.id && e.kind === kind
           )
         ) {
-          setError(`${source.name} → ${target.name} is already linked. Look for its pill on the canvas.`);
+          setError(`${source.name} → ${target.name} is already linked.`);
         } else {
           createEdge(project.id, source.id, target.id, kind)
             .then((edge) => {
@@ -174,6 +306,9 @@ export default function MeshCanvas({
                 setNotice(
                   `Linked ${source.name} → ${target.name}. It starts stale with no summary — click the pill on the link and hit refresh to actually pull ${source.name}'s context into ${target.name}.`
                 );
+              } else if (kind === "tool") {
+                setNotice(`${source.name} is now equipped on ${target.name} — see the chip on its card.`);
+                setSelectedId(target.id);
               }
             })
             .catch((e) => setError(e instanceof ApiError ? e.message : "Could not create link"));
@@ -204,6 +339,28 @@ export default function MeshCanvas({
     }
   }
 
+  // Unequipping a tool chip removes the `tool` edge (the node itself stays,
+  // so it isn't lost) and nudges the now-detached tool node back into view
+  // near the agent it just left, since it no longer has a card position of
+  // its own once it's re-rendered as a standalone card.
+  async function handleUnequipTool(edge: Edge) {
+    try {
+      await deleteEdge(project.id, edge.id);
+      setEdges((es) => es.filter((e) => e.id !== edge.id));
+      const agent = nodes.find((n) => n.id === edge.target_node_id);
+      const tool = nodes.find((n) => n.id === edge.source_node_id);
+      if (agent && tool) {
+        const { x, y } = posNearAgent(agent);
+        // Optimistic only — tool nodes have no patch route today (see
+        // savePosition), so this position lives client-side for the
+        // session and reverts to wherever it was created on next reload.
+        setNodes((ns) => ns.map((n) => (n.id === tool.id ? { ...n, position_x: x, position_y: y } : n)));
+      }
+    } catch (e) {
+      setError(e instanceof ApiError ? e.message : "Could not unequip tool");
+    }
+  }
+
   async function handleUpdateAgentPolicy(nodeId: string, policy: ToolPolicy) {
     try {
       const updated = await updateNode(project.id, nodeId, { tool_policy: policy });
@@ -230,7 +387,7 @@ export default function MeshCanvas({
     setNodes(laidOut);
     for (const n of laidOut) {
       try {
-        await updateNode(project.id, n.id, { position_x: n.position_x, position_y: n.position_y });
+        await savePosition(n, n.position_x ?? 0, n.position_y ?? 0);
       } catch {
         // best-effort — a single failed save shouldn't block the rest
       }
@@ -238,8 +395,33 @@ export default function MeshCanvas({
   }
 
   const selectedNode = nodes.find((n) => n.id === selectedId) ?? null;
+
+  // Tool nodes that carry an outbound `tool` edge are "equipped" — they
+  // render as a chip on the target agent's card instead of a floating box
+  // of their own, per the design. Build that lookup once per render.
+  const attachedToolsByAgent = new Map<string, AttachedTool[]>();
+  const attachedToolNodeIds = new Set<string>();
+  const environmentCountByAgent = new Map<string, number>();
+  for (const e of edges) {
+    if (e.kind === "tool") {
+      const tool = nodes.find((n) => n.id === e.source_node_id);
+      if (tool && isToolNode(tool)) {
+        attachedToolNodeIds.add(tool.id);
+        const list = attachedToolsByAgent.get(e.target_node_id) ?? [];
+        list.push({ edge: e, tool });
+        attachedToolsByAgent.set(e.target_node_id, list);
+      }
+    } else if (e.kind === "environment") {
+      environmentCountByAgent.set(e.target_node_id, (environmentCountByAgent.get(e.target_node_id) ?? 0) + 1);
+    }
+  }
+
+  const visibleNodes = nodes.filter((n) => !(isToolNode(n) && attachedToolNodeIds.has(n.id)));
+
   const toolNodeCount = nodes.filter(isToolNode).length;
   const agentNodeCount = nodes.filter(isAgentNode).length;
+  const environmentNodeCount = nodes.filter(isEnvironmentNode).length;
+  const equippedToolCount = attachedToolNodeIds.size;
 
   return (
     <div className="h-screen flex flex-col bg-bg text-text">
@@ -250,8 +432,9 @@ export default function MeshCanvas({
         <div className="text-sm font-medium">{project.name}</div>
         <div className="ml-auto flex items-center gap-3">
           <div className="text-[10px] text-muted whitespace-nowrap">
-            {agentNodeCount} agent{agentNodeCount === 1 ? "" : "s"} · {toolNodeCount} tool
-            {toolNodeCount === 1 ? "" : "s"} · {edges.length} link{edges.length === 1 ? "" : "s"}
+            {agentNodeCount} agent{agentNodeCount === 1 ? "" : "s"} · {equippedToolCount} equipped tool
+            {equippedToolCount === 1 ? "" : "s"} · {toolNodeCount - equippedToolCount} unattached · {environmentNodeCount}{" "}
+            environment{environmentNodeCount === 1 ? "" : "s"} · {edges.length} link{edges.length === 1 ? "" : "s"}
           </div>
           <button
             onClick={handleTidy}
@@ -267,8 +450,11 @@ export default function MeshCanvas({
         onTabChange={setPaletteTab}
         agentTypes={agentTypes}
         toolTypes={toolTypes}
+        toolPresets={toolPresets}
         onAddAgent={(slug) => handleAddAgent(slug)}
         onAddTool={(slug) => openToolConfig(slug)}
+        onAddPreset={(slug) => handleAddPreset(slug)}
+        onAddEnvironment={() => handleAddEnvironment()}
       />
 
       {notice && (
@@ -290,9 +476,9 @@ export default function MeshCanvas({
       )}
 
       <div className="px-5 py-1.5 border-b border-border text-[10px] text-muted flex flex-wrap gap-4">
-        <span>Drag an agent or tool card onto the canvas to add it</span>
+        <span>Drag an agent, tool or environment card onto the canvas to add it</span>
+        <span>Drop a tool onto an agent card to equip it — it shows up as a chip</span>
         <span>Drag from a node&apos;s ◗ port onto another node to link them</span>
-        <span>A new link starts stale — click its pill to pull in context</span>
         <span>Click a node&apos;s × to remove it</span>
       </div>
 
@@ -313,6 +499,8 @@ export default function MeshCanvas({
             const pos = relPos(e);
             if (kind === "agent") handleAddAgent(slug, pos);
             else if (kind === "tool") openToolConfig(slug, pos);
+            else if (kind === "preset") handleAddPreset(slug, pos);
+            else if (kind === "environment") handleAddEnvironment(pos);
           }}
           onPointerMove={(e) => {
             if (link) setLink((l) => (l ? { ...l, cursor: relPos(e) } : l));
@@ -332,12 +520,9 @@ export default function MeshCanvas({
               onRefresh={handleRefreshEdge}
               onDelete={handleDeleteEdge}
             />
-            {nodes.map((node) => {
+            {visibleNodes.map((node) => {
               const inboundCount = edges.filter(
                 (e) => e.target_node_id === node.id && e.kind === "context"
-              ).length;
-              const toolCount = edges.filter(
-                (e) => e.target_node_id === node.id && e.kind === "tool"
               ).length;
               return (
                 <NodeCard
@@ -346,7 +531,8 @@ export default function MeshCanvas({
                   selected={node.id === selectedId}
                   linking={!!link}
                   linkHover={!!link && hoverNodeId === node.id && link.fromId !== node.id}
-                  toolCount={isAgentNode(node) ? toolCount : undefined}
+                  attachedTools={isAgentNode(node) ? attachedToolsByAgent.get(node.id) ?? [] : undefined}
+                  environmentCount={isAgentNode(node) ? environmentCountByAgent.get(node.id) ?? 0 : undefined}
                   inboundCount={inboundCount}
                   onSelect={() => setSelectedId(node.id)}
                   onDragEnd={(x, y) => handleDragEnd(node, x, y)}
@@ -354,10 +540,13 @@ export default function MeshCanvas({
                   onPortDown={(side) => handlePortDown(node, side)}
                   onCardPointerUp={() => completeLink(node.id)}
                   onHoverChange={(hovering) => setHoverNodeId(hovering ? node.id : null)}
+                  onDropOnCard={isAgentNode(node) ? (raw) => handleDropOnAgent(node, raw) : undefined}
+                  onChipClick={(toolNodeId) => setSelectedId(toolNodeId)}
+                  onChipRemove={(edge) => handleUnequipTool(edge)}
                 />
               );
             })}
-            {nodes.length === 0 && (
+            {visibleNodes.length === 0 && (
               <div className="absolute inset-0 flex items-center justify-center text-sm text-muted">
                 Drag an agent from the palette above to get started.
               </div>
@@ -376,6 +565,7 @@ export default function MeshCanvas({
           onUpdateAgentPolicy={handleUpdateAgentPolicy}
           onRefreshEdge={handleRefreshEdge}
           onDeleteEdge={handleDeleteEdge}
+          onUnequipTool={handleUnequipTool}
           onNodeUpdated={handleNodeUpdated}
         />
       </div>
@@ -385,6 +575,7 @@ export default function MeshCanvas({
           projectId={project.id}
           toolType={toolModal.toolType}
           position={toolModal.position}
+          attachToAgentId={toolModal.attachToAgentId}
           onCreated={handleToolCreated}
           onCancel={() => setToolModal(null)}
         />

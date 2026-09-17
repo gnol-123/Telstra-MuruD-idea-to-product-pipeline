@@ -1,13 +1,15 @@
 "use client";
 
-import { useEffect, useState } from "react";
+import { useEffect, useRef, useState } from "react";
 import {
   ProjectNode,
   Edge,
   ToolType,
   ToolCall,
   ToolPolicy,
+  EnvironmentFileEntry,
   isAgentNode,
+  isEnvironmentNode,
   isApprovalRequired,
   PendingToolCall,
 } from "@/lib/types";
@@ -18,6 +20,14 @@ import {
   verifyNode,
   authorizeNode,
   listToolCalls,
+  updateEnvironment,
+  startEnvironment,
+  stopEnvironment,
+  verifyEnvironment,
+  listEnvironmentFiles,
+  readEnvironmentFile,
+  getEnvironmentPreview,
+  environmentTerminalUrl,
   ApiError,
 } from "@/lib/api";
 
@@ -51,6 +61,7 @@ export default function Inspector({
   onUpdateAgentPolicy,
   onRefreshEdge,
   onDeleteEdge,
+  onUnequipTool,
   onNodeUpdated,
 }: {
   projectId: string;
@@ -66,6 +77,9 @@ export default function Inspector({
   onUpdateAgentPolicy: (nodeId: string, policy: ToolPolicy) => void;
   onRefreshEdge: (edge: Edge) => void;
   onDeleteEdge: (edge: Edge) => void;
+  // Tool edges specifically: removes the edge AND nudges the now-bare tool
+  // node back into view near its former agent (see MeshCanvas).
+  onUnequipTool: (edge: Edge) => void;
   onNodeUpdated: (node: ProjectNode) => void;
 }) {
   if (!node) {
@@ -88,6 +102,17 @@ export default function Inspector({
           onUpdateAgentPolicy={onUpdateAgentPolicy}
           onRefreshEdge={onRefreshEdge}
           onDeleteEdge={onDeleteEdge}
+          onUnequipTool={onUnequipTool}
+        />
+      ) : isEnvironmentNode(node) ? (
+        <EnvironmentInspector
+          key={node.id}
+          projectId={projectId}
+          node={node}
+          nodes={nodes}
+          edges={edges}
+          onDeleteEdge={onDeleteEdge}
+          onNodeUpdated={onNodeUpdated}
         />
       ) : (
         <ToolInspector
@@ -128,6 +153,7 @@ function AgentInspector({
   onUpdateAgentPolicy,
   onRefreshEdge,
   onDeleteEdge,
+  onUnequipTool,
 }: {
   node: Extract<ProjectNode, { kind: "agent" }>;
   nodes: ProjectNode[];
@@ -137,8 +163,10 @@ function AgentInspector({
   onUpdateAgentPolicy: (nodeId: string, policy: ToolPolicy) => void;
   onRefreshEdge: (edge: Edge) => void;
   onDeleteEdge: (edge: Edge) => void;
+  onUnequipTool: (edge: Edge) => void;
 }) {
   const inboundTool = edges.filter((e) => e.kind === "tool" && e.target_node_id === node.id);
+  const inboundEnv = edges.filter((e) => e.kind === "environment" && e.target_node_id === node.id);
   const inboundContext = edges.filter((e) => e.kind === "context" && e.target_node_id === node.id);
   const outbound = edges.filter((e) => e.kind === "context" && e.source_node_id === node.id);
 
@@ -200,6 +228,28 @@ function AgentInspector({
             const last = copy[copy.length - 1];
             copy[copy.length - 1] = { ...last, content: last.content + text };
             return { ...prev, messages: copy };
+          });
+        },
+        onTool: (data) => {
+          // event: tool — fired once when a tool/sub-agent is called and
+          // again with its result_head when it returns. DBOS checkpoints
+          // /chat but not /chat/stream (it has no return value to
+          // checkpoint), so this is purely a live progress signal — surfaced
+          // as its own system-style line rather than mixed into the
+          // assistant's prose, and the in-flight bubble is left alone so
+          // its text keeps growing underneath.
+          const label =
+            "result_head" in data
+              ? `↳ ${data.name} → ${String(data.result_head ?? "").slice(0, 140)}`
+              : `⚙ calling ${data.name}${data.args ? ` ${JSON.stringify(data.args).slice(0, 140)}` : ""}`;
+          onChatChange((prev) => {
+            const copy = [...prev.messages];
+            // Insert the tool note before the trailing (still-growing)
+            // assistant bubble so the assistant's reply stays last.
+            const pendingIdx = copy.length - 1;
+            const before = copy.slice(0, pendingIdx);
+            const after = copy.slice(pendingIdx);
+            return { ...prev, messages: [...before, { role: "system", content: label }, ...after] };
           });
         },
         onDone: () => {
@@ -277,7 +327,7 @@ function AgentInspector({
         <div className="text-[10px] text-muted">{node.agent_slug}</div>
       </div>
 
-      <div className="px-4 py-3 border-b border-border space-y-3 max-h-[45%] overflow-y-auto">
+      <div className="px-4 py-3 border-b border-border space-y-3 max-h-[48%] overflow-y-auto">
         <div>
           <SectionLabel>Tool policy</SectionLabel>
           <select
@@ -294,7 +344,7 @@ function AgentInspector({
           <SectionLabel>Tools ({inboundTool.length})</SectionLabel>
           {inboundTool.length === 0 ? (
             <div className="text-[11px] text-muted border border-dashed border-white/15 rounded-md px-2.5 py-2 leading-relaxed">
-              Drag a tool from the palette onto the canvas, then link its ◗ port to this agent.
+              Drop a tool card from the palette straight onto this agent's card to equip it.
             </div>
           ) : (
             <div className="space-y-1.5">
@@ -306,10 +356,34 @@ function AgentInspector({
                   <span className="text-accent text-[10px]">⌗</span>
                   <span className="flex-1 truncate">{nodeName(nodes, e.source_node_id)}</span>
                   <button
-                    onClick={() => onDeleteEdge(e)}
+                    onClick={() => onUnequipTool(e)}
                     className="text-white/30 hover:text-white/70"
                     title="Unequip"
                   >
+                    ×
+                  </button>
+                </div>
+              ))}
+            </div>
+          )}
+        </div>
+
+        <div>
+          <SectionLabel>Environments ({inboundEnv.length})</SectionLabel>
+          {inboundEnv.length === 0 ? (
+            <div className="text-[11px] text-muted">
+              No sandbox linked — this agent uses the project's shared scratch environment only.
+            </div>
+          ) : (
+            <div className="space-y-1.5">
+              {inboundEnv.map((e) => (
+                <div
+                  key={e.id}
+                  className="flex items-center gap-2 text-[11px] bg-green/5 border border-green/20 rounded-md px-2 py-1.5"
+                >
+                  <span className="text-green text-[10px]">▣</span>
+                  <span className="flex-1 truncate">{nodeName(nodes, e.source_node_id)}</span>
+                  <button onClick={() => onDeleteEdge(e)} className="text-white/30 hover:text-white/70" title="Unlink">
                     ×
                   </button>
                 </div>
@@ -424,7 +498,7 @@ function AgentInspector({
             onChange={(e) => onChatChange((prev) => ({ ...prev, useStream: e.target.checked }))}
             className="accent-accent"
           />
-          Stream response (chat/stream)
+          Stream response (chat/stream) — shows tool checkpoints live
         </label>
         <div className="flex items-center gap-2">
           <input
@@ -517,6 +591,13 @@ function ToolInspector({
       </div>
 
       <div className="flex-1 overflow-y-auto px-4 py-3 space-y-4">
+        {attachedTo.length > 0 && (
+          <div className="text-[11px] text-accent bg-accent/5 border border-accent/20 rounded-md px-2.5 py-1.5">
+            Equipped on {attachedTo.map((e) => nodeName(nodes, e.target_node_id)).join(", ")} — shown as a
+            chip on that card.
+          </div>
+        )}
+
         <div>
           <SectionLabel>Status</SectionLabel>
           <div className="flex items-center gap-2">
@@ -576,7 +657,7 @@ function ToolInspector({
           <SectionLabel>Attached to ({attachedTo.length})</SectionLabel>
           {attachedTo.length === 0 ? (
             <div className="text-[11px] text-muted">
-              Drag this tool&apos;s ◗ port onto an agent card to make it callable there.
+              Drop this tool onto an agent card, or drag its ◗ port onto one, to make it callable there.
             </div>
           ) : (
             <div className="space-y-1.5">
@@ -630,5 +711,393 @@ function ToolInspector({
         </div>
       </div>
     </>
+  );
+}
+
+// -------------------- Environment inspector --------------------
+
+function EnvironmentInspector({
+  projectId,
+  node,
+  nodes,
+  edges,
+  onDeleteEdge,
+  onNodeUpdated,
+}: {
+  projectId: string;
+  node: Extract<ProjectNode, { kind: "environment" }>;
+  nodes: ProjectNode[];
+  edges: Edge[];
+  onDeleteEdge: (edge: Edge) => void;
+  onNodeUpdated: (node: ProjectNode) => void;
+}) {
+  const attachedTo = edges.filter((e) => e.kind === "environment" && e.source_node_id === node.id);
+  const [busy, setBusy] = useState<"start" | "stop" | "verify" | null>(null);
+  const [name, setName] = useState(node.name);
+  const [savingName, setSavingName] = useState(false);
+  const [path, setPath] = useState("");
+  const [entries, setEntries] = useState<EnvironmentFileEntry[] | null>(null);
+  const [filesError, setFilesError] = useState<string | null>(null);
+  const [fileView, setFileView] = useState<{ path: string; content: string; truncated: boolean } | null>(null);
+  const [port, setPort] = useState("3000");
+  const [previewUrl, setPreviewUrl] = useState<string | null>(null);
+  const [previewError, setPreviewError] = useState<string | null>(null);
+
+  const ready = node.status === "ready";
+
+  useEffect(() => {
+    if (!ready) {
+      setEntries(null);
+      return;
+    }
+    let cancelled = false;
+    setFilesError(null);
+    listEnvironmentFiles(projectId, node.id, path || undefined)
+      .then((r) => !cancelled && setEntries(r.entries))
+      .catch((e: ApiError) => !cancelled && setFilesError(e.message));
+    return () => {
+      cancelled = true;
+    };
+  }, [projectId, node.id, path, ready]);
+
+  async function run(action: "start" | "stop" | "verify") {
+    setBusy(action);
+    try {
+      const fn = action === "start" ? startEnvironment : action === "stop" ? stopEnvironment : verifyEnvironment;
+      const updated = await fn(projectId, node.id);
+      onNodeUpdated(updated);
+    } catch (e) {
+      // start/verify never raise per API.md; stop can 409 if provisioning —
+      // either way there's nothing actionable to show beyond the status pill
+    } finally {
+      setBusy(null);
+    }
+  }
+
+  async function openFile(entry: EnvironmentFileEntry) {
+    if (entry.type === "dir") {
+      setPath(entry.path);
+      return;
+    }
+    try {
+      const f = await readEnvironmentFile(projectId, node.id, entry.path);
+      setFileView(f);
+    } catch (e) {
+      setFilesError(e instanceof ApiError ? e.message : "Could not read file");
+    }
+  }
+
+  async function openPreview() {
+    setPreviewError(null);
+    setPreviewUrl(null);
+    const p = parseInt(port, 10);
+    if (!p || p < 1 || p > 65535) {
+      setPreviewError("Enter a port between 1 and 65535.");
+      return;
+    }
+    try {
+      const r = await getEnvironmentPreview(projectId, node.id, p);
+      setPreviewUrl(r.url);
+    } catch (e) {
+      setPreviewError(e instanceof ApiError ? e.message : "Could not get a preview URL");
+    }
+  }
+
+  return (
+    <>
+      <div className="px-4 py-3 border-b border-border">
+        <div className="text-sm font-medium">{node.name}</div>
+        <div className="text-[10px] text-muted">
+          {node.runtime} sandbox · {node.role === "scratch" ? "shared scratch space" : "user-provisioned"}
+        </div>
+      </div>
+
+      <div className="flex-1 overflow-y-auto px-4 py-3 space-y-4">
+        <div>
+          <SectionLabel>Status</SectionLabel>
+          <div className="flex items-center gap-2">
+            <span
+              className={`w-2 h-2 rounded-full ${
+                node.status === "ready"
+                  ? "bg-green"
+                  : node.status === "error"
+                  ? "bg-red-400"
+                  : node.status === "provisioning"
+                  ? "bg-amber animate-pulse"
+                  : "bg-white/30"
+              }`}
+            />
+            <span className="text-xs uppercase tracking-wide">{node.status}</span>
+            {node.sandbox_id && <span className="text-[10px] text-muted ml-1">{node.sandbox_id.slice(0, 10)}</span>}
+          </div>
+          {node.status_detail && (
+            <div className="mt-1.5 text-[11px] text-muted leading-relaxed">{node.status_detail}</div>
+          )}
+          <div className="mt-2 flex gap-1.5">
+            <button
+              onClick={() => run("start")}
+              disabled={busy !== null}
+              className="flex-1 text-[10px] px-2 py-1.5 border border-green/40 text-green bg-green/5 rounded-md disabled:opacity-50"
+            >
+              {busy === "start" ? "Starting…" : node.status === "stopped" ? "Restart" : "Start"}
+            </button>
+            <button
+              onClick={() => run("stop")}
+              disabled={busy !== null || node.status === "stopped"}
+              className="flex-1 text-[10px] px-2 py-1.5 border border-border text-muted hover:text-text rounded-md disabled:opacity-50"
+            >
+              {busy === "stop" ? "Stopping…" : "Stop"}
+            </button>
+            <button
+              onClick={() => run("verify")}
+              disabled={busy !== null}
+              className="flex-1 text-[10px] px-2 py-1.5 border border-border text-muted hover:text-text rounded-md disabled:opacity-50"
+            >
+              {busy === "verify" ? "Checking…" : "Verify"}
+            </button>
+          </div>
+          {node.status === "stopped" && (
+            <div className="mt-1.5 text-[10px] text-muted leading-relaxed">
+              Stopping destroyed its filesystem — starting again begins empty.
+            </div>
+          )}
+        </div>
+
+        <div>
+          <SectionLabel>Identity</SectionLabel>
+          <div className="flex gap-1.5">
+            <input
+              value={name}
+              onChange={(e) => setName(e.target.value)}
+              className="flex-1 bg-panel2 border border-border rounded-md px-2 py-1.5 text-xs outline-none focus:border-accent/50"
+            />
+            <button
+              onClick={async () => {
+                if (!name.trim() || name === node.name) return;
+                setSavingName(true);
+                try {
+                  const updated = await updateEnvironment(projectId, node.id, { name: name.trim() });
+                  onNodeUpdated(updated);
+                } catch {
+                  // best-effort rename
+                } finally {
+                  setSavingName(false);
+                }
+              }}
+              disabled={savingName || !name.trim() || name === node.name}
+              className="text-[10px] px-2.5 border border-border rounded-md text-muted hover:text-text disabled:opacity-40"
+            >
+              {savingName ? "…" : "Rename"}
+            </button>
+          </div>
+          <select
+            value={node.tool_policy}
+            onChange={async (e) => {
+              const updated = await updateEnvironment(projectId, node.id, {
+                tool_policy: e.target.value as ToolPolicy,
+              }).catch(() => null);
+              if (updated) onNodeUpdated(updated);
+            }}
+            className="mt-1.5 w-full bg-panel2 border border-border rounded-md px-2 py-1.5 text-xs outline-none focus:border-accent/50"
+          >
+            <option value="ask">Ask before executing in this shell</option>
+            <option value="auto">Run commands automatically</option>
+          </select>
+        </div>
+
+        <div>
+          <SectionLabel>Callable by ({attachedTo.length})</SectionLabel>
+          {attachedTo.length === 0 ? (
+            <div className="text-[11px] text-muted">
+              Drag this environment's ◗ port onto an agent card to give it a shell to execute in.
+            </div>
+          ) : (
+            <div className="space-y-1.5">
+              {attachedTo.map((e) => (
+                <div key={e.id} className="flex items-center gap-2 text-[11px]">
+                  <span className="flex-1 truncate">{nodeName(nodes, e.target_node_id)}</span>
+                  <button onClick={() => onDeleteEdge(e)} className="text-white/30 hover:text-white/70">
+                    ×
+                  </button>
+                </div>
+              ))}
+            </div>
+          )}
+        </div>
+
+        <div>
+          <SectionLabel>Preview a port</SectionLabel>
+          <div className="flex gap-1.5">
+            <input
+              value={port}
+              onChange={(e) => setPort(e.target.value)}
+              placeholder="3000"
+              className="w-20 bg-panel2 border border-border rounded-md px-2 py-1.5 text-xs outline-none focus:border-accent/50"
+            />
+            <button
+              onClick={openPreview}
+              disabled={!ready}
+              className="flex-1 text-[10px] border border-accent/40 text-accent bg-accent/5 rounded-md disabled:opacity-40"
+              title={ready ? undefined : "Environment must be ready first"}
+            >
+              Get preview URL
+            </button>
+          </div>
+          {previewError && <div className="mt-1.5 text-[10px] text-red-400">{previewError}</div>}
+          {previewUrl && (
+            <a
+              href={previewUrl}
+              target="_blank"
+              rel="noopener noreferrer"
+              className="mt-1.5 block text-[10px] text-accent underline break-all"
+            >
+              {previewUrl}
+            </a>
+          )}
+        </div>
+
+        <div>
+          <SectionLabel>Files</SectionLabel>
+          {!ready ? (
+            <div className="text-[11px] text-muted">Start the environment to browse its filesystem.</div>
+          ) : (
+            <>
+              <div className="flex items-center gap-1.5 text-[10px] text-muted mb-1.5">
+                <button onClick={() => setPath("")} className="hover:text-text">
+                  workspace
+                </button>
+                {path && <span className="truncate">/ {path}</span>}
+              </div>
+              {filesError && <div className="text-[11px] text-red-400">{filesError}</div>}
+              {entries === null && !filesError && <div className="text-[11px] text-muted">Loading…</div>}
+              {entries && (
+                <div className="space-y-1 max-h-40 overflow-y-auto">
+                  {entries.map((entry) => (
+                    <button
+                      key={entry.path}
+                      onClick={() => openFile(entry)}
+                      className="w-full flex items-center gap-2 text-[11px] text-left hover:text-accent"
+                    >
+                      <span className="text-muted">{entry.type === "dir" ? "▸" : "▪"}</span>
+                      <span className="truncate flex-1">{entry.name}</span>
+                    </button>
+                  ))}
+                  {entries.length === 0 && <div className="text-[11px] text-muted">Empty directory.</div>}
+                </div>
+              )}
+              {fileView && (
+                <div className="mt-2 border border-border rounded-md p-2">
+                  <div className="flex items-center gap-2 text-[10px] text-muted mb-1">
+                    <span className="truncate flex-1">{fileView.path}</span>
+                    {fileView.truncated && <span className="text-amber">truncated</span>}
+                    <button onClick={() => setFileView(null)} className="hover:text-text">
+                      ×
+                    </button>
+                  </div>
+                  <pre className="text-[10px] leading-relaxed whitespace-pre-wrap break-all max-h-32 overflow-y-auto">
+                    {fileView.content}
+                  </pre>
+                </div>
+              )}
+            </>
+          )}
+        </div>
+
+        <TerminalPanel projectId={projectId} nodeId={node.id} ready={ready} />
+      </div>
+    </>
+  );
+}
+
+// A minimal streamed shell — plain text, no ANSI rendering, opened on
+// request so an idle Inspector doesn't hold a socket open per environment.
+function TerminalPanel({ projectId, nodeId, ready }: { projectId: string; nodeId: string; ready: boolean }) {
+  const [connected, setConnected] = useState(false);
+  const [lines, setLines] = useState<string>("");
+  const [cmd, setCmd] = useState("");
+  const wsRef = useRef<WebSocket | null>(null);
+  const outRef = useRef<HTMLPreElement | null>(null);
+
+  useEffect(() => {
+    return () => {
+      wsRef.current?.close();
+    };
+  }, []);
+
+  useEffect(() => {
+    outRef.current?.scrollTo({ top: outRef.current.scrollHeight });
+  }, [lines]);
+
+  function connect() {
+    let ws: WebSocket;
+    try {
+      ws = new WebSocket(environmentTerminalUrl(projectId, nodeId, 100, 30));
+    } catch (e) {
+      setLines((l) => l + `\n[terminal] ${e instanceof Error ? e.message : "could not connect"}`);
+      return;
+    }
+    ws.binaryType = "arraybuffer";
+    wsRef.current = ws;
+    ws.onopen = () => setConnected(true);
+    ws.onmessage = (ev) => {
+      if (typeof ev.data === "string") {
+        try {
+          const parsed = JSON.parse(ev.data);
+          if (parsed.type === "exit") {
+            setLines((l) => l + `\n[exit ${parsed.code}]`);
+            setConnected(false);
+          }
+        } catch {
+          setLines((l) => l + ev.data);
+        }
+      } else {
+        setLines((l) => l + new TextDecoder().decode(ev.data));
+      }
+    };
+    ws.onclose = () => setConnected(false);
+    ws.onerror = () => setLines((l) => l + "\n[terminal] connection error");
+  }
+
+  function send() {
+    if (!wsRef.current || wsRef.current.readyState !== WebSocket.OPEN) return;
+    wsRef.current.send(JSON.stringify({ type: "input", data: cmd + "\n" }));
+    setCmd("");
+  }
+
+  return (
+    <div>
+      <SectionLabel>Terminal</SectionLabel>
+      {!connected ? (
+        <button
+          onClick={connect}
+          disabled={!ready}
+          className="w-full text-[10px] px-2 py-1.5 border border-accent/40 text-accent bg-accent/5 rounded-md disabled:opacity-40"
+          title={ready ? undefined : "Environment must be ready first"}
+        >
+          Connect terminal
+        </button>
+      ) : (
+        <div className="border border-border rounded-md overflow-hidden">
+          <pre
+            ref={outRef}
+            className="bg-black/60 text-[10.5px] leading-relaxed p-2 h-32 overflow-y-auto whitespace-pre-wrap break-all"
+          >
+            {lines || " "}
+          </pre>
+          <div className="flex border-t border-border">
+            <input
+              value={cmd}
+              onChange={(e) => setCmd(e.target.value)}
+              onKeyDown={(e) => e.key === "Enter" && send()}
+              placeholder="type a command…"
+              className="flex-1 bg-panel2 px-2 py-1.5 text-[10.5px] outline-none font-mono"
+            />
+            <button onClick={send} className="px-2 text-[10px] text-accent">
+              ↵
+            </button>
+          </div>
+        </div>
+      )}
+    </div>
   );
 }
