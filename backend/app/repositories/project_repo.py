@@ -36,6 +36,7 @@ class AgentType:
     id: str
     slug: str
     name: str
+    description: str | None
     system_prompt: str
     model: str
     # Preset slugs wired on creation. Unknown slugs are skipped by the router.
@@ -174,7 +175,7 @@ class ProjectRepository:
     def list_agent_types(self) -> list[AgentType]:
         rows = (
             self._db.table("agent_types")
-            .select("id, slug, name, system_prompt, model, default_presets")
+            .select("id, slug, name, description, system_prompt, model, default_presets")
             .eq("is_active", True)
             .order("sort_order")
             .execute()
@@ -184,6 +185,7 @@ class ProjectRepository:
                 id=r["id"],
                 slug=r["slug"],
                 name=r["name"],
+                description=r.get("description"),
                 system_prompt=r["system_prompt"],
                 model=r["model"],
                 default_presets=r.get("default_presets") or [],
@@ -194,7 +196,7 @@ class ProjectRepository:
     def get_agent_type(self, slug: str) -> AgentType | None:
         rows = (
             self._db.table("agent_types")
-            .select("id, slug, name, system_prompt, model, default_presets")
+            .select("id, slug, name, description, system_prompt, model, default_presets")
             .eq("slug", slug)
             .eq("is_active", True)
             .limit(1)
@@ -207,6 +209,7 @@ class ProjectRepository:
             id=r["id"],
             slug=r["slug"],
             name=r["name"],
+            description=r.get("description"),
             system_prompt=r["system_prompt"],
             model=r["model"],
             default_presets=r.get("default_presets") or [],
@@ -275,6 +278,7 @@ class ProjectRepository:
         *,
         position_x: float = 0,
         position_y: float = 0,
+        tool_policy: str = "ask",
     ) -> str:
         """Provision an agent box and give it a conversation.
 
@@ -295,6 +299,7 @@ class ProjectRepository:
                     "position_x": position_x,
                     "position_y": position_y,
                     "status": "ready",
+                    "tool_policy": tool_policy,
                 }
             )
             .execute()
@@ -380,24 +385,22 @@ class ProjectRepository:
         source_node_id: str,
         target_node_id: str,
         kind: str = "context",
+        summary_max_words: int | None = None,
     ) -> Edge:
         """
         Connect two nodes on the canvas.
         Returns the edge object.
         """
         try:
-            rows = (
-                self._db.table("edges")
-                .insert(
-                    {
-                        "owner_id": self._user_id,
-                        "source_node_id": source_node_id,
-                        "target_node_id": target_node_id,
-                        "kind": kind,
-                    }
-                )
-                .execute()
-            ).data
+            payload = {
+                "owner_id": self._user_id,
+                "source_node_id": source_node_id,
+                "target_node_id": target_node_id,
+                "kind": kind,
+            }
+            if summary_max_words is not None:
+                payload["summary_max_words"] = summary_max_words
+            rows = self._db.table("edges").insert(payload).execute().data
         except APIError as exc:
             if exc.code == _UNIQUE_VIOLATION:
                 raise DuplicateEdge(f"{source_node_id} -> {target_node_id} ({kind})") from exc
@@ -413,6 +416,21 @@ class ProjectRepository:
                 " summarised_through_seq, summary_updated_at, summary_max_words"
             )
             .eq("project_id", project_id)
+            .eq("owner_id", self._user_id)
+            .execute()
+        ).data
+        return [_to_edge(r) for r in rows]
+
+    def list_outbound_context_edges(self, node_id: str) -> list[Edge]:
+        """Context edges leaving one node: what a fresh reply should re-summarise."""
+        rows = (
+            self._db.table("edges")
+            .select(
+                "id, source_node_id, target_node_id, kind, summary,"
+                " summarised_through_seq, summary_updated_at, summary_max_words"
+            )
+            .eq("source_node_id", node_id)
+            .eq("kind", "context")
             .eq("owner_id", self._user_id)
             .execute()
         ).data
@@ -580,6 +598,22 @@ class ProjectRepository:
             .execute()
         ).data
         return [_to_message(r) for r in reversed(rows)]
+
+    def list_messages_after(
+        self, conversation_id: str, after_seq: int = 0, limit: int = 500
+    ) -> list[Message]:
+        """Messages past a seq, oldest first. For polling a transcript."""
+        rows = (
+            self._db.table("messages")
+            .select("id, role, content, seq, status, created_at")
+            .eq("conversation_id", conversation_id)
+            .eq("owner_id", self._user_id)
+            .gt("seq", after_seq)
+            .order("seq")
+            .limit(limit)
+            .execute()
+        ).data
+        return [_to_message(r) for r in rows]
 
     def add_message(
         self,
