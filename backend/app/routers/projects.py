@@ -22,7 +22,7 @@ from app.repositories.project_repo import (
 )
 from app.repositories.tool_repo import ToolNode, ToolPreset, ToolType, load_node_secrets
 from app.routers.chat import ChatMessage
-from app.routers.deps import EnvRepo, ProjectRepo, ToolRepo
+from app.routers.deps import EnvRepo, ProjectRepo, ToolRepo, TurnRepos
 from app.routers.environments import EnvironmentNodeResponse, create_environment_node
 from app.services.models import ModelsUnavailable, list_models
 from app.tools.base import ToolContext
@@ -454,13 +454,19 @@ async def list_nodes(project_id: UUID, repo: ProjectRepo) -> list[NodeResponse]:
 async def list_node_messages(
     project_id: UUID,
     node_id: UUID,
-    repo: ProjectRepo,
+    turn_repos: TurnRepos,
     after_seq: int = Query(default=0, ge=0),
 ) -> list[ChatMessage]:
-    """An agent node's transcript, oldest first. ``after_seq`` for polling."""
-    project = await to_thread.run_sync(repo.get_project, str(project_id))
-    if project is None:
-        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Project not found")
+    """An agent node's transcript, oldest first. ``after_seq`` for polling.
+
+    Reads on the pooled service client (TurnRepos), not a fresh per-request
+    user client: get_user_client deliberately builds a brand new httpx.Client
+    (and pays a cold TLS handshake) on every call.
+
+    No separate project lookup: get_agent_node is owner-filtered and
+    its project_id is checked below.
+    """
+    repo = turn_repos.project
     node = await to_thread.run_sync(repo.get_agent_node, str(node_id))
     if node is None or node.project_id != str(project_id):
         raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Agent not found")
