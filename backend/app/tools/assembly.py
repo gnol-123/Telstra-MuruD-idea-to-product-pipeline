@@ -20,7 +20,7 @@ from pydantic_ai.toolsets.abstract import ToolsetTool
 from app.repositories.tool_repo import ToolNode, load_node_secrets
 from app.tools.base import ToolContext
 from app.tools.oauth_refresh import with_access_token
-from app.tools.registry import get_spec
+from app.tools.registry import get_spec, platform_secrets
 
 _PREFIX_SAFE = re.compile(r"[^a-z0-9_]+")
 
@@ -139,6 +139,8 @@ async def assemble(repo, tool_nodes: list[ToolNode], *, ask: bool) -> AssembledT
                 if keys
                 else {}
             )
+            # Platform keys fill gaps; a user's own key wins.
+            secrets = {**platform_secrets(node.tool_slug), **secrets}
             # oauth2 nodes need a live access token before build, which is sync.
             secrets = await with_access_token(node.tool_slug, node.id, secrets)
             built = spec.build(

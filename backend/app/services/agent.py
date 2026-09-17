@@ -12,14 +12,29 @@ from hashlib import sha256
 from pydantic_ai import Agent, DeferredToolRequests
 from pydantic_ai.durable_exec.dbos import DBOSDurability
 from pydantic_ai.messages import ModelMessage, ModelRequest, ModelResponse, TextPart, UserPromptPart
+from pydantic_ai.models import Model
 from pydantic_ai.models.google import GoogleModel
+from pydantic_ai.models.ollama import OllamaModel
 from pydantic_ai.providers.google import GoogleProvider
+from pydantic_ai.providers.ollama import OllamaProvider
 
 from app.config import settings
 from app.repositories.project_repo import Message
 
 
-@lru_cache(maxsize=32)
+def _model(name: str) -> Model:
+    """Build a model for one name, for user defined model name defaulted to: deepseek v4.1 flash"""
+    if settings.llm_provider == "ollama":
+        return OllamaModel(
+            name,
+            provider=OllamaProvider(
+                base_url=settings.ollama_base_url, api_key=settings.ollama_api_key
+            ),
+        )
+    return GoogleModel(name, provider=GoogleProvider(api_key=settings.gemini_api_key))
+
+
+@lru_cache(maxsize=256)
 def get_agent_for(system_prompt: str, model: str) -> Agent[None, str | DeferredToolRequests]:
     """Return an agent for one catalog entry.
 
@@ -37,7 +52,7 @@ def get_agent_for(system_prompt: str, model: str) -> Agent[None, str | DeferredT
     must be stable across restarts or a recovering workflow cannot find them.
     """
     return Agent(
-        GoogleModel(model, provider=GoogleProvider(api_key=settings.gemini_api_key)),
+        _model(model),
         system_prompt=system_prompt,
         output_type=[str, DeferredToolRequests],
         name=_agent_name(system_prompt, model),
@@ -87,15 +102,10 @@ _SUMMARY_PROMPT = (
 )
 
 
-# One cached agent per distinct word limit: the limit lives in the system
-# prompt, so it belongs in the cache key. Bounded, since the column only
-# permits 20-2000 and callers cluster on a few values.
 @lru_cache(maxsize=8)
 def _summary_agent(max_words: int) -> Agent[None, str]:
     return Agent(
-        GoogleModel(
-            settings.gemini_model, provider=GoogleProvider(api_key=settings.gemini_api_key)
-        ),
+        _model(settings.summary_model),
         system_prompt=_SUMMARY_PROMPT.format(max_words=max_words),
     )
 

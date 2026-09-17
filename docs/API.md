@@ -104,7 +104,7 @@ conversation.
 | `DELETE` | `/projects/{project_id}` | **yes** | Delete a project and its canvas |
 | `POST` | `/projects/{project_id}/nodes` | **yes** | Provision an agent node |
 | `GET` | `/projects/{project_id}/nodes` | **yes** | List a project's agent nodes |
-| `PATCH` | `/projects/{project_id}/nodes/{node_id}` | **yes** | Move, rename, or set tool policy |
+| `PATCH` | `/projects/{project_id}/nodes/{node_id}` | **yes** | Move, rename, set tool policy or model. **Agent nodes only** |
 | `DELETE` | `/projects/{project_id}/nodes/{node_id}` | **yes** | Remove a node |
 | `POST` | `/projects/{project_id}/edges` | **yes** | Draw an arrow between two nodes |
 | `GET` | `/projects/{project_id}/edges` | **yes** | List a project's arrows |
@@ -114,10 +114,14 @@ conversation.
 ### `GET /agent-types`
 → `200`
 ```json
-[ { "id": "uuid", "slug": "market_research", "name": "Market Research" } ]
+[ { "id": "uuid", "slug": "market_research", "name": "Market Research",
+    "default_presets": ["brave_search", "research_method"] } ]
 ```
-Seeded: `market_research`, `project_scoping`, `coding`. Adding one is a SQL
+Seeded: `market_research`, `project_scoping`, `coding`, `ux_ui`. Adding one is a SQL
 insert, not a deploy. See `backend/migrations/README.md`.
+
+`default_presets` is a list of preset slugs this agent type comes pre-equipped
+with.
 
 ### `POST /projects`
 ```json
@@ -165,6 +169,17 @@ The node's conversation is created at the same time, so it can be chatted with
 immediately. **Several nodes may share one `agent_slug`**: that is how a
 project holds a team rather than one agent of each kind.
 
+**`kind='agent'` now provisions the agent type's `default_presets`**: one tool
+node per preset, each with a `tool` edge into the new agent, placed to its
+left. The response is still the agent's own node. Reload the canvas after
+creating an agent; one call now creates several nodes and edges. Unknown or
+failing presets are skipped and logged. The call is not idempotent: a retried or
+double-sent request creates a second agent and a second set of default tools,
+so clients must debounce.
+
+**`kind='tool'` accepts `preset_slug`** as an alternative to `tool_slug`. The
+preset's `config` is the base and the request's `config` overrides it.
+
 `404` if the project is not yours or the slug is unknown. A missing project
 returns `404` rather than `403`, since `403` would confirm it exists.
 
@@ -196,10 +211,28 @@ Every field optional; only what you send changes.
 { "position_x": 340, "position_y": 180 }   // dropped after a drag
 { "name": "Market Research (EU)" }          // rename
 { "tool_policy": "auto" }                   // ask | auto
+{ "model": "deepseek-v4-pro:0813" }         // per-node model override
+{ "model": "" }                             // clear it: inherit the type's model
 ```
 
-→ `200` with the updated node. An empty body is a no-op, not an error, so a
-drag that ends where it started is harmless.
+→ `200` with the updated node, including `model`: the node's own override if it
+has one, otherwise its agent type's. An empty body is a no-op, not an error, so
+a drag that ends where it started is harmless.
+
+`model` is validated against `GET /models` before anything is written, so a
+typo is a `422` naming the valid options rather than a turn that fails later.
+
+**This route updates agent nodes only.** Each kind has its own:
+
+| Node kind | Where to patch it |
+|---|---|
+| `agent` | here |
+| `environment` | `PATCH /projects/{project_id}/environments/{node_id}` |
+| `tool` | no patch route; re-check with `POST /projects/{project_id}/nodes/{node_id}/verify`, or delete and recreate to change config |
+
+Sending the wrong kind here returns `404` whose `detail` names the route that
+owns that node, so the mistake is self-correcting. A node that does not exist
+returns `404 "Node not found"`.
 
 **The conversation is untouched.** Moving a box does not affect its transcript.
 Send this on drop rather than during the drag: one request per gesture.
@@ -382,6 +415,7 @@ to make it callable there.
 | Method | Path | Auth | Description |
 |---|---|---|---|
 | `GET` | `/tool-types` | **yes** | The catalog of tool templates |
+| `GET` | `/tool-presets` | **yes** | The library of ready-to-instantiate tools |
 | `POST` | `/projects/{project_id}/nodes` | **yes** | Provision a tool node (`kind: "tool"`) |
 | `POST` | `/projects/{project_id}/nodes/{node_id}/verify` | **yes** | Re-run the connectivity check |
 | `GET` | `/projects/{project_id}/nodes/{node_id}/tool-calls` | **yes** | Audit log for one tool node |
@@ -415,6 +449,17 @@ whether it's required. `secret_fields` marks which of those keys are secrets.
 **`auth_kind` decides how the client collects credentials.** `token` renders the
 fields above. `oauth2` renders a Connect button instead: the user types nothing,
 and `config_schema.fields` is empty. Currently only `gmail` is `oauth2`.
+
+### `GET /tool-presets`
+→ `200`
+```json
+[{"id": "uuid", "slug": "research_method", "name": "Research Method",
+  "description": "How to research", "tool_slug": "skill",
+  "config": {"text": "Do research.", "description": "Load first."}}]
+```
+
+The library of ready-to-instantiate tools and skills. Each entry names the
+`tool_slug` it instantiates and the `config` copied onto a node created from it.
 
 ### `POST /projects/{project_id}/nodes/{node_id}/authorize`
 
@@ -516,6 +561,8 @@ The audit log for one tool node, newest first.
 | Slug | Needs from the user |
 |---|---|
 | `brave_search` | An API key |
+| `web_fetch` | Just a URL; no credentials |
+| `context7` | Optional API key; uses platform key by default |
 | `skill` | Just instruction text, no credentials |
 | `mcp_server` | A server URL, and an optional auth token |
 | `github` | Just a personal access token: the endpoint is a real, public default |

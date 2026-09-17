@@ -1,5 +1,6 @@
 """Projects and the agent nodes provisioned inside them."""
 
+import logging
 from datetime import datetime
 from typing import Any, Literal
 from uuid import UUID
@@ -18,15 +19,23 @@ from app.repositories.project_repo import (
     Node,
     Project,
 )
-from app.repositories.tool_repo import ToolNode, ToolType, load_node_secrets
+from app.repositories.tool_repo import ToolNode, ToolPreset, ToolType, load_node_secrets
 from app.routers.deps import EnvRepo, ProjectRepo, ToolRepo
 from app.routers.environments import EnvironmentNodeResponse, create_environment_node
 from app.services.agent import summarise_conversation
+from app.services.models import ModelsUnavailable, list_models
 from app.tools.base import ToolContext
 from app.tools.oauth_refresh import TokenExchangeError, with_access_token
-from app.tools.registry import get_spec
+from app.tools.registry import get_spec, platform_secrets
 
 router = APIRouter(tags=["projects"])
+
+log = logging.getLogger(__name__)
+
+# Where default tool boxes land relative to their agent. Overlap is the
+# frontend's problem.
+_DEFAULT_TOOL_DX = -260
+_DEFAULT_TOOL_DY = 90
 
 
 # -- PROJECTS ------------------------------------------------------------------
@@ -69,6 +78,24 @@ async def list_projects(repo: ProjectRepo) -> list[ProjectResponse]:
     return [ProjectResponse.of(p) for p in projects]
 
 
+async def _wrong_kind_detail(node_id: UUID, tool_repo: ToolRepo, env_repo: EnvRepo) -> str:
+    """Explain a PATCH miss: wrong route, or genuinely no such node."""
+    env = await to_thread.run_sync(env_repo.get_environment_node, str(node_id))
+    if env is not None:
+        return (
+            "That node is an environment, and this route updates agents. "
+            "Use PATCH /projects/{project_id}/environments/{node_id}."
+        )
+    tool = await to_thread.run_sync(tool_repo.get_tool_node, str(node_id))
+    if tool is not None:
+        return (
+            "That node is a tool, and this route updates agents. A tool node has no "
+            "patch route: re-check it with POST /projects/{project_id}/nodes/{node_id}/verify, "
+            "or delete it and create it again to change its config."
+        )
+    return "Node not found"
+
+
 @router.delete("/projects/{project_id}", status_code=status.HTTP_204_NO_CONTENT)
 async def delete_project(project_id: UUID, repo: ProjectRepo, env_repo: EnvRepo) -> None:
     """Delete a project, cascading to its nodes, edges, conversations and messages."""
@@ -90,10 +117,11 @@ class AgentTypeResponse(BaseModel):
     id: UUID
     slug: str
     name: str
+    default_presets: list[str] = []
 
     @classmethod
     def of(cls, a: AgentType) -> "AgentTypeResponse":
-        return cls(id=UUID(a.id), slug=a.slug, name=a.name)
+        return cls(id=UUID(a.id), slug=a.slug, name=a.name, default_presets=a.default_presets)
 
 
 class CreateNodeRequest(BaseModel):
@@ -103,6 +131,8 @@ class CreateNodeRequest(BaseModel):
     agent_slug: str | None = Field(default=None, min_length=1, max_length=50)
     # Required for kind='tool'.
     tool_slug: str | None = Field(default=None, min_length=1, max_length=50)
+    # kind='tool' alternative to tool_slug: instantiate a library preset.
+    preset_slug: str | None = Field(default=None, min_length=1, max_length=50)
     # kind='tool' only. Non-secret keys go to nodes.config, secret keys to the vault.
     config: dict[str, Any] = Field(default_factory=dict)
     # Defaults to the template's name if omitted.
@@ -118,6 +148,7 @@ class UpdateNodeRequest(BaseModel):
     position_x: float | None = None
     position_y: float | None = None
     tool_policy: Literal["ask", "auto"] | None = None
+    model: str | None = Field(default=None, max_length=200)
 
 
 class NodeResponse(BaseModel):
@@ -138,6 +169,8 @@ class NodeResponse(BaseModel):
     # user is the user provisioned environment for any task requiring an environment
     role: str | None = None
     runtime: str | None = None
+    # The model this node actually runs on: its own override, else its type's.
+    model: str | None = None
 
     @classmethod
     def of(cls, n: Node, agent_slug: str | None = None) -> "NodeResponse":
@@ -156,6 +189,7 @@ class NodeResponse(BaseModel):
             status_detail=n.status_detail,
             role=config.get("role"),
             runtime=config.get("runtime"),
+            model=n.model or None,
         )
 
 
@@ -182,6 +216,26 @@ class ToolTypeResponse(BaseModel):
         )
 
 
+class ToolPresetResponse(BaseModel):
+    id: UUID
+    slug: str
+    name: str
+    description: str | None = None
+    tool_slug: str
+    config: dict[str, Any]
+
+    @classmethod
+    def of(cls, p: ToolPreset) -> "ToolPresetResponse":
+        return cls(
+            id=UUID(p.id),
+            slug=p.slug,
+            name=p.name,
+            description=p.description,
+            tool_slug=p.tool_slug,
+            config=p.config,
+        )
+
+
 class ToolNodeResponse(BaseModel):
     id: UUID
     project_id: UUID
@@ -193,9 +247,12 @@ class ToolNodeResponse(BaseModel):
     status_detail: str | None = None
     # Names only. Values are never returned.
     secrets_set: list[str] = []
+    # Platform keys in effect that the user has not overridden.
+    platform_provided: list[str] = []
 
     @classmethod
     def of(cls, n: ToolNode, secrets_set: list[str]) -> "ToolNodeResponse":
+        provided = sorted(k for k in platform_secrets(n.tool_slug) if k not in secrets_set)
         return cls(
             id=UUID(n.id),
             project_id=UUID(n.project_id),
@@ -205,6 +262,7 @@ class ToolNodeResponse(BaseModel):
             status=n.status,
             status_detail=n.status_detail,
             secrets_set=secrets_set,
+            platform_provided=provided,
         )
 
 
@@ -270,6 +328,8 @@ async def create_node(
         # A retried create. The wiring is already there.
         pass
 
+    await _wire_default_presets(project_id, node_id, agent_type, req, repo, tool_repo)
+
     node = await to_thread.run_sync(repo.get_agent_node, node_id)
     if node is None:
         raise HTTPException(
@@ -296,13 +356,37 @@ async def update_node(
     node_id: UUID,
     req: UpdateNodeRequest,
     repo: ProjectRepo,
+    tool_repo: ToolRepo,
+    env_repo: EnvRepo,
 ) -> NodeResponse:
-    """Move, rename, or set the tool policy. An empty body is a no-op."""
-    node = await to_thread.run_sync(
-        lambda: repo.update_node(str(node_id), req.model_dump(exclude_none=True))
-    )
+    """Move, rename, set the tool policy, or set the model. Empty body is a no-op.
+
+    A model is checked against the provider's catalogue first, so a typo is a
+    422 here rather than a failed turn later. "" clears the override.
+    """
+    changes = req.model_dump(exclude_none=True)
+    if req.model:
+        try:
+            available = await list_models()
+        except ModelsUnavailable as exc:
+            raise HTTPException(
+                status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
+                detail="The model catalogue is unavailable, so a model cannot be validated.",
+            ) from exc
+        if req.model not in available:
+            raise HTTPException(
+                status_code=status.HTTP_422_UNPROCESSABLE_ENTITY,
+                detail=f"Unknown model '{req.model}'. Available: {', '.join(available)}",
+            )
+
+    node = await to_thread.run_sync(lambda: repo.update_node(str(node_id), changes))
     if node is None:
-        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Agent not found")
+        # This route only updates agents. A miss is usually the right node on
+        # the wrong URL, so say which route owns it rather than "not found".
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND,
+            detail=await _wrong_kind_detail(node_id, tool_repo, env_repo),
+        )
     return NodeResponse.of(node)
 
 
@@ -353,41 +437,36 @@ def _split_tool_config(
     return plain, secrets
 
 
-async def _create_tool_node(
+async def _provision_tool_node(
     project_id: UUID,
-    req: CreateNodeRequest,
+    tool_type: ToolType,
+    name: str,
+    config: dict[str, Any],
+    secrets: dict[str, str],
+    *,
+    position_x: float,
+    position_y: float,
     tool_repo: ToolRepo,
-) -> ToolNodeResponse:
-    """Provision a tool box: split config, seed the default url, verify."""
-    if not req.tool_slug:
-        raise HTTPException(
-            status_code=status.HTTP_422_UNPROCESSABLE_ENTITY,
-            detail="tool_slug is required for kind='tool'",
-        )
+) -> str:
+    """Create a tool row, store its secrets, verify it. Returns the node id.
 
-    tool_type = await to_thread.run_sync(tool_repo.get_tool_type, req.tool_slug)
-    if tool_type is None:
-        raise HTTPException(
-            status_code=status.HTTP_404_NOT_FOUND,
-            detail=f"Unknown tool '{req.tool_slug}'",
-        )
-
-    plain_config, secrets = _split_tool_config(tool_type, req.config)
-
-    # Copy the catalog default url when the request omits one, keeping the node
+    Shared by the request path and default wiring. ``config`` is already
+    split: plain fields only, with any preset config merged in.
+    """
+    # Copy the catalog default url when config omits one, keeping the node
     # self-contained against later catalog edits.
     default_url = tool_type.config_schema.get("default_url")
-    if default_url and not plain_config.get("url"):
-        plain_config["url"] = default_url
+    if default_url and not config.get("url"):
+        config = {**config, "url": default_url}
 
     node_id = await to_thread.run_sync(
         lambda: tool_repo.create_tool_node(
             str(project_id),
             tool_type.id,
-            req.name or tool_type.name,
-            plain_config,
-            position_x=req.position_x,
-            position_y=req.position_y,
+            name,
+            config,
+            position_x=position_x,
+            position_y=position_y,
         )
     )
 
@@ -395,6 +474,61 @@ async def _create_tool_node(
         await to_thread.run_sync(lambda k=key, v=value: tool_repo.set_secret(node_id, k, v))
 
     await _verify_tool_node(node_id, tool_repo)
+    return node_id
+
+
+async def _create_tool_node(
+    project_id: UUID,
+    req: CreateNodeRequest,
+    tool_repo: ToolRepo,
+) -> ToolNodeResponse:
+    """Provision a tool box from a type or a preset: split config, verify."""
+    if not req.tool_slug and not req.preset_slug:
+        raise HTTPException(
+            status_code=status.HTTP_422_UNPROCESSABLE_ENTITY,
+            detail="tool_slug or preset_slug is required for kind='tool'",
+        )
+    if req.tool_slug and req.preset_slug:
+        raise HTTPException(
+            status_code=status.HTTP_422_UNPROCESSABLE_ENTITY,
+            detail="Send tool_slug or preset_slug, not both",
+        )
+
+    preset = None
+    tool_slug = req.tool_slug
+    if req.preset_slug:
+        preset = await to_thread.run_sync(tool_repo.get_preset, req.preset_slug)
+        if preset is None:
+            raise HTTPException(
+                status_code=status.HTTP_404_NOT_FOUND,
+                detail=f"Unknown preset '{req.preset_slug}'",
+            )
+        tool_slug = preset.tool_slug
+
+    tool_type = await to_thread.run_sync(tool_repo.get_tool_type, tool_slug)
+    if tool_type is None:
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND,
+            detail=f"Unknown tool '{tool_slug}'",
+        )
+
+    plain_config, secrets = _split_tool_config(tool_type, req.config)
+    if preset is not None:
+        # Preset is the base, the request overrides. Preset config is trusted
+        # and merged after the split, so it is not checked against the form.
+        plain_config = {**preset.config, **plain_config}
+
+    name = req.name or (preset.name if preset else tool_type.name)
+    node_id = await _provision_tool_node(
+        project_id,
+        tool_type,
+        name,
+        plain_config,
+        secrets,
+        position_x=req.position_x,
+        position_y=req.position_y,
+        tool_repo=tool_repo,
+    )
 
     node = await to_thread.run_sync(tool_repo.get_tool_node, node_id)
     if node is None:
@@ -404,6 +538,54 @@ async def _create_tool_node(
         )
     secrets_set = await to_thread.run_sync(tool_repo.secret_keys, node_id)
     return ToolNodeResponse.of(node, secrets_set)
+
+
+async def _wire_default_presets(
+    project_id: UUID,
+    node_id: str,
+    agent_type: AgentType,
+    req: CreateNodeRequest,
+    repo: ProjectRepo,
+    tool_repo: ToolRepo,
+) -> None:
+    """Create and connect the presets an agent type lists.
+
+    Each preset is independent: an unknown slug or a failed create is logged
+    and skipped, never raised, so a typo in a seed cannot block creating an
+    agent. Not transactional, by the same reasoning as the scratch edge: a
+    half-wired agent is visible and deletable. Nothing here is idempotent: a
+    retried request creates a second agent and a second set of defaults.
+    """
+    created: list[str] = []
+    for slug in agent_type.default_presets:
+        preset = await to_thread.run_sync(tool_repo.get_preset, slug)
+        if preset is None:
+            log.warning("agent type %s lists unknown preset %s", agent_type.slug, slug)
+            continue
+        tool_type = await to_thread.run_sync(tool_repo.get_tool_type, preset.tool_slug)
+        if tool_type is None:
+            log.warning("preset %s names unknown tool type %s", slug, preset.tool_slug)
+            continue
+        try:
+            tool_id = await _provision_tool_node(
+                project_id,
+                tool_type,
+                preset.name,
+                dict(preset.config),
+                {},
+                position_x=req.position_x + _DEFAULT_TOOL_DX,
+                position_y=req.position_y + len(created) * _DEFAULT_TOOL_DY,
+                tool_repo=tool_repo,
+            )
+        except Exception:
+            log.exception("default preset %s failed for agent %s", slug, node_id)
+            continue
+        created.append(tool_id)
+        try:
+            await to_thread.run_sync(lambda t=tool_id: repo.create_edge(t, node_id, "tool"))
+        except Exception:
+            # The tool node exists with no edge. Named so it can be cleaned up.
+            log.exception("edge for preset %s failed; orphan tool node %s", slug, tool_id)
 
 
 async def _verify_tool_node(node_id: str, tool_repo: ToolRepo) -> None:
@@ -428,6 +610,7 @@ async def _verify_tool_node(node_id: str, tool_repo: ToolRepo) -> None:
         )
         return
 
+    secrets = {**platform_secrets(node.tool_slug), **secrets}
     try:
         secrets = await with_access_token(node.tool_slug, node.id, secrets)
     except TokenExchangeError:
@@ -456,6 +639,25 @@ async def list_tool_types(tool_repo: ToolRepo) -> list[ToolTypeResponse]:
     """The palette of tool templates a node can be provisioned from."""
     types = await to_thread.run_sync(tool_repo.list_tool_types)
     return [ToolTypeResponse.of(t) for t in types]
+
+
+@router.get("/models", response_model=list[str])
+async def list_available_models() -> list[str]:
+    """Model names the configured provider serves, for a per-node model picker."""
+    try:
+        return await list_models()
+    except ModelsUnavailable as exc:
+        raise HTTPException(
+            status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
+            detail="The model catalogue is unavailable.",
+        ) from exc
+
+
+@router.get("/tool-presets", response_model=list[ToolPresetResponse])
+async def list_tool_presets(tool_repo: ToolRepo) -> list[ToolPresetResponse]:
+    """The library of ready-to-instantiate tools and skills."""
+    presets = await to_thread.run_sync(tool_repo.list_presets)
+    return [ToolPresetResponse.of(p) for p in presets]
 
 
 @router.post(
