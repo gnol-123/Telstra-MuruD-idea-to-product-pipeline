@@ -26,14 +26,11 @@ log = logging.getLogger(__name__)
 CANVAS_SLUG = "canvas"
 TOOL_NAMES = ("list_canvas", "create_agent", "connect", "run_agent")
 
-# Stage agents sit in one row under the orchestrator. Default tool boxes hang
-# in a column to each agent's left (x-260, 90 apart, up to 12 of them), so a
-# column per agent and 520 between agents keeps them clear of each other.
+# Boundary box to keep margin between boxes
 _STAGE_DX = 520
 _STAGE_DY = 320
 _ROW_TOLERANCE = 150
-# Head of a stage reply returned to the orchestrator. The full text is on the
-# stage's own conversation; four full reports in the coordinator is waste.
+# Head of a stage reply returned to the orchestrator. 
 _RESULT_HEAD = 6000
 
 UNATTENDED_INSTRUCTION = (
