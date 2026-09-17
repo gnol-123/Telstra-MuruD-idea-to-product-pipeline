@@ -14,7 +14,11 @@ from unittest.mock import AsyncMock, MagicMock
 
 from app.main import app
 from app.routers.auth import UserResponse, get_current_user
-from app.routers.deps import get_chat_repository, get_tool_repository
+from app.routers.deps import (
+    get_environment_repository,
+    get_project_repository,
+    get_tool_repository,
+)
 
 # `client` fixture comes from conftest.py -- no need to redefine it here.
 
@@ -90,8 +94,8 @@ class TestAddToolNode:
     """POST /projects/{id}/nodes with kind='tool' provisions and verifies a tool node."""
 
     def test_create_tool_node_success(self, client, monkeypatch):
-        mock_chat_repo = MagicMock()
-        mock_chat_repo.get_project.return_value = MagicMock(id=FAKE_PROJECT_ID)
+        mock_project_repo = MagicMock()
+        mock_project_repo.get_project.return_value = MagicMock(id=FAKE_PROJECT_ID)
 
         mock_tool_repo = MagicMock()
         mock_tool_repo.get_tool_type.return_value = mock_with_name(
@@ -114,8 +118,14 @@ class TestAddToolNode:
         mock_tool_repo.secret_keys.return_value = ["api_key"]
 
         app.dependency_overrides[get_current_user] = fake_user
-        app.dependency_overrides[get_chat_repository] = lambda: mock_chat_repo
+        app.dependency_overrides[get_project_repository] = lambda: mock_project_repo
         app.dependency_overrides[get_tool_repository] = lambda: mock_tool_repo
+        # create_node's signature also declares env_repo: EnvRepo -- FastAPI
+        # resolves every declared dependency up front, even though the
+        # kind='tool' branch never touches it, so it needs overriding too or
+        # the real get_environment_repository -> CurrentAuth chain runs and
+        # rejects "fake-token" with a genuine 401.
+        app.dependency_overrides[get_environment_repository] = lambda: MagicMock()
         # _verify_tool_node is `async def` -- an AsyncMock is required so the
         # route's `await` gets a coroutine back instead of a bare None.
         monkeypatch.setattr(
@@ -143,14 +153,15 @@ class TestAddToolNode:
         assert "api_key" not in body.get("config", {})
 
     def test_create_tool_node_unknown_slug(self, client):
-        mock_chat_repo = MagicMock()
-        mock_chat_repo.get_project.return_value = MagicMock(id=FAKE_PROJECT_ID)
+        mock_project_repo = MagicMock()
+        mock_project_repo.get_project.return_value = MagicMock(id=FAKE_PROJECT_ID)
         mock_tool_repo = MagicMock()
         mock_tool_repo.get_tool_type.return_value = None
 
         app.dependency_overrides[get_current_user] = fake_user
-        app.dependency_overrides[get_chat_repository] = lambda: mock_chat_repo
+        app.dependency_overrides[get_project_repository] = lambda: mock_project_repo
         app.dependency_overrides[get_tool_repository] = lambda: mock_tool_repo
+        app.dependency_overrides[get_environment_repository] = lambda: MagicMock()
         try:
             response = client.post(
                 f"/projects/{FAKE_PROJECT_ID}/nodes",
