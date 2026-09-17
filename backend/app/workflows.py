@@ -15,7 +15,7 @@ from dbos import DBOS
 from pydantic_ai import DeferredToolRequests, DeferredToolResults
 from pydantic_ai.messages import ModelMessage
 
-from app.repositories.chat_repo import ChatRepository, InboundContext, Message
+from app.repositories.project_repo import InboundContext, Message, ProjectRepository
 from app.services.agent import get_agent_for, to_model_messages
 
 
@@ -89,14 +89,7 @@ async def call_agent(
         instructions=instructions,
         toolsets=toolsets or None,
     )
-    if isinstance(result.output, DeferredToolRequests):
-        return AgentTurn(
-            output="",
-            model=model,
-            pending=result.output,
-            all_messages=result.all_messages(),
-        )
-    return _turn_from(result.output, model, result.usage)
+    return _turn_from_result(result, model)
 
 
 async def resume_agent(
@@ -118,14 +111,7 @@ async def resume_agent(
         deferred_tool_results=deferred_tool_results,
         toolsets=toolsets or None,
     )
-    if isinstance(result.output, DeferredToolRequests):
-        return AgentTurn(
-            output="",
-            model=model,
-            pending=result.output,
-            all_messages=result.all_messages(),
-        )
-    return _turn_from(result.output, model, result.usage)
+    return _turn_from_result(result, model)
 
 
 def _turn_from(output: str, model: str, usage: object) -> AgentTurn:
@@ -138,7 +124,7 @@ def _turn_from(output: str, model: str, usage: object) -> AgentTurn:
     )
 
 
-@DBOS.step(retries_allowed=True, max_attempts=5)
+@DBOS.workflow(name="chat.run_agent")
 async def run_agent_step(
     system_prompt: str,
     model: str,
@@ -148,15 +134,20 @@ async def run_agent_step(
 ) -> AgentTurn:
     """Checkpointed LLM call, so a crash mid-call does not pay for it twice.
 
-    No ``toolsets`` parameter by design. A toolset holds live credentials that
-    must not be checkpointed, and a turn that has already fired side-effecting
-    calls is not safely replayable. Tool turns take the direct path instead.
+    A workflow, not a step: ``DBOSDurability`` on the agent turns the model
+    request itself into a step, and that only happens inside a workflow.
+
+    No ``toolsets`` parameter by design. Toolsets hold live credentials and are
+    built per turn, so they cannot be registered with DBOS when the agent is
+    constructed, which is what durable tool calls require. A turn that has
+    already fired side-effecting calls is not safely replayable either. Tool
+    turns take the direct path instead.
     """
     return await call_agent(system_prompt, model, prompt, history, instructions)
 
 
 async def run_turn(
-    repo: ChatRepository,
+    repo: ProjectRepository,
     conversation_id: str,
     system_prompt: str,
     model: str,
@@ -224,14 +215,123 @@ async def run_turn(
     )
 
 
+async def _stream_agent(
+    system_prompt: str,
+    model: str,
+    prompt: str,
+    history: list,
+    *,
+    instructions: str | None = None,
+    toolsets: list | None = None,
+    durable: bool = False,
+) -> AsyncIterator[tuple[str, dict]]:
+    """Run one agent turn, yielding ``chunk`` deltas then one ``done`` or ``paused``.
+
+    ``agent.run()`` with an ``event_stream_handler``, not ``run_stream``: the
+    latter raises inside a DBOS workflow. The handler runs concurrently with the
+    run, so deltas cross to this generator through a memory stream.
+
+    Tools force the direct path, same rule as ``run_turn``.
+    """
+    import asyncio
+
+    import anyio
+    from pydantic_ai.messages import PartDeltaEvent, PartStartEvent, TextPart, TextPartDelta
+
+    send, receive = anyio.create_memory_object_stream[tuple[str, dict]](64)
+
+    async def handler(ctx, stream) -> None:
+        async for event in stream:
+            text = None
+            if isinstance(event, PartStartEvent) and isinstance(event.part, TextPart):
+                text = event.part.content
+            elif isinstance(event, PartDeltaEvent) and isinstance(event.delta, TextPartDelta):
+                text = event.delta.content_delta
+            if text:
+                await send.send(("chunk", {"text": text}))
+
+    use_durable = durable and not toolsets
+    runner = _run_agent_durable if use_durable else _run_agent_direct
+
+    async def drive() -> AgentTurn:
+        # The stream closes on any exit, so a failed run cannot hang the reader.
+        try:
+            return await runner(
+                system_prompt, model, prompt, history, instructions, toolsets, handler
+            )
+        finally:
+            send.close()
+
+    # A bare task, not a task group: a cancel scope cannot span the ``yield``
+    # below, because an async generator may be resumed or closed from a
+    # different task than the one that entered it.
+    task = asyncio.ensure_future(drive())
+    try:
+        async with receive:
+            async for item in receive:
+                yield item
+    finally:
+        if task.done():
+            # Surface the run's own failure, not whatever the reader saw.
+            result = task.result()
+            if result.paused:
+                yield "paused", {"pending": result.pending, "all_messages": result.all_messages}
+            else:
+                yield "done", {"turn": result}
+        else:
+            # Reader left early; nothing will await the task.
+            task.cancel()
+
+
+async def _run_agent_direct(
+    system_prompt, model, prompt, history, instructions, toolsets, handler
+) -> AgentTurn:
+    agent = get_agent_for(system_prompt, model)
+    result = await agent.run(
+        prompt,
+        message_history=to_model_messages(history),
+        instructions=instructions,
+        toolsets=toolsets or None,
+        event_stream_handler=handler,
+    )
+    return _turn_from_result(result, model)
+
+
+@DBOS.workflow(name="chat.stream_agent")
+async def _run_agent_durable(
+    system_prompt, model, prompt, history, instructions, toolsets, handler
+) -> AgentTurn:
+    """Checkpointed counterpart to ``_run_agent_direct``.
+
+    ``handler`` is a live closure, so it never crosses a step boundary: DBOS
+    serialises workflow arguments, but ``DBOSDurability`` reads the handler off
+    the run and invokes it inside the model-request step.
+    """
+    return await _run_agent_direct(
+        system_prompt, model, prompt, history, instructions, toolsets, handler
+    )
+
+
+def _turn_from_result(result, model: str) -> AgentTurn:
+    if isinstance(result.output, DeferredToolRequests):
+        return AgentTurn(
+            output="",
+            model=model,
+            pending=result.output,
+            all_messages=result.all_messages(),
+        )
+    return _turn_from(result.output, model, result.usage)
+
+
 async def stream_turn(
-    repo: ChatRepository,
+    repo: ProjectRepository,
     conversation_id: str,
     system_prompt: str,
     model: str,
     prompt: str,
     *,
     client_token: str | None = None,
+    durable: bool = False,
     instructions: str | None = None,
     toolsets: list | None = None,
 ) -> AsyncIterator[tuple[str, dict]]:
@@ -246,12 +346,16 @@ async def stream_turn(
     event and the pending-run bookkeeping; nothing here talks to ``tool_repo``.
 
     Same write order as ``run_turn``, user row first and assistant row last, so
-    idempotency and seq ordering match. Never checkpointed: DBOS records a
-    step's return value and a generator has none. The assembled text is
-    persisted once the stream drains.
+    idempotency and seq ordering match. The assembled text is persisted once the
+    stream drains.
+
+    Durable when DBOS is configured and the turn has no tools, on the same terms
+    as ``run_turn``: ``_stream_agent`` is a workflow whose model request becomes
+    a checkpointed step. Text reaches the caller through an
+    ``event_stream_handler`` rather than ``run_stream``, which pydantic-ai
+    rejects inside a workflow.
     """
     from anyio import to_thread
-    from pydantic_ai.exceptions import UserError
 
     history = await to_thread.run_sync(repo.list_messages, conversation_id)
     user_message = await to_thread.run_sync(
@@ -268,26 +372,23 @@ async def stream_turn(
     chunks: list[str] = []
     turn: AgentTurn
     try:
-        agent = get_agent_for(system_prompt, model)
-        async with agent.run_stream(
+        async for event, payload in _stream_agent(
+            system_prompt,
+            model,
             prompt,
-            message_history=to_model_messages(history),
+            history,
             instructions=instructions,
-            toolsets=toolsets or None,
-        ) as result:
-            try:
-                async for text in result.stream_text(delta=True):
-                    chunks.append(text)
-                    yield "chunk", {"text": text}
-            except UserError:
-                # Deferred approval, not text. Falls through to get_output().
-                pass
-            output = await result.get_output()
-            if isinstance(output, DeferredToolRequests):
-                yield "paused", {"pending": output, "all_messages": result.all_messages()}
+            toolsets=toolsets,
+            durable=durable,
+        ):
+            if event == "chunk":
+                chunks.append(payload["text"])
+                yield event, payload
+            elif event == "paused":
+                yield event, payload
                 return
-            # Only valid once the stream has drained.
-            turn = _turn_from(output if output else "".join(chunks), model, result.usage)
+            else:
+                turn = payload["turn"]
     except Exception as exc:
         # Headers are sent, so no 4xx. Emit an event and record the failure.
         turn = AgentTurn(output="".join(chunks), model=model, error=str(exc))
