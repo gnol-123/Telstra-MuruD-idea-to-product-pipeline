@@ -26,6 +26,8 @@ MIGRATIONS = [
     "defaults.sql",
     "parity.sql",
     "provider.sql",
+    "usage.sql",
+    "orchestrator.sql",
 ]
 HERE = pathlib.Path(__file__).parent
 

@@ -106,6 +106,7 @@ conversation.
 | `GET` | `/projects/{project_id}/nodes` | **yes** | List a project's agent nodes |
 | `PATCH` | `/projects/{project_id}/nodes/{node_id}` | **yes** | Move, rename, set tool policy or model. **Agent nodes only** |
 | `DELETE` | `/projects/{project_id}/nodes/{node_id}` | **yes** | Remove a node |
+| `GET` | `/projects/{project_id}/nodes/{node_id}/messages` | **yes** | An agent node's transcript, for polling |
 | `POST` | `/projects/{project_id}/edges` | **yes** | Draw an arrow between two nodes |
 | `GET` | `/projects/{project_id}/edges` | **yes** | List a project's arrows |
 | `POST` | `/projects/{project_id}/edges/{edge_id}/refresh` | **yes** | Regenerate an edge's summary |
@@ -117,8 +118,8 @@ conversation.
 [ { "id": "uuid", "slug": "market_research", "name": "Market Research",
     "default_presets": ["brave_search", "research_method"] } ]
 ```
-Seeded: `market_research`, `project_scoping`, `coding`, `ux_ui`. Adding one is a SQL
-insert, not a deploy. See `backend/migrations/README.md`.
+Seeded: `market_research`, `project_scoping`, `coding`, `ux_ui`, `orchestrator`.
+Adding one is a SQL insert, not a deploy. See `backend/migrations/README.md`.
 
 `default_presets` is a list of preset slugs this agent type comes pre-equipped
 with.
@@ -146,10 +147,12 @@ project is not yours or is already gone.
   "agent_slug": "market_research",
   "name": "Market Research (EU)",
   "position_x": 240,
-  "position_y": 120
+  "position_y": 120,
+  "tool_policy": "auto"
 }
 ```
 Only `agent_slug` is required; `name` defaults to the template's name.
+`tool_policy` is `"ask"` (default) or `"auto"`.
 
 → `201`
 ```json
@@ -247,6 +250,12 @@ name.
 ### `DELETE /projects/{project_id}/nodes/{node_id}`
 → `204`. **Cascades**: the node's conversation and its whole transcript go
 with it. `404` if the node is not yours or is already gone.
+
+### `GET /projects/{project_id}/nodes/{node_id}/messages`
+Optional `?after_seq=N` returns only messages with `seq > N`, for polling.
+
+→ `200`, a list of messages, oldest first, same shape as `user_message` in
+`POST /chat`. Up to 500. `404` if the project or agent node is not yours.
 
 ---
 
@@ -574,6 +583,49 @@ A node for `obsidian` or `gmail` with no bridge running stays in
 
 ---
 
+## Orchestrator
+
+An `orchestrator` agent type. Create one like any agent
+(`{"agent_slug": "orchestrator", "tool_policy": "auto"}`), then chat with it:
+the prompt is the idea. It arrives with one tool box, **Canvas**, which lets
+it create, wire and run the other agents on the same project.
+
+What it does on a message: reads the canvas, creates `project_scoping`,
+`market_research`, `ux_ui` and `coding` agents (reusing any that exist),
+draws context edges between them, runs each in order with the idea and the
+earlier decisions, and replies with a report. Each stage's full output is on
+that agent's own conversation: `GET /projects/{id}/nodes/{node_id}/messages`.
+
+**Context summaries stay current on their own** while the orchestrator drives
+the pipeline: running a stage refreshes the summaries flowing out of it before
+the next stage reads them. The exception is when **you** chat with a stage
+agent directly, which moves its conversation past the summary downstream
+agents hold. The orchestrator sees that as a stale edge and calls its
+`refresh_context` tool to regenerate those summaries before running anything
+that depends on them, so an edit you make by hand is not silently skipped.
+
+**Mode** is the orchestrator node's `tool_policy`:
+
+| `tool_policy` | Behaviour |
+|---|---|
+| `auto` | Unattended. One message, all stages, one report. |
+| `ask` | Pauses before **each stage** with `approval_required`; `pending_calls` shows the target and the exact prompt. Approve or deny via `POST /chat/resume`. Creating and wiring never pauses. |
+
+Agents the orchestrator creates have `tool_policy: auto`. Change one with
+`PATCH .../nodes/{node_id}` if you want to see its tool calls.
+
+**Long runs.** An unattended run is minutes to tens of minutes. Use
+`/chat/stream`: it emits `tool` events as each stage starts and finishes.
+The turn is **detached**: if the stream drops, the run continues and the
+report still lands on the orchestrator's conversation. Poll
+`GET .../messages?after_seq=<last seen>` to pick it up. Turns run on
+service-backed repositories bound to the verified user, so an unattended
+run is not cut short by the access token expiring.
+
+Every turn is capped at `TURN_REQUEST_LIMIT` model requests (default 100).
+
+---
+
 ## Environments
 
 An environment node is a real sandbox: a shell, a filesystem, and a URL for
@@ -814,6 +866,9 @@ event: done    data: {"assistant_message": {...}}
 `start` arrives before the model is called, so the client has the conversation
 id and the persisted user message immediately.
 
+`tool` events carry `{"name": "run_agent", "args": {...}}` when a tool is
+called and `{"name": "run_agent", "result_head": "..."}` when it returns.
+
 If the model fails part-way an `event: error` is emitted and the assistant
 message is still written with `status: "failed"`. The HTTP status stays `200`,
 because headers are sent before the model is called.
@@ -822,6 +877,10 @@ The turn is persisted exactly as `/chat` persists it, so idempotency, `seq`
 ordering and history replay are unchanged. Unlike `/chat` it is **not**
 DBOS-checkpointed: a step checkpoints a return value and a stream has none. The
 assembled text is written once the stream drains.
+
+**Streams are detached.** A dropped connection does not cancel the turn. The
+assistant message is persisted when the run finishes; re-read it with
+`GET /projects/{project_id}/nodes/{node_id}/messages`.
 
 ### Approval
 

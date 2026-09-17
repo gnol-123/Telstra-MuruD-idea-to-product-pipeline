@@ -17,6 +17,8 @@ class Settings(BaseSettings):
     ollama_base_url: str = "https://ollama.com/v1"
     ollama_api_key: str = ""
     summary_model: str = "deepseek-v4.1-flash"
+    # Read budget for one model call. The SDK default of 600s.
+    llm_read_timeout_s: float = 1800.0
     gemini_api_key: str = ""
     gemini_model: str = "gemini-3-flash-preview"
     # Platform Keys for default tools:
@@ -47,6 +49,10 @@ class Settings(BaseSettings):
     environment_command_timeout_s: int = 120
     environment_max_output_chars: int = 20_000
     environment_max_file_chars: int = 200_000
+    # Model requests one turn may make. Bounds a tool loop that never converges.
+    turn_request_limit: int = 100
+    # Shutdown grace period to let detached turns (see workflows._DETACHED) finish.
+    detached_join_timeout_s: int = 30
 
     @property
     def cors_origin_list(self) -> list[str]:

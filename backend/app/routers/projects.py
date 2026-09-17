@@ -21,13 +21,14 @@ from app.repositories.project_repo import (
     UsageTotal,
 )
 from app.repositories.tool_repo import ToolNode, ToolPreset, ToolType, load_node_secrets
-from app.routers.deps import EnvRepo, ProjectRepo, ToolRepo
+from app.routers.chat import ChatMessage
+from app.routers.deps import EnvRepo, ProjectRepo, ToolRepo, TurnRepos
 from app.routers.environments import EnvironmentNodeResponse, create_environment_node
-from app.services.agent import summarise_conversation
 from app.services.models import ModelsUnavailable, list_models
 from app.tools.base import ToolContext
 from app.tools.oauth_refresh import TokenExchangeError, with_access_token
 from app.tools.registry import get_spec, platform_secrets
+from app.workflows import refresh_edge
 
 router = APIRouter(tags=["projects"])
 
@@ -140,6 +141,8 @@ class CreateNodeRequest(BaseModel):
     name: str | None = Field(default=None, min_length=1, max_length=200)
     position_x: float = 0
     position_y: float = 0
+    # Agent nodes only. 'auto' for an orchestrator that should run unattended.
+    tool_policy: Literal["ask", "auto"] = "ask"
 
 
 class UpdateNodeRequest(BaseModel):
@@ -274,6 +277,50 @@ async def list_agent_types(repo: ProjectRepo) -> list[AgentTypeResponse]:
     return [AgentTypeResponse.of(t) for t in types]
 
 
+async def provision_agent(
+    project_id: str,
+    agent_type: AgentType,
+    name: str,
+    *,
+    position_x: float,
+    position_y: float,
+    tool_policy: str,
+    repo: ProjectRepo,
+    tool_repo: ToolRepo,
+    env_repo: EnvRepo,
+) -> str:
+    """Create an agent box with its conversation, scratch access and default tools.
+
+    The agent branch of POST /nodes, shared with the canvas tool so an
+    orchestrator-made agent is indistinguishable from a user-made one.
+    """
+    node_id = await to_thread.run_sync(
+        lambda: repo.create_node(
+            project_id,
+            agent_type.id,
+            name,
+            position_x=position_x,
+            position_y=position_y,
+            tool_policy=tool_policy,
+        )
+    )
+
+    # Access requires an edge, so the scratch space is wired like any other
+    # environment. The frontend hides this one rather than drawing it.
+    scratch = await to_thread.run_sync(lambda: env_repo.ensure_scratch_node(project_id))
+    try:
+        await to_thread.run_sync(lambda: repo.create_edge(scratch.id, node_id, "environment"))
+    except DuplicateEdge:
+        # A retried create. The wiring is already there.
+        pass
+
+    req = CreateNodeRequest(
+        agent_slug=agent_type.slug, position_x=position_x, position_y=position_y
+    )
+    await _wire_default_presets(project_id, node_id, agent_type, req, repo, tool_repo)
+    return node_id
+
+
 @router.post(
     "/projects/{project_id}/nodes",
     response_model=NodeResponse | ToolNodeResponse | EnvironmentNodeResponse,
@@ -310,26 +357,17 @@ async def create_node(
             detail=f"Unknown agent '{req.agent_slug}'",
         )
 
-    node_id = await to_thread.run_sync(
-        lambda: repo.create_node(
-            str(project_id),
-            agent_type.id,
-            req.name or agent_type.name,
-            position_x=req.position_x,
-            position_y=req.position_y,
-        )
+    node_id = await provision_agent(
+        str(project_id),
+        agent_type,
+        req.name or agent_type.name,
+        position_x=req.position_x,
+        position_y=req.position_y,
+        tool_policy=req.tool_policy,
+        repo=repo,
+        tool_repo=tool_repo,
+        env_repo=env_repo,
     )
-
-    # Access requires an edge, so the scratch space is wired like any other
-    # environment. The frontend hides this one rather than drawing it.
-    scratch = await to_thread.run_sync(lambda: env_repo.ensure_scratch_node(str(project_id)))
-    try:
-        await to_thread.run_sync(lambda: repo.create_edge(scratch.id, node_id, "environment"))
-    except DuplicateEdge:
-        # A retried create. The wiring is already there.
-        pass
-
-    await _wire_default_presets(project_id, node_id, agent_type, req, repo, tool_repo)
 
     node = await to_thread.run_sync(repo.get_agent_node, node_id)
     if node is None:
@@ -410,6 +448,35 @@ async def list_nodes(project_id: UUID, repo: ProjectRepo) -> list[NodeResponse]:
 
     nodes = await to_thread.run_sync(repo.list_nodes, str(project_id))
     return [NodeResponse.of(n) for n in nodes]
+
+
+@router.get("/projects/{project_id}/nodes/{node_id}/messages", response_model=list[ChatMessage])
+async def list_node_messages(
+    project_id: UUID,
+    node_id: UUID,
+    turn_repos: TurnRepos,
+    after_seq: int = Query(default=0, ge=0),
+) -> list[ChatMessage]:
+    """An agent node's transcript, oldest first. ``after_seq`` for polling.
+
+    Reads on the pooled service client (TurnRepos), not a fresh per-request
+    user client: get_user_client deliberately builds a brand new httpx.Client
+    (and pays a cold TLS handshake) on every call.
+
+    No separate project lookup: get_agent_node is owner-filtered and
+    its project_id is checked below.
+    """
+    repo = turn_repos.project
+    node = await to_thread.run_sync(repo.get_agent_node, str(node_id))
+    if node is None or node.project_id != str(project_id):
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Agent not found")
+    conversation_id = await to_thread.run_sync(repo.get_conversation_for_node, node.id)
+    if conversation_id is None:
+        return []
+    messages = await to_thread.run_sync(
+        lambda: repo.list_messages_after(conversation_id, after_seq=after_seq)
+    )
+    return [ChatMessage.of(m) for m in messages]
 
 
 @router.patch("/projects/{project_id}/nodes/{node_id}", response_model=NodeResponse)
@@ -500,7 +567,7 @@ def _split_tool_config(
 
 
 async def _provision_tool_node(
-    project_id: UUID,
+    project_id: str,
     tool_type: ToolType,
     name: str,
     config: dict[str, Any],
@@ -523,7 +590,7 @@ async def _provision_tool_node(
 
     node_id = await to_thread.run_sync(
         lambda: tool_repo.create_tool_node(
-            str(project_id),
+            project_id,
             tool_type.id,
             name,
             config,
@@ -582,7 +649,7 @@ async def _create_tool_node(
 
     name = req.name or (preset.name if preset else tool_type.name)
     node_id = await _provision_tool_node(
-        project_id,
+        str(project_id),
         tool_type,
         name,
         plain_config,
@@ -603,7 +670,7 @@ async def _create_tool_node(
 
 
 async def _wire_default_presets(
-    project_id: UUID,
+    project_id: str,
     node_id: str,
     agent_type: AgentType,
     req: CreateNodeRequest,
@@ -927,21 +994,7 @@ async def refresh_edge_summary(project_id: UUID, edge_id: UUID, repo: ProjectRep
             detail="Only context edges carry a summary",
         )
 
-    conversation_id = await to_thread.run_sync(repo.get_conversation_for_node, edge.source_node_id)
-    if conversation_id is None:
-        # Nothing to summarise; record it so the edge stops reading as stale.
-        updated = await to_thread.run_sync(lambda: repo.update_edge_summary(str(edge_id), "", 0))
-        return EdgeResponse.of(updated or edge, is_stale=False, messages_behind=0)
-
-    # Read before summarising, so a message landing mid-call re-stales the edge.
-    head = await to_thread.run_sync(repo.get_conversation_head, edge.source_node_id)
-    history = await to_thread.run_sync(repo.list_messages, conversation_id)
-
-    summary = await summarise_conversation(history, max_words=edge.summary_max_words)
-
-    updated = await to_thread.run_sync(
-        lambda: repo.update_edge_summary(str(edge_id), summary, head)
-    )
+    updated = await refresh_edge(repo, edge)
     if updated is None:
         raise HTTPException(
             status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,

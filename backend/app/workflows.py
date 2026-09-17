@@ -8,15 +8,22 @@ pickled and a JWT would be a credential written to disk.
 assistant row after, so its retries cannot produce duplicate rows.
 """
 
-from collections.abc import AsyncIterator
+import asyncio
+import logging
+from collections.abc import AsyncIterator, Awaitable, Callable
 from dataclasses import dataclass
 
+import anyio
 from dbos import DBOS
 from pydantic_ai import DeferredToolRequests, DeferredToolResults
 from pydantic_ai.messages import ModelMessage
+from pydantic_ai.usage import UsageLimits
 
-from app.repositories.project_repo import InboundContext, Message, ProjectRepository
-from app.services.agent import get_agent_for, to_model_messages
+from app.config import settings
+from app.repositories.project_repo import Edge, InboundContext, Message, ProjectRepository
+from app.services.agent import get_agent_for, summarise_conversation, to_model_messages
+
+log = logging.getLogger(__name__)
 
 
 @dataclass
@@ -60,6 +67,7 @@ class ChatTurn:
     user_message: Message
     assistant_message: Message | None
     output: str
+    error: str | None = None
     pending: DeferredToolRequests | None = None
     all_messages: list[ModelMessage] | None = None
 
@@ -77,6 +85,68 @@ def build_context_instructions(context: list[InboundContext]) -> str | None:
     return "\n".join(parts)
 
 
+def _limits() -> UsageLimits:
+    """Per-turn cap on model requests. UsageLimitExceeded lands as a failed row."""
+    return UsageLimits(request_limit=settings.turn_request_limit)
+
+
+async def refresh_edge(repo: ProjectRepository, edge: Edge) -> Edge | None:
+    """Regenerate one context edge's summary from its source conversation."""
+    from anyio import to_thread
+
+    conversation_id = await to_thread.run_sync(repo.get_conversation_for_node, edge.source_node_id)
+    if conversation_id is None:
+        # Nothing to summarise; record it so the edge stops reading as stale.
+        return await to_thread.run_sync(lambda: repo.update_edge_summary(edge.id, "", 0))
+
+    # Read before summarising, so a message landing mid-call re-stales the edge.
+    head = await to_thread.run_sync(repo.get_conversation_head, edge.source_node_id)
+    history = await to_thread.run_sync(repo.list_messages, conversation_id)
+    summary = await summarise_conversation(history, max_words=edge.summary_max_words)
+    return await to_thread.run_sync(lambda: repo.update_edge_summary(edge.id, summary, head))
+
+
+async def refresh_outbound(repo: ProjectRepository, node_id: str) -> list[str]:
+    """Refresh every context edge leaving a node. Returns the ids that failed.
+
+    One summariser call per distinct summary_max_words: three edges out of one
+    scoping agent are the same transcript three times.
+    """
+    from anyio import to_thread
+
+    edges = await to_thread.run_sync(repo.list_outbound_context_edges, node_id)
+    if not edges:
+        return []
+
+    conversation_id = await to_thread.run_sync(repo.get_conversation_for_node, node_id)
+    head = await to_thread.run_sync(repo.get_conversation_head, node_id)
+    history = (
+        await to_thread.run_sync(repo.list_messages, conversation_id) if conversation_id else []
+    )
+
+    failed: list[str] = []
+    by_words: dict[int, list[Edge]] = {}
+    for e in edges:
+        by_words.setdefault(e.summary_max_words, []).append(e)
+
+    for max_words, group in by_words.items():
+        try:
+            summary = await summarise_conversation(history, max_words=max_words) if history else ""
+        except Exception:
+            log.exception("summary failed for %s (%d words)", node_id, max_words)
+            failed.extend(e.id for e in group)
+            continue
+        for e in group:
+            try:
+                await to_thread.run_sync(
+                    lambda e=e, summary=summary: repo.update_edge_summary(e.id, summary, head)
+                )
+            except Exception:
+                log.exception("summary store failed for edge %s", e.id)
+                failed.append(e.id)
+    return failed
+
+
 async def call_agent(
     system_prompt: str,
     model: str,
@@ -92,6 +162,7 @@ async def call_agent(
         message_history=to_model_messages(history),
         instructions=instructions,
         toolsets=toolsets or None,
+        usage_limits=_limits(),
     )
     return _turn_from_result(result, model)
 
@@ -114,6 +185,7 @@ async def resume_agent(
         message_history=message_history,
         deferred_tool_results=deferred_tool_results,
         toolsets=toolsets or None,
+        usage_limits=_limits(),
     )
     return _turn_from_result(result, model)
 
@@ -238,6 +310,7 @@ async def run_turn(
         user_message=user_message,
         assistant_message=assistant_message,
         output=turn.output,
+        error=turn.error,
     )
 
 
@@ -259,15 +332,35 @@ async def _stream_agent(
 
     Tools force the direct path, same rule as ``run_turn``.
     """
-    import asyncio
-
-    import anyio
-    from pydantic_ai.messages import PartDeltaEvent, PartStartEvent, TextPart, TextPartDelta
+    from pydantic_ai.messages import (
+        FunctionToolCallEvent,
+        FunctionToolResultEvent,
+        PartDeltaEvent,
+        PartStartEvent,
+        TextPart,
+        TextPartDelta,
+    )
 
     send, receive = anyio.create_memory_object_stream[tuple[str, dict]](64)
 
     async def handler(ctx, stream) -> None:
         async for event in stream:
+            if isinstance(event, FunctionToolCallEvent):
+                await send.send(
+                    ("tool", {"name": event.part.tool_name, "args": event.part.args_as_dict()})
+                )
+                continue
+            if isinstance(event, FunctionToolResultEvent):
+                await send.send(
+                    (
+                        "tool",
+                        {
+                            "name": getattr(event.part, "tool_name", None),
+                            "result_head": str(getattr(event.part, "content", ""))[:200],
+                        },
+                    )
+                )
+                continue
             text = None
             if isinstance(event, PartStartEvent) and isinstance(event.part, TextPart):
                 text = event.part.content
@@ -319,6 +412,7 @@ async def _run_agent_direct(
         instructions=instructions,
         toolsets=toolsets or None,
         event_stream_handler=handler,
+        usage_limits=_limits(),
     )
     return _turn_from_result(result, model)
 
@@ -349,6 +443,11 @@ def _turn_from_result(result, model: str) -> AgentTurn:
     return _turn_from(result.output, model, result.usage)
 
 
+# Strong refs to detached turns: asyncio only holds weak ones, and a task
+# nobody awaits could otherwise be collected mid-run.
+_DETACHED: set[asyncio.Task] = set()
+
+
 async def stream_turn(
     repo: ProjectRepository,
     conversation_id: str,
@@ -360,26 +459,19 @@ async def stream_turn(
     durable: bool = False,
     instructions: str | None = None,
     toolsets: list | None = None,
+    on_paused: Callable[[DeferredToolRequests, list[ModelMessage]], Awaitable[None]] | None = None,
 ) -> AsyncIterator[tuple[str, dict]]:
     """Stream one turn, yielding ``(event, payload)`` pairs.
 
-    Events: ``start``, ``chunk``, ``done``, ``error``, ``paused``.
+    Events: ``start``, ``chunk``, ``tool``, ``done``, ``error``, ``paused``.
 
-    ``paused`` replaces ``done`` when the run stops for tool approval instead
-    of answering: the payload carries ``pending`` (the ``DeferredToolRequests``)
-    and ``all_messages`` (the history to park), and no assistant message is
-    persisted. The chat router turns this into the ``approval_required`` SSE
-    event and the pending-run bookkeeping; nothing here talks to ``tool_repo``.
+    Detached: the model run and its persistence live in a task that outlives
+    this generator. A reader that leaves (closed tab, proxy timeout) stops
+    receiving; it does not stop the turn. ``on_paused`` runs inside the task
+    for the same reason: the approval bookkeeping must not depend on a reader.
 
-    Same write order as ``run_turn``, user row first and assistant row last, so
-    idempotency and seq ordering match. The assembled text is persisted once the
-    stream drains.
-
-    Durable when DBOS is configured and the turn has no tools, on the same terms
-    as ``run_turn``: ``_stream_agent`` is a workflow whose model request becomes
-    a checkpointed step. Text reaches the caller through an
-    ``event_stream_handler`` rather than ``run_stream``, which pydantic-ai
-    rejects inside a workflow.
+    ``paused`` replaces ``done`` when the run stops for tool approval; no
+    assistant message is persisted then. Same write order as ``run_turn``.
     """
     from anyio import to_thread
 
@@ -389,54 +481,104 @@ async def stream_turn(
     )
     yield (
         "start",
-        {
-            "conversation_id": conversation_id,
-            "user_message": _message_payload(user_message),
-        },
+        {"conversation_id": conversation_id, "user_message": _message_payload(user_message)},
     )
 
-    chunks: list[str] = []
-    turn: AgentTurn
-    try:
-        async for event, payload in _stream_agent(
-            system_prompt,
-            model,
-            prompt,
-            history,
-            instructions=instructions,
-            toolsets=toolsets,
-            durable=durable,
-        ):
-            if event == "chunk":
-                chunks.append(payload["text"])
-                yield event, payload
-            elif event == "paused":
-                yield event, payload
-                return
-            else:
-                turn = payload["turn"]
-    except Exception as exc:
-        # Headers are sent, so no 4xx. Emit an event and record the failure.
-        turn = AgentTurn(output="".join(chunks), model=model, error=str(exc))
-        yield "error", {"error": str(exc)}
+    send, receive = anyio.create_memory_object_stream[tuple[str, dict]](64)
 
-    assistant_message = await to_thread.run_sync(
-        lambda: repo.add_message(
-            conversation_id,
-            "assistant",
-            turn.output,
-            model=turn.model,
-            input_tokens=turn.input_tokens,
-            output_tokens=turn.output_tokens,
-            reasoning_tokens=turn.reasoning_tokens,
-            cache_read_tokens=turn.cache_read_tokens,
-            cache_write_tokens=turn.cache_write_tokens,
-            requests=turn.requests,
-            status="failed" if turn.failed else "complete",
-            error=turn.error,
+    async def emit(item: tuple[str, dict]) -> None:
+        try:
+            # Blocks when the buffer is full: backpressure on a slow reader,
+            # never a dropped event. A reader that left closes the stream.
+            await send.send(item)
+        except (anyio.BrokenResourceError, anyio.ClosedResourceError):
+            # Reader left. Keep running; the rows still land.
+            pass
+
+    async def drive() -> None:
+        chunks: list[str] = []
+        turn: AgentTurn | None = None
+        try:
+            async for event, payload in _stream_agent(
+                system_prompt,
+                model,
+                prompt,
+                history,
+                instructions=instructions,
+                toolsets=toolsets,
+                durable=durable,
+            ):
+                if event in ("chunk", "tool"):
+                    if event == "chunk":
+                        chunks.append(payload["text"])
+                    await emit((event, payload))
+                elif event == "paused":
+                    if on_paused is not None:
+                        try:
+                            await on_paused(payload["pending"], payload["all_messages"])
+                        except Exception:
+                            # The pause is unresumable now, but no assistant row
+                            # belongs here either. Log and end the turn.
+                            log.exception("on_paused failed for turn %s", conversation_id)
+                    await emit((event, payload))
+                    return
+                else:
+                    turn = payload["turn"]
+        except Exception as exc:
+            turn = AgentTurn(output="".join(chunks), model=model, error=str(exc))
+            await emit(("error", {"error": str(exc)}))
+
+        if turn is None:
+            return
+        assistant_message = await to_thread.run_sync(
+            lambda: repo.add_message(
+                conversation_id,
+                "assistant",
+                turn.output,
+                model=turn.model,
+                input_tokens=turn.input_tokens,
+                output_tokens=turn.output_tokens,
+                reasoning_tokens=turn.reasoning_tokens,
+                cache_read_tokens=turn.cache_read_tokens,
+                cache_write_tokens=turn.cache_write_tokens,
+                requests=turn.requests,
+                status="failed" if turn.failed else "complete",
+                error=turn.error,
+            )
         )
-    )
-    yield "done", {"assistant_message": _message_payload(assistant_message)}
+        await emit(("done", {"assistant_message": _message_payload(assistant_message)}))
+
+    async def run() -> None:
+        try:
+            await drive()
+        except Exception:
+            # Nobody may be awaiting this task; log rather than lose it.
+            log.exception("detached turn %s failed", conversation_id)
+        finally:
+            send.close()
+
+    task = asyncio.ensure_future(run())
+    _DETACHED.add(task)
+    task.add_done_callback(_DETACHED.discard)
+    try:
+        async with receive:
+            async for item in receive:
+                yield item
+    finally:
+        if not task.done():
+            log.info("client left; turn %s continues detached", conversation_id)
+
+
+async def join_detached(timeout: float) -> int:
+    """Wait for detached turns at shutdown. Returns how many are still running."""
+    pending = [t for t in _DETACHED if not t.done()]
+    if not pending:
+        return 0
+    await asyncio.wait(pending, timeout=timeout)
+    still_running = sum(1 for t in pending if not t.done())
+    if still_running:
+        log.warning("%d detached turn(s) still running at shutdown", still_running)
+    return still_running
 
 
 def _message_payload(m: Message) -> dict:

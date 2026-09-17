@@ -4,14 +4,28 @@ Mirrors how agent_types.slug resolves through code. A tool_types row whose
 slug is absent here is reported as unconfigured rather than crashing a turn.
 """
 
+from pydantic_ai.toolsets import FunctionToolset
+
 from app.config import settings
 from app.tools import skills
 from app.tools.api import brave_search, web_fetch
-from app.tools.base import ToolSpec
+from app.tools.base import ToolContext, ToolSpec, VerifyResult
 from app.tools.mcp import generic, github, gmail
+
+
+def _canvas_build(ctx: ToolContext) -> FunctionToolset:
+    """Stub. The real toolset is built by app.tools.canvas.assemble_canvas from
+    prepare_turn, which has the turn repositories this one cannot see."""
+    return FunctionToolset()
+
+
+async def _canvas_verify(ctx: ToolContext) -> VerifyResult:
+    return VerifyResult(ok=True, detail="Canvas tools ready.")
+
 
 _REGISTRY: dict[str, ToolSpec] = {
     "skill": ToolSpec(kind="skill", build=skills.build, verify=skills.verify),
+    "canvas": ToolSpec(kind="canvas", build=_canvas_build, verify=_canvas_verify),
     "brave_search": ToolSpec(kind="api", build=brave_search.build, verify=brave_search.verify),
     "web_fetch": ToolSpec(kind="api", build=web_fetch.build, verify=web_fetch.verify),
     "mcp_server": ToolSpec(kind="mcp", build=generic.build, verify=generic.verify),
