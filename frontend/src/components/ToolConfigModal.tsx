@@ -1,20 +1,25 @@
 "use client";
 
 import { useState } from "react";
-import { ProjectNode, ToolType } from "@/lib/types";
-import { createToolNode, ApiError } from "@/lib/api";
+import { Edge, ProjectNode, ToolType } from "@/lib/types";
+import { createToolNode, createEdge, ApiError } from "@/lib/api";
 
 export default function ToolConfigModal({
   projectId,
   toolType,
   position,
+  attachToAgentId,
   onCreated,
   onCancel,
 }: {
   projectId: string;
   toolType: ToolType;
   position: { x: number; y: number };
-  onCreated: (node: ProjectNode) => void;
+  // Set when this tool was dropped directly onto an agent card: once the
+  // node is created, a `tool` edge to that agent is drawn automatically so
+  // it shows up as an equipped chip immediately, matching the design.
+  attachToAgentId?: string;
+  onCreated: (node: ProjectNode, edge?: Edge) => void;
   onCancel: () => void;
 }) {
   const [name, setName] = useState(toolType.name);
@@ -39,12 +44,32 @@ export default function ToolConfigModal({
       for (const f of fields) {
         if (values[f.key]?.trim()) config[f.key] = values[f.key].trim();
       }
-      const node = await createToolNode(projectId, toolType.slug, {
+      const node = await createToolNode(projectId, {
+        toolSlug: toolType.slug,
         name: name.trim() || toolType.name,
         config,
         position_x: position.x,
         position_y: position.y,
       });
+
+      if (attachToAgentId) {
+        try {
+          const edge = await createEdge(projectId, node.id, attachToAgentId, "tool");
+          onCreated(node, edge);
+          return;
+        } catch (edgeErr) {
+          // The tool node itself was created fine — surface it, but let the
+          // user know the auto-attach didn't take so they can drag the port
+          // manually instead of the tool vanishing silently.
+          setError(
+            edgeErr instanceof ApiError
+              ? `Tool created, but couldn't attach it automatically: ${edgeErr.message}`
+              : "Tool created, but couldn't attach it automatically."
+          );
+          onCreated(node);
+          return;
+        }
+      }
       onCreated(node);
     } catch (err) {
       setError(err instanceof ApiError ? err.message : "Something went wrong");
@@ -64,7 +89,10 @@ export default function ToolConfigModal({
         className="w-full max-w-sm bg-panel border border-accent/30 rounded-2xl p-6 space-y-4 shadow-2xl"
       >
         <div>
-          <div className="text-sm font-semibold">Add {toolType.name}</div>
+          <div className="text-sm font-semibold">
+            Add {toolType.name}
+            {attachToAgentId && <span className="text-accent"> → equip on drop</span>}
+          </div>
           <div className="text-xs text-muted mt-1">{toolType.description}</div>
         </div>
 
@@ -117,7 +145,7 @@ export default function ToolConfigModal({
             disabled={busy}
             className="flex-1 bg-accent text-black font-medium rounded-md py-2 text-xs disabled:opacity-50"
           >
-            {busy ? "Adding…" : "Add tool"}
+            {busy ? "Adding…" : attachToAgentId ? "Add & equip" : "Add tool"}
           </button>
         </div>
       </form>
