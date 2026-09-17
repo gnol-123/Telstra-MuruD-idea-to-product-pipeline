@@ -14,7 +14,11 @@ from unittest.mock import AsyncMock, MagicMock
 
 from app.main import app
 from app.routers.auth import UserResponse, get_current_user
-from app.routers.deps import get_project_repository, get_tool_repository
+from app.routers.deps import (
+    get_environment_repository,
+    get_project_repository,
+    get_tool_repository,
+)
 
 # `client` fixture comes from conftest.py -- no need to redefine it here.
 
@@ -116,6 +120,12 @@ class TestAddToolNode:
         app.dependency_overrides[get_current_user] = fake_user
         app.dependency_overrides[get_project_repository] = lambda: mock_project_repo
         app.dependency_overrides[get_tool_repository] = lambda: mock_tool_repo
+        # create_node's signature also declares env_repo: EnvRepo -- FastAPI
+        # resolves every declared dependency up front, even though the
+        # kind='tool' branch never touches it, so it needs overriding too or
+        # the real get_environment_repository -> CurrentAuth chain runs and
+        # rejects "fake-token" with a genuine 401.
+        app.dependency_overrides[get_environment_repository] = lambda: MagicMock()
         # _verify_tool_node is `async def` -- an AsyncMock is required so the
         # route's `await` gets a coroutine back instead of a bare None.
         monkeypatch.setattr(
@@ -151,6 +161,7 @@ class TestAddToolNode:
         app.dependency_overrides[get_current_user] = fake_user
         app.dependency_overrides[get_project_repository] = lambda: mock_project_repo
         app.dependency_overrides[get_tool_repository] = lambda: mock_tool_repo
+        app.dependency_overrides[get_environment_repository] = lambda: MagicMock()
         try:
             response = client.post(
                 f"/projects/{FAKE_PROJECT_ID}/nodes",
