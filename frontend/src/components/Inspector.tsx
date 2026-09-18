@@ -20,6 +20,7 @@ import {
   verifyNode,
   authorizeNode,
   listToolCalls,
+  listNodeMessages,
   updateEnvironment,
   startEnvironment,
   stopEnvironment,
@@ -44,10 +45,23 @@ export interface ChatState {
   busy: boolean;
   pendingCalls: PendingToolCall[] | null;
   approvals: Record<string, boolean>;
+  // True once this node's history has been fetched from the backend (or
+  // that fetch failed and isn't worth retrying every render). Without this,
+  // a freshly opened tab / reloaded project has no idea the conversation
+  // already has a transcript sitting in the database.
+  historyLoaded: boolean;
 }
 
 export function defaultChatState(): ChatState {
-  return { messages: [], draft: "", useStream: false, busy: false, pendingCalls: null, approvals: {} };
+  return {
+    messages: [],
+    draft: "",
+    useStream: false,
+    busy: false,
+    pendingCalls: null,
+    approvals: {},
+    historyLoaded: false,
+  };
 }
 
 export default function Inspector({
@@ -63,6 +77,7 @@ export default function Inspector({
   onDeleteEdge,
   onUnequipTool,
   onNodeUpdated,
+  onAfterTurn,
 }: {
   projectId: string;
   node: ProjectNode | null;
@@ -70,8 +85,8 @@ export default function Inspector({
   edges: Edge[];
   toolTypes: ToolType[];
   // Keyed by node id in the parent, so a conversation survives switching
-  // away and back — the backend has no endpoint to re-fetch a
-  // conversation's history, so once this state is gone it's gone for good.
+  // between nodes within the same tab. The backend transcript is the real
+  // source of truth on first open — see the historyLoaded fetch below.
   chat: ChatState;
   onChatChange: (nodeId: string, updater: (prev: ChatState) => ChatState) => void;
   onUpdateAgentPolicy: (nodeId: string, policy: ToolPolicy) => void;
@@ -81,6 +96,11 @@ export default function Inspector({
   // node back into view near its former agent (see MeshCanvas).
   onUnequipTool: (edge: Edge) => void;
   onNodeUpdated: (node: ProjectNode) => void;
+  // Called after every chat turn settles (sent, streamed, or resumed). An
+  // orchestrator's Canvas tool can create/wire other nodes mid-turn, and
+  // those never show up on the canvas until something re-fetches it — this
+  // is that re-fetch, cheap enough to run after any agent's turn too.
+  onAfterTurn: () => void;
 }) {
   if (!node) {
     return (
@@ -94,6 +114,8 @@ export default function Inspector({
     <aside className="w-80 shrink-0 border-l border-border flex flex-col min-h-0">
       {isAgentNode(node) ? (
         <AgentInspector
+          key={node.id}
+          projectId={projectId}
           node={node}
           nodes={nodes}
           edges={edges}
@@ -103,6 +125,7 @@ export default function Inspector({
           onRefreshEdge={onRefreshEdge}
           onDeleteEdge={onDeleteEdge}
           onUnequipTool={onUnequipTool}
+          onAfterTurn={onAfterTurn}
         />
       ) : isEnvironmentNode(node) ? (
         <EnvironmentInspector
@@ -145,6 +168,7 @@ function SectionLabel({ children }: { children: React.ReactNode }) {
 // -------------------- Agent inspector + chat --------------------
 
 function AgentInspector({
+  projectId,
   node,
   nodes,
   edges,
@@ -154,7 +178,9 @@ function AgentInspector({
   onRefreshEdge,
   onDeleteEdge,
   onUnequipTool,
+  onAfterTurn,
 }: {
+  projectId: string;
   node: Extract<ProjectNode, { kind: "agent" }>;
   nodes: ProjectNode[];
   edges: Edge[];
@@ -164,13 +190,45 @@ function AgentInspector({
   onRefreshEdge: (edge: Edge) => void;
   onDeleteEdge: (edge: Edge) => void;
   onUnequipTool: (edge: Edge) => void;
+  onAfterTurn: () => void;
 }) {
   const inboundTool = edges.filter((e) => e.kind === "tool" && e.target_node_id === node.id);
   const inboundEnv = edges.filter((e) => e.kind === "environment" && e.target_node_id === node.id);
   const inboundContext = edges.filter((e) => e.kind === "context" && e.target_node_id === node.id);
   const outbound = edges.filter((e) => e.kind === "context" && e.source_node_id === node.id);
 
-  const { messages, draft, useStream, busy, pendingCalls, approvals } = chat;
+  const { messages, draft, useStream, busy, pendingCalls, approvals, historyLoaded } = chat;
+
+  // Hydrate this node's transcript from the backend the first time it's
+  // opened. Runs once per node (the `key={node.id}` on AgentInspector
+  // remounts this on every switch, and historyLoaded guards against
+  // re-fetching on every re-render of the same node).
+  useEffect(() => {
+    if (historyLoaded) return;
+    let cancelled = false;
+    listNodeMessages(projectId, node.id)
+      .then((history) => {
+        if (cancelled) return;
+        const fetched: LocalMessage[] = history
+          .filter((m) => m.role === "user" || m.role === "assistant")
+          .map((m) => ({
+            role: m.role,
+            content: m.status === "failed" ? m.content || "⚠ This turn failed." : m.content,
+          }));
+        onChatChange((prev) =>
+          prev.historyLoaded ? prev : { ...prev, historyLoaded: true, messages: [...fetched, ...prev.messages] }
+        );
+      })
+      .catch(() => {
+        // Don't retry forever on every re-render if the fetch failed —
+        // the user can still chat, it just starts from a blank transcript.
+        if (!cancelled) onChatChange((prev) => ({ ...prev, historyLoaded: true }));
+      });
+    return () => {
+      cancelled = true;
+    };
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [node.id]);
 
   async function handleSend() {
     if (!draft.trim() || busy) return;
@@ -211,6 +269,10 @@ function AgentInspector({
         }));
       } finally {
         onChatChange((prev) => ({ ...prev, busy: false }));
+        // A Canvas-equipped orchestrator can create/wire nodes as part of
+        // this turn; pick those up now instead of waiting for some other
+        // action to trigger a reload.
+        onAfterTurn();
       }
       return;
     }
@@ -260,9 +322,18 @@ function AgentInspector({
           });
         },
         onError: (data) => {
+          // The backend's SSE payload is {"error": str(exc)} (see
+          // workflows.py's stream_turn) — data.message rarely exists, so
+          // fall through every key the backend could plausibly use before
+          // giving up and dumping the raw payload, rather than showing the
+          // uninformative literal "stream error".
+          const detail =
+            data?.message ?? data?.detail ?? data?.error ?? data?.reason ??
+            (data && Object.keys(data).length ? JSON.stringify(data) : null) ??
+            "the backend closed the stream with no error detail — check its logs for a traceback";
           onChatChange((prev) => {
             const copy = [...prev.messages];
-            copy[copy.length - 1] = { role: "assistant", content: `⚠ ${data?.message ?? "stream error"}` };
+            copy[copy.length - 1] = { role: "assistant", content: `⚠ ${detail}` };
             return { ...prev, messages: copy };
           });
         },
@@ -283,6 +354,7 @@ function AgentInspector({
       });
     } finally {
       onChatChange((prev) => ({ ...prev, busy: false }));
+      onAfterTurn();
     }
   }
 
@@ -317,6 +389,7 @@ function AgentInspector({
       }));
     } finally {
       onChatChange((prev) => ({ ...prev, busy: false }));
+      onAfterTurn();
     }
   }
 
