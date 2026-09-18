@@ -87,7 +87,7 @@ export default function Palette({
 
   return (
     <div className="flex items-start gap-4 px-5 py-3 border-b border-border bg-white/[0.014] min-h-[74px]">
-      <div className="flex flex-none flex-col gap-2 pr-4 border-r border-white/20 w-[150px]">
+      <div className="flex flex-none flex-col gap-2 pr-4 border-r border-white/20 w-[196px]">
         <div className="flex gap-1 p-0.5 border border-white/20 rounded-lg bg-white/[0.06] w-fit">
           {tabBtn("agents", "Agents")}
           {tabBtn("tools", "Tools")}

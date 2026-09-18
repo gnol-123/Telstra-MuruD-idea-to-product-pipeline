@@ -567,6 +567,7 @@ export default function MeshCanvas({
           onDeleteEdge={handleDeleteEdge}
           onUnequipTool={handleUnequipTool}
           onNodeUpdated={handleNodeUpdated}
+          onAfterTurn={reloadCanvas}
         />
       </div>
 
