@@ -344,8 +344,10 @@ not render it, and it would bloat every canvas load.
 
 Regenerates the summary from the source agent's conversation.
 
-→ `200` with the edge, now `is_stale: false`, `messages_behind: 0`, and
-`summarised_through_seq` set to the message count at the moment of the call.
+→ `200` with the edge, `summarised_through_seq` set to the seq of the last
+`complete` message summarised. Normally `is_stale: false`, `messages_behind: 0`;
+if a turn completed while the summariser ran, the response already reports the
+edge stale by that much rather than claiming a freshness it does not have.
 
 The head is read **before** summarising, so a message that arrives mid-call is
 not falsely claimed as covered: the edge correctly goes stale again for it.
@@ -372,11 +374,16 @@ as stale forever and keep prompting a refresh that can never succeed.
 ```
 is_stale  =  summarised_through_seq is null           (never summarised)
              or summarised_through_seq < the source
-                conversation's message count          (it has moved on since)
+                conversation's last complete seq      (it has moved on since)
 ```
 
-So an edge goes stale on its own the moment its source agent says something
-new. Nothing polls; it is a comparison made when you list the edges.
+Both sides count the same rows: the head is the largest `seq` among the source
+conversation's `complete` messages, which is exactly what a refresh summarises
+through. A `running`, `cancelled` or `failed` row does not move the head, so a
+turn the user aborted does not leave the edge stale forever.
+
+So an edge goes stale on its own the moment its source agent finishes saying
+something new. Nothing polls; it is a comparison made when you list the edges.
 
 `GET /edges` is the only place this is reported. **A chat turn injects whatever
 summary exists without checking freshness**, deliberately: an old summary with
@@ -614,6 +621,14 @@ that depends on them, so an edit you make by hand is not silently skipped.
 Agents the orchestrator creates have `tool_policy: auto`. Change one with
 `PATCH .../nodes/{node_id}` if you want to see its tool calls.
 
+The `run_agent` tool refuses a stage that is already running its own turn.
+The refusal is a plain tool-result string handed back to the orchestrator, not
+an HTTP status: two triggers cannot drive the same stage at once. Each
+stage's own bubble persists progressively on its own conversation exactly
+like any other chat turn, so `GET .../nodes/{stage_node_id}/messages` (or
+`attach`) shows a stage filling in live while the orchestrator's own turn is
+still running.
+
 **Long runs.** An unattended run is minutes to tens of minutes. Use
 `/chat/stream`: it emits `tool` events as each stage starts and finishes.
 The turn is **detached**: if the stream drops, the run continues and the
@@ -808,6 +823,8 @@ Closes with an application code rather than a generic failure:
 | `POST` | `/chat` | **yes** | Send a message to an agent node |
 | `POST` | `/chat/stream` | **yes** | The same, streamed as server-sent events |
 | `POST` | `/chat/resume` | **yes** | Continue a turn paused for tool approval |
+| `POST` | `/chat/cancel` | **yes** | Stop a running or parked turn |
+| `GET`  | `/chat/attach` | **yes** | Re-join a running turn's event stream |
 
 ### `POST /chat`
 ```json
@@ -828,14 +845,42 @@ The node implies its project and its template, so one identifier is enough.
   "output": "...",
   "user_message": {
     "id": "uuid", "role": "user", "content": "...",
-    "seq": 1, "status": "complete", "created_at": "..."
+    "seq": 1, "status": "complete", "created_at": "...", "tool_calls": []
   },
   "assistant_message": {
     "id": "uuid", "role": "assistant", "content": "...",
-    "seq": 2, "status": "complete", "created_at": "..."
+    "seq": 2, "status": "complete", "created_at": "...", "tool_calls": [...]
   }
 }
 ```
+
+**Message statuses.** `running` while the turn is in flight, then `complete`,
+`failed` (with `error`), `cancelled` (stopped by the user, partial `content`
+kept), or `awaiting_approval` (paused for a tool decision). Every message
+carries `tool_calls`, an ordered list of the tool events behind that bubble:
+
+```json
+"tool_calls": [
+  {"type": "call",   "tool_call_id": "c1", "name": "run_agent", "args": {"node_id": "..."}, "at": "..."},
+  {"type": "result", "tool_call_id": "c1", "name": "run_agent", "status": "ok", "result_head": "...", "at": "..."}
+]
+```
+
+Render a bubble by interleaving: the `call`/`result` pairs arrived in that
+order relative to the text, and `content` is the text. `result.status` is one
+of `ok`, `error` (the tool raised, or the turn died mid-call), `denied`
+(refused at an approval prompt) or `cancelled` (in flight when the turn was
+stopped, or parked when the pause was abandoned). On every terminal status a
+`call` left open is closed with a synthetic `result`, so a call never spins
+forever. The one exception is `awaiting_approval`: a parked call is genuinely
+still pending, and gets its result when the turn resumes or is cancelled.
+
+`args` is truncated past 2000 characters (`{"_truncated": "..."}`); the full
+per-call record, with timings, is on `GET .../tool-calls`.
+
+**One turn at a time.** `POST /chat`, `/chat/stream` and `/chat/resume`
+return `409 {"detail": "Agent is already running a turn"}` while a turn is
+in flight on that node.
 
 Notes:
 
@@ -857,30 +902,89 @@ Notes:
 Same request body as `/chat`. Returns `text/event-stream`:
 
 ```
-event: start   data: {"conversation_id": "...", "user_message": {...}}
+event: start   data: {"conversation_id": "...", "user_message": {...}, "assistant_message": {...}}
 event: chunk   data: {"text": "The sea is"}
 event: chunk   data: {"text": " a vast..."}
 event: done    data: {"assistant_message": {...}}
 ```
 
 `start` arrives before the model is called, so the client has the conversation
-id and the persisted user message immediately.
+id, the persisted user message, and the `assistant_message` (status `running`,
+empty content) whose `id` is the bubble that will fill in.
 
-`tool` events carry `{"name": "run_agent", "args": {...}}` when a tool is
-called and `{"name": "run_agent", "result_head": "..."}` when it returns.
+`tool` events carry one entry of the `tool_calls` list documented above: a
+`call` when a tool is invoked, a `result` when it returns.
 
 If the model fails part-way an `event: error` is emitted and the assistant
 message is still written with `status: "failed"`. The HTTP status stays `200`,
-because headers are sent before the model is called.
+because headers are sent before the model is called. `error` is not terminal:
+a `done` event carrying that `failed` assistant row always follows it, so keep
+reading until `done` rather than closing on `error`.
 
 The turn is persisted exactly as `/chat` persists it, so idempotency, `seq`
 ordering and history replay are unchanged. Unlike `/chat` it is **not**
-DBOS-checkpointed: a step checkpoints a return value and a stream has none. The
-assembled text is written once the stream drains.
+DBOS-checkpointed: a step checkpoints a return value and a stream has none.
 
-**Streams are detached.** A dropped connection does not cancel the turn. The
-assistant message is persisted when the run finishes; re-read it with
-`GET /projects/{project_id}/nodes/{node_id}/messages`.
+A `denied` or `cancelled` `result` is written to the row but not emitted as a
+`tool` event: it is recorded as the turn settles, after the live stream has
+closed. Re-read the row (`GET .../messages`) for the final list.
+
+**Streams are detached and persisted as they go.** A dropped connection does
+not cancel the turn. The assistant row is inserted at the start with
+`status: "running"` and updated roughly every 1.5 s and on every tool event,
+so a reload never loses more than a second or two of text. To pick a turn
+back up after a reload: `GET .../messages`, and if the last row is `running`,
+call `GET /chat/attach` (below) or keep polling until it isn't.
+
+### `POST /chat/cancel`
+```json
+{ "node_id": "uuid" }
+```
+→ `202`
+```json
+{ "node_id": "uuid", "conversation_id": "uuid", "message_id": "uuid" }
+```
+
+Stops the turn in flight: the model request and any tool call are aborted.
+Nothing is deleted. The bubble finalises as `status: "cancelled"` with the
+text and tool events that had arrived; watch it land via `attach`, polling,
+or Realtime. A cancelled reply is shown but never replayed to the model.
+
+A call still in flight gets a synthetic `result` event with
+`status: "cancelled"`, so the bubble has no half-finished call left on it.
+
+Also works on a turn parked for approval: the pending calls are marked
+`cancelled`, their `call` events get the same synthetic `result`, and the
+bubble closes as `cancelled`.
+
+Cancelling an **orchestrator** also cancels the stage agent it is currently
+driving. Cancelling a **stage agent** on its own stops that stage and hands
+the orchestrator a tool result saying so; the orchestrator decides what to
+do next. To continue after a cancel, send the orchestrator a new prompt
+("continue"): it re-reads the canvas and the stage conversations.
+
+`404` unknown node, `409 {"detail": "Nothing running"}` if there is nothing
+to stop (a second cancel gets this too).
+
+### `GET /chat/attach?node_id=<uuid>`
+
+Re-joins a running turn. `204` when nothing is running for that node.
+Otherwise `text/event-stream` with the same events as `/chat/stream`, so the
+same parser handles both:
+
+```
+event: start   data: {"conversation_id": "...", "assistant_message": {"id": "...", "status": "running", "content": "<everything so far>", "tool_calls": [...]}}
+event: chunk   data: {"text": "..."}
+event: tool    data: {...}
+event: done    data: {"assistant_message": {...}}
+```
+
+`start` on attach carries `assistant_message`; use it rather than
+`user_message` (present only when the run has one): paint the bubble from it,
+then append. Any number of tabs may attach to one turn. A
+consumer that stops reading is dropped (its stream ends without `done`);
+re-attach for a fresh snapshot. Bearer token in the `Authorization` header as
+usual; `fetch` with a header works, `EventSource` does not.
 
 ### Approval
 
@@ -911,14 +1015,19 @@ the paused shape:
 }
 ```
 
+Note: this JSON body from `POST /chat` and `/chat/resume` has no
+`assistant_message` field; read the paused bubble from `.../messages`. The
+SSE `approval_required` event below (from `/chat/stream` and `/chat/attach`)
+does carry it.
+
 **`/chat/stream` emits `event: approval_required` and then ends the stream
 with no `done` event.** This is the thing a frontend will break on if it
 assumes every stream ends in `done`:
 
 ```
-event: start              data: {"conversation_id": "...", "user_message": {...}}
+event: start              data: {"conversation_id": "...", "user_message": {...}, "assistant_message": {...}}
 event: chunk               data: {"text": "I'll need to"}
-event: approval_required   data: {"conversation_id": "...", "pending_calls": [...]}
+event: approval_required   data: {"conversation_id": "...", "pending_calls": [...], "assistant_message": {...}}
 ```
 
 ### `POST /chat/resume`
@@ -941,18 +1050,58 @@ persisted on the turn that paused):
   "conversation_id": "uuid",
   "output": "...",
   "assistant_message": { "id": "uuid", "role": "assistant", "content": "...",
-    "seq": 3, "status": "complete", "created_at": "..." }
+    "seq": 2, "status": "complete", "created_at": "...", "tool_calls": [...] }
 }
 ```
 
+**The resume reuses the paused bubble.** `assistant_message.id` and `.seq`
+are the same row that was `awaiting_approval`, now carrying the full text and
+`tool_calls` for the whole turn, call and resumed continuation together. No
+second assistant row is written.
+
 Denied calls are marked `status: "denied"` in the tool-calls log rather than
-run. `409` if there is nothing parked for that node, or the pause is more than
+run, and their `call` event on the bubble gets a matching `result` with the
+same status. `409` if there is nothing parked for that node, or the pause is more than
 an hour old. `422` if an `approvals` key isn't a pending `tool_call_id` for
 that conversation.
 
 **A resumed run can pause again** (another `tool_policy: "ask"` call further
 in the same turn): the response is then `ApprovalRequiredResponse`, same shape
 as above, and resume again.
+
+### Live status: agents and tool calls
+
+State is on the rows, not on an endpoint:
+
+| Question | Read |
+|---|---|
+| Is this agent running? | `nodes.status` is `running` (else `ready`) via `GET /projects/{id}/nodes` |
+| Which tool call is executing? | `GET .../nodes/{tool_node_id}/tool-calls`, `status: "running"` |
+| What has this bubble got so far? | `GET .../messages`, last row `running`, plus `attach` |
+
+**Default: poll.** While any agent node on the canvas is `running`, refresh
+`GET /projects/{id}/nodes` and the open node's `.../messages` every 2 to 3 s.
+Stop when none is.
+
+**Opt-in: Supabase Realtime.** The `nodes`, `messages` and `tool_calls`
+tables are published, and Postgres Changes enforces RLS, so a subscriber only
+receives their own rows. With the Supabase client the app already uses for
+auth:
+
+```ts
+supabase.channel(`project:${projectId}`)
+  .on("postgres_changes", { event: "*", schema: "public", table: "nodes",
+       filter: `project_id=eq.${projectId}` }, (p) => patchNodeStatus(p.new))
+  .on("postgres_changes", { event: "*", schema: "public", table: "tool_calls",
+       filter: `project_id=eq.${projectId}` }, (p) => patchToolCall(p.new))
+  .on("postgres_changes", { event: "UPDATE", schema: "public", table: "messages" },
+       (p) => refetchMessages(p.new.conversation_id))
+  .subscribe();
+```
+
+Treat a `messages` change as "re-fetch that conversation", not as data:
+Realtime sends whole rows with a size cap, and a long `content` may arrive as
+an `errors` field instead of a payload. Polling remains the fallback.
 
 ---
 
@@ -1049,10 +1198,12 @@ row's token counts cannot silently double-count.
 ### Where a paused turn's tokens go
 
 Nowhere, currently. A turn that pauses for tool approval has already made a
-model request and spent tokens, but the pause returns before `add_message`, so
-no row is written and that usage is dropped. `resume_agent` starts a fresh
-`RunUsage`, so the row eventually written for the resumed turn counts only the
-second request.
+model request and spent tokens, but the row is finalised as
+`awaiting_approval` with no `model`/token fields set, so that usage is
+dropped. The resume reuses that same row (see `POST /chat/resume` above)
+rather than writing a new one, but the resumed run starts a fresh `RunUsage`
+of its own, so the tokens eventually written to the row on completion count
+only the resumed request, not the original one that paused.
 
 `requests` is captured to make this visible: a turn showing `requests: 1` after
 an approval round-trip has lost the first request's tokens. Fixing it means
@@ -1067,11 +1218,11 @@ persisting the pause's usage at park time, which is a schema question (a row in
 |---|---|
 | `200` | OK |
 | `201` | Created |
-| `202` | Accepted (password reset) |
-| `204` | No content (logout) |
+| `202` | Accepted (password reset, `/chat/cancel`) |
+| `204` | No content (logout, `/chat/attach` with nothing running) |
 | `401` | Missing, invalid or expired token; bad credentials |
 | `404` | Not found, **or** not yours |
-| `409` | Conflict: duplicate edge or project name, no pending approval, or approval expired |
+| `409` | Conflict: duplicate edge or project name, turn already running, nothing running to cancel, no pending approval, or approval expired |
 | `422` | Request body failed validation |
 | `500` | Server misconfiguration, e.g. `OAUTH_REDIRECT_URL` unset |
 
