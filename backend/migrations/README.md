@@ -15,6 +15,7 @@ creates, so run it second.
 | `provider.sql` | Switches the default model provider to Ollama, adds the per-node `model` override. Run eighth. |
 | `usage.sql` | Token usage columns on messages and the usage_totals rollup. Run ninth. |
 | `orchestrator.sql` | Canvas tool type and preset, the orchestrator agent type and its prompt. Run tenth. |
+| `turns.sql` | Progressive turn persistence: status constraints and realtime publication for nodes, messages, tool_calls. Run eleventh. |
 | `apply.py` | Runs them all, in order, in one transaction. |
 
 ## Applying
@@ -103,8 +104,17 @@ differently until the user refreshes it. Nothing regenerates automatically, so
 there are no background LLM calls and the user can see when a downstream agent
 is working from older information.
 
+Staleness compares seq to seq, over `complete` rows only. Not
+`conversations.message_count`: that counter includes `running`, `cancelled` and
+`failed` rows, whose text was never summarised, so an edge would read stale
+forever after one cancelled turn.
+
 ```sql
-select e.id, e.summarised_through_seq < c.message_count as is_stale
+select e.id,
+       e.summarised_through_seq < coalesce(
+         (select max(m.seq) from messages m
+          where m.conversation_id = c.id and m.status = 'complete'), 0
+       ) as is_stale
 from edges e
 join nodes n         on n.id = e.source_node_id
 join conversations c on c.node_id = n.id
