@@ -1,12 +1,15 @@
 """Chat endpoints. One agent node, one conversation, transcript replayed each turn."""
 
+import asyncio
+import dataclasses
 import json
+from contextlib import suppress
 from datetime import UTC, datetime, timedelta
 from typing import Any
 from uuid import UUID
 
 from anyio import to_thread
-from fastapi import APIRouter, HTTPException, status
+from fastapi import APIRouter, HTTPException, Response, status
 from fastapi.responses import StreamingResponse
 from pydantic import BaseModel, Field
 from pydantic_ai import DeferredToolRequests, DeferredToolResults
@@ -15,13 +18,29 @@ from pydantic_ai.messages import ModelMessagesTypeAdapter
 from app.config import settings
 from app.repositories.project_repo import Message
 from app.routers.deps import ProjectRepo, ToolRepo, TurnRepos
+from app.services import runs
 from app.services.turns import prepare_turn
-from app.workflows import resume_agent, run_turn, stream_turn
+from app.workflows import (
+    ResumeInput,
+    attach_events,
+    cancel_paused,
+    cancel_turn,
+    close_dangling_calls,
+    run_turn,
+    start_turn,
+)
 
 router = APIRouter(prefix="/chat", tags=["chat"])
 
+_BUSY = HTTPException(
+    status_code=status.HTTP_409_CONFLICT, detail="Agent is already running a turn"
+)
+
 # A parked run older than this is abandoned rather than resumed.
 _PENDING_RUN_MAX_AGE = timedelta(hours=1)
+
+# Bound on waiting for a just-registered turn's row before answering a cancel.
+_CANCEL_ROW_WAIT_S = 5.0
 
 
 class ChatRequest(BaseModel):
@@ -38,6 +57,7 @@ class ChatMessage(BaseModel):
     seq: int
     status: str
     created_at: datetime
+    tool_calls: list[dict[str, Any]] = []
 
     @classmethod
     def of(cls, m: Message) -> "ChatMessage":
@@ -48,6 +68,7 @@ class ChatMessage(BaseModel):
             seq=m.seq,
             status=m.status,
             created_at=m.created_at,
+            tool_calls=m.tool_calls,
         )
 
 
@@ -134,6 +155,59 @@ async def _park_pending_run(tool_repo: ToolRepo, conversation_id: str, messages:
     await to_thread.run_sync(lambda: tool_repo.set_pending_run(conversation_id, payload))
 
 
+def _make_on_paused(
+    tool_repo: ToolRepo,
+    *,
+    project_id: str,
+    conversation_id: str,
+    agent_node_id: str,
+    owner_by_tool: dict[str, str],
+):
+    """on_paused closure shared by chat, chat_stream and chat_resume.
+
+    run_turn/start_turn call this inside the task, so pending calls are
+    recorded and the run parked before the caller ever sees ``turn.pending``.
+    """
+
+    async def on_paused(pending: DeferredToolRequests, all_messages: list) -> None:
+        await to_thread.run_sync(
+            lambda: _record_pending_calls(
+                tool_repo,
+                pending,
+                project_id=project_id,
+                conversation_id=conversation_id,
+                agent_node_id=agent_node_id,
+                owner_by_tool=owner_by_tool,
+            )
+        )
+        await _park_pending_run(tool_repo, conversation_id, all_messages)
+
+    return on_paused
+
+
+def _sse(event: str, payload: dict) -> str:
+    return f"event: {event}\ndata: {json.dumps(payload, default=str)}\n\n"
+
+
+async def _events(run):
+    """SSE events for a run: start, then chunk/tool/done/error, or approval_required."""
+    async for event, payload in attach_events(run):
+        if event == "paused":
+            yield _sse(
+                "approval_required",
+                {
+                    "conversation_id": run.conversation_id,
+                    "pending_calls": [c.model_dump() for c in _pending_calls(payload["pending"])],
+                    "assistant_message": payload["assistant_message"],
+                },
+            )
+            return
+        yield _sse(event, payload)
+
+
+_SSE_HEADERS = {"Cache-Control": "no-cache", "X-Accel-Buffering": "no"}
+
+
 @router.post("", response_model=None)
 async def chat(
     req: ChatRequest, repo: ProjectRepo, turn_repos: TurnRepos
@@ -147,32 +221,36 @@ async def chat(
         lambda: trepo.get_or_create_conversation(node.id, node.project_id)
     )
     prepared = await prepare_turn(turn_repos, node, conversation_id)
-
-    turn = await run_turn(
-        trepo,
-        conversation_id,
-        node.system_prompt,
-        node.model,
-        req.prompt,
-        client_token=req.client_token,
-        # Only the LLM call becomes durable; persistence is identical either way.
-        durable=bool(settings.dbos_database_url),
-        instructions=prepared.instructions,
-        toolsets=prepared.toolsets,
+    on_paused = _make_on_paused(
+        tool_repo,
+        project_id=node.project_id,
+        conversation_id=conversation_id,
+        agent_node_id=node.id,
+        owner_by_tool=prepared.tools.owner_by_tool,
     )
 
-    if turn.pending is not None:
-        await to_thread.run_sync(
-            lambda: _record_pending_calls(
-                tool_repo,
-                turn.pending,
-                project_id=node.project_id,
-                conversation_id=conversation_id,
-                agent_node_id=node.id,
-                owner_by_tool=prepared.tools.owner_by_tool,
-            )
+    try:
+        turn = await run_turn(
+            trepo,
+            conversation_id,
+            node.system_prompt,
+            node.model,
+            req.prompt,
+            node_id=node.id,
+            project_id=node.project_id,
+            tool_repo=tool_repo,
+            client_token=req.client_token,
+            # Only the LLM call becomes durable; persistence is identical either way.
+            durable=bool(settings.dbos_database_url),
+            instructions=prepared.instructions,
+            toolsets=prepared.toolsets,
+            on_paused=on_paused,
         )
-        await _park_pending_run(tool_repo, conversation_id, turn.all_messages)
+    except runs.TurnBusy:
+        raise _BUSY from None
+
+    if turn.pending is not None:
+        # on_paused already recorded the pending calls and parked the run.
         return ApprovalRequiredResponse(
             node_id=UUID(node.id),
             conversation_id=UUID(conversation_id),
@@ -200,6 +278,8 @@ async def chat_stream(
     Checkpointed on the same terms as POST /chat: DBOS configured and no tools.
 
     The turn runs detached: a client disconnect stops the events, not the run.
+    Busy raises 409 before any headers are sent, since start_turn fails before
+    the StreamingResponse is built.
     """
     node = await to_thread.run_sync(repo.get_agent_node, str(req.node_id))
     if node is None:
@@ -210,51 +290,95 @@ async def chat_stream(
         lambda: trepo.get_or_create_conversation(node.id, node.project_id)
     )
     prepared = await prepare_turn(turn_repos, node, conversation_id)
+    on_paused = _make_on_paused(
+        tool_repo,
+        project_id=node.project_id,
+        conversation_id=conversation_id,
+        agent_node_id=node.id,
+        owner_by_tool=prepared.tools.owner_by_tool,
+    )
 
-    async def on_paused(pending: DeferredToolRequests, all_messages: list) -> None:
-        await to_thread.run_sync(
-            lambda: _record_pending_calls(
-                tool_repo,
-                pending,
-                project_id=node.project_id,
-                conversation_id=conversation_id,
-                agent_node_id=node.id,
-                owner_by_tool=prepared.tools.owner_by_tool,
-            )
-        )
-        await _park_pending_run(tool_repo, conversation_id, all_messages)
-
-    async def events():
-        async for event, payload in stream_turn(
+    try:
+        run = await start_turn(
             trepo,
             conversation_id,
             node.system_prompt,
             node.model,
             req.prompt,
+            node_id=node.id,
+            project_id=node.project_id,
+            tool_repo=tool_repo,
             client_token=req.client_token,
             durable=bool(settings.dbos_database_url),
             instructions=prepared.instructions,
             toolsets=prepared.toolsets,
             on_paused=on_paused,
-        ):
-            if event == "paused":
-                approval_payload = {
-                    "conversation_id": conversation_id,
-                    "pending_calls": [c.model_dump() for c in _pending_calls(payload["pending"])],
-                }
-                yield f"event: approval_required\ndata: {json.dumps(approval_payload)}\n\n"
-                # No done event: the turn has not produced a reply.
-                return
-            yield f"event: {event}\ndata: {json.dumps(payload, default=str)}\n\n"
+        )
+    except runs.TurnBusy:
+        raise _BUSY from None
 
-    return StreamingResponse(
-        events(),
-        media_type="text/event-stream",
-        headers={
-            "Cache-Control": "no-cache",
-            # Stops nginx-style proxies buffering the stream into one response.
-            "X-Accel-Buffering": "no",
-        },
+    return StreamingResponse(_events(run), media_type="text/event-stream", headers=_SSE_HEADERS)
+
+
+@router.get("/attach")
+async def chat_attach(node_id: UUID, repo: ProjectRepo) -> Response:
+    """Re-join a running turn's stream.
+
+    Same events as /chat/stream; ``start`` carries the assistant row so far
+    instead of the user message. 204 when nothing is running.
+    """
+    node = await to_thread.run_sync(repo.get_agent_node, str(node_id))
+    if node is None:
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Agent not found")
+    conversation_id = await to_thread.run_sync(repo.get_conversation_for_node, node.id)
+    run = runs.get(conversation_id) if conversation_id else None
+    # message is None between register() and the first DB insert: nothing to
+    # snapshot yet, so treat it the same as no run.
+    if run is None or run.message is None:
+        return Response(status_code=status.HTTP_204_NO_CONTENT)
+    return StreamingResponse(_events(run), media_type="text/event-stream", headers=_SSE_HEADERS)
+
+
+class CancelRequest(BaseModel):
+    node_id: UUID
+
+
+class CancelResponse(BaseModel):
+    node_id: UUID
+    conversation_id: UUID
+    message_id: UUID
+
+
+@router.post("/cancel", response_model=CancelResponse, status_code=status.HTTP_202_ACCEPTED)
+async def chat_cancel(
+    req: CancelRequest, repo: ProjectRepo, turn_repos: TurnRepos
+) -> CancelResponse:
+    """Stop a running or parked turn. Nothing is deleted; the partial reply stays."""
+    node = await to_thread.run_sync(repo.get_agent_node, str(req.node_id))
+    if node is None:
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Agent not found")
+    conversation_id = await to_thread.run_sync(repo.get_conversation_for_node, node.id)
+    if conversation_id is None:
+        raise HTTPException(status_code=status.HTTP_409_CONFLICT, detail="Nothing running")
+    run = runs.get(conversation_id)
+    if run is not None:
+        await cancel_turn(run)
+        if run.message is None and run.task is not None:
+            # Registered before its assistant row was written. Wait, bounded,
+            # for the row so the response can name it.
+            with suppress(TimeoutError, asyncio.CancelledError):
+                await asyncio.wait_for(asyncio.shield(run.task), _CANCEL_ROW_WAIT_S)
+    if run is not None and run.message is not None:
+        return CancelResponse(
+            node_id=UUID(node.id),
+            conversation_id=UUID(conversation_id),
+            message_id=UUID(run.message.id),
+        )
+    parked = await cancel_paused(turn_repos.project, turn_repos.tool, conversation_id, node.id)
+    if parked is None:
+        raise HTTPException(status_code=status.HTTP_409_CONFLICT, detail="Nothing running")
+    return CancelResponse(
+        node_id=UUID(node.id), conversation_id=UUID(conversation_id), message_id=UUID(parked.id)
     )
 
 
@@ -289,6 +413,13 @@ async def chat_resume(
     payload, pending_run_at = pending_run
     if datetime.now(UTC) - pending_run_at > _PENDING_RUN_MAX_AGE:
         await to_thread.run_sync(lambda: tool_repo.set_pending_run(conversation_id, None))
+        awaiting = await to_thread.run_sync(
+            lambda: trepo.latest_message_with_status(conversation_id, "awaiting_approval")
+        )
+        if awaiting is not None:
+            await to_thread.run_sync(
+                lambda: trepo.update_message(awaiting.id, status="failed", error="approval expired")
+            )
         raise HTTPException(status_code=status.HTTP_409_CONFLICT, detail="Pending approval expired")
 
     for tool_call_id in req.approvals:
@@ -304,30 +435,50 @@ async def chat_resume(
     history = ModelMessagesTypeAdapter.validate_json(payload)
     deferred_results = DeferredToolResults(approvals=req.approvals)
 
+    awaiting = await to_thread.run_sync(
+        lambda: trepo.latest_message_with_status(conversation_id, "awaiting_approval")
+    )
+    if awaiting is None:
+        # Do not clear pending_run here: a resume can land between on_paused's
+        # write and the row flip, while a turn is legitimately pausing again.
+        raise HTTPException(status_code=status.HTTP_409_CONFLICT, detail="No pending approval")
+
+    # In memory only: start_turn seeds run.events from this row, so the denials
+    # ride along and every later write, finalise included, preserves them. Not
+    # written here: a TurnBusy below would leave them on a row whose calls are
+    # still pending_approval, and a later resume would render an approved call
+    # as denied.
+    denied = {tid for tid, approved in req.approvals.items() if not approved}
+    if denied:
+        events = close_dangling_calls(awaiting.tool_calls, status="denied", only=denied)
+        awaiting = dataclasses.replace(awaiting, tool_calls=events)
+
     prepared = await prepare_turn(turn_repos, node, conversation_id)
+    on_paused = _make_on_paused(
+        tool_repo,
+        project_id=node.project_id,
+        conversation_id=conversation_id,
+        agent_node_id=node.id,
+        owner_by_tool=prepared.tools.owner_by_tool,
+    )
 
     try:
-        turn = await resume_agent(
+        turn = await run_turn(
+            trepo,
+            conversation_id,
             node.system_prompt,
             node.model,
-            history,
-            deferred_results,
-            prepared.toolsets,
+            None,
+            node_id=node.id,
+            project_id=node.project_id,
+            tool_repo=tool_repo,
+            instructions=prepared.instructions,
+            toolsets=prepared.toolsets,
+            on_paused=on_paused,
+            resume=ResumeInput(history=history, deferred=deferred_results, message=awaiting),
         )
-    except Exception as exc:
-        await to_thread.run_sync(lambda: tool_repo.set_pending_run(conversation_id, None))
-        turn_error = str(exc)
-        assistant_message = await to_thread.run_sync(
-            lambda: trepo.add_message(
-                conversation_id, "assistant", "", status="failed", error=turn_error
-            )
-        )
-        return ResumeResponse(
-            node_id=UUID(node.id),
-            conversation_id=UUID(conversation_id),
-            output="",
-            assistant_message=ChatMessage.of(assistant_message),
-        )
+    except runs.TurnBusy:
+        raise _BUSY from None
 
     # Decisions are settled: denied were answered without a result, approved ran.
     await to_thread.run_sync(
@@ -335,18 +486,7 @@ async def chat_resume(
     )
 
     if turn.pending is not None:
-        # Second pause. Same path as the first; pending_run is overwritten, not cleared.
-        await to_thread.run_sync(
-            lambda: _record_pending_calls(
-                tool_repo,
-                turn.pending,
-                project_id=node.project_id,
-                conversation_id=conversation_id,
-                agent_node_id=node.id,
-                owner_by_tool=prepared.tools.owner_by_tool,
-            )
-        )
-        await _park_pending_run(tool_repo, conversation_id, turn.all_messages)
+        # Second pause. on_paused already recorded and parked it.
         return ApprovalRequiredResponse(
             node_id=UUID(node.id),
             conversation_id=UUID(conversation_id),
@@ -355,28 +495,11 @@ async def chat_resume(
 
     await to_thread.run_sync(lambda: tool_repo.set_pending_run(conversation_id, None))
 
-    assistant_message = await to_thread.run_sync(
-        lambda: trepo.add_message(
-            conversation_id,
-            "assistant",
-            turn.output,
-            model=turn.model,
-            input_tokens=turn.input_tokens,
-            output_tokens=turn.output_tokens,
-            reasoning_tokens=turn.reasoning_tokens,
-            cache_read_tokens=turn.cache_read_tokens,
-            cache_write_tokens=turn.cache_write_tokens,
-            requests=turn.requests,
-            status="failed" if turn.failed else "complete",
-            error=turn.error,
-        )
-    )
-
     return ResumeResponse(
         node_id=UUID(node.id),
         conversation_id=UUID(conversation_id),
         output=turn.output,
-        assistant_message=ChatMessage.of(assistant_message),
+        assistant_message=ChatMessage.of(turn.assistant_message),
     )
 
 
