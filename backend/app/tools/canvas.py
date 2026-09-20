@@ -24,12 +24,21 @@ from app.workflows import refresh_outbound, run_turn
 log = logging.getLogger(__name__)
 
 CANVAS_SLUG = "canvas"
-TOOL_NAMES = ("list_canvas", "create_agent", "connect", "refresh_context", "run_agent")
+TOOL_NAMES = (
+    "list_canvas",
+    "create_agent",
+    "connect",
+    "refresh_context",
+    "give_environment",
+    "run_agent",
+)
 
 # Boundary box to keep margin between boxes
 _STAGE_DX = 520
 _STAGE_DY = 320
 _ROW_TOLERANCE = 150
+# An agent's own environment sits to its right, clear of the tool column.
+_ENV_DX = 260
 # Head of a stage reply returned to the orchestrator.
 _RESULT_HEAD = 6000
 
@@ -47,8 +56,28 @@ def _is_stale(edge, source_head: int) -> bool:
     return source_head > edge.summarised_through_seq
 
 
+def _user_env_config() -> dict:
+    """Config for an agent's own sandbox. Mirrors scratch_config with role=user.
+
+    settings is imported here, not at module scope: this module is itself
+    imported lazily from prepare_turn to avoid an import cycle, and pulling
+    app.config in at module scope reorders initialisation enough to break
+    environment assembly (tests/test_chat_environments.py catches it).
+    """
+    from app.config import settings
+
+    return {
+        "runtime": "e2b",
+        "role": "user",
+        "sandbox_id": None,
+        "template": settings.e2b_template,
+        "idle_timeout_s": settings.environment_idle_timeout_s,
+        "preview_ports": [],
+    }
+
+
 class CanvasTools:
-    """The five functions, bound to one orchestrator node and its turn repos."""
+    """The six functions, bound to one orchestrator node and its turn repos."""
 
     def __init__(self, repos: TurnRepositories, orchestrator: Node) -> None:
         self._repos = repos
@@ -200,6 +229,58 @@ class CanvasTools:
             )
         return f"Refreshed {len(edges)} context edge(s) out of {node.name}."
 
+    async def give_environment(self, node_id: str, name: str = "") -> str:
+        """Give an agent its own sandbox, separate from the shared scratch space.
+
+        Use this for an agent that needs to install packages, run a server or
+        otherwise work without disturbing the other agents: the coding agent is
+        the usual case. The agent keeps its scratch access, so it can still read
+        what earlier stages wrote there; this adds a second, private sandbox on
+        top. An agent that already has one is left alone."""
+        repo, env_repo = self._repos.project, self._repos.env
+        node = await to_thread.run_sync(repo.get_agent_node, node_id)
+        if node is None or node.project_id != self._orch.project_id:
+            return f"Refused: agent {node_id} not found on this canvas."
+
+        # Already has one? Adding a second would give the model two indistinct
+        # sandboxes and no rule for choosing between them.
+        env_ids = await to_thread.run_sync(repo.list_inbound_environment_node_ids, node.id)
+        existing = [
+            e
+            for e in (
+                await to_thread.run_sync(
+                    lambda: [env_repo.get_environment_node(i) for i in env_ids]
+                )
+            )
+            if e is not None and e.role == "user"
+        ]
+        if existing:
+            return f"{node.name} already has its own environment: {existing[0].name}."
+
+        env_name = (name or f"{node.name} Environment").strip()[:200]
+        env_id = await to_thread.run_sync(
+            lambda: env_repo.create_environment_node(
+                self._orch.project_id,
+                env_name,
+                _user_env_config(),
+                # auto, not the API default of ask: a stage agent driven by an
+                # orchestrator has nobody to approve its shell commands.
+                tool_policy="auto",
+                position_x=node.position_x + _ENV_DX,
+                position_y=node.position_y,
+            )
+        )
+        try:
+            await to_thread.run_sync(lambda: repo.create_edge(env_id, node.id, "environment"))
+        except DuplicateEdge:
+            pass
+        log.info("canvas: %s gave %s its own environment %s", self._orch.id, node.id, env_id)
+        return (
+            f"Gave {node.name} its own environment '{env_name}' (id {env_id}). It starts on "
+            "first use. The shared scratch space is still wired, so earlier stages' files "
+            "remain readable."
+        )
+
     async def run_agent(self, node_id: str, prompt: str) -> str:
         """Send prompt to an agent and wait for its reply. The agent runs unattended
         with its own tools and receives the context summaries wired into it.
@@ -278,7 +359,9 @@ async def assemble_canvas(
     reversible, running an agent is the step that spends. refresh_context is
     on the cheap side too, a summariser call over one transcript, and gating
     it would interrupt the pause/resume flow for bookkeeping the user has no
-    reason to adjudicate.
+    reason to adjudicate. give_environment writes a row at status pending; the
+    sandbox itself only starts on first use, inside a run_agent call that is
+    already gated, so the spend stays behind the same approval.
     """
     ready = [n for n in nodes if n.status == "ready"]
     if not ready:
