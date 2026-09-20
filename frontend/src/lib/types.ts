@@ -15,6 +15,7 @@ export interface AgentType {
   id: string;
   slug: string;
   name: string;
+  default_presets?: string[];
 }
 
 export interface Project {
@@ -24,9 +25,14 @@ export interface Project {
 }
 
 export type ToolPolicy = "ask" | "auto";
-export type NodeKind = "agent" | "tool";
-export type EdgeKind = "context" | "tool";
+export type NodeKind = "agent" | "tool" | "environment";
+export type EdgeKind = "context" | "tool" | "environment";
 export type ToolNodeStatus = "ready" | "error" | "pending" | string;
+export type EnvironmentStatus = "pending" | "provisioning" | "ready" | "stopped" | "error" | string;
+// "ready" is the only value the backend actually writes for an agent node
+// today (see NodeResponse in routers/projects.py) — "running" is here for
+// when the backend starts setting it during a turn.
+export type AgentNodeStatus = "ready" | "running" | "error" | string;
 
 export interface AgentNode {
   kind: "agent";
@@ -35,6 +41,12 @@ export interface AgentNode {
   name: string;
   agent_slug: string;
   tool_policy: ToolPolicy;
+  model?: string;
+  // Present on every GET /projects/{id}/nodes row as of the node-status
+  // backend change — optional here because older cached responses (or a
+  // node created before that change rolled out) may not carry it.
+  status?: AgentNodeStatus;
+  status_detail?: string | null;
   position_x?: number;
   position_y?: number;
 }
@@ -53,8 +65,32 @@ export interface ToolNode {
   position_y?: number;
 }
 
-// A project's canvas holds both kinds mixed together; tell them apart by `kind`.
-export type ProjectNode = AgentNode | ToolNode;
+// A "real sandbox" node: shell + filesystem + a URL for whatever gets
+// served on a port. See API.md's Environments section. Every project also
+// gets one automatically (role: "scratch"); ones created from the UI are
+// role: "user".
+export interface EnvironmentNode {
+  kind: "environment";
+  id: string;
+  project_id: string;
+  name: string;
+  runtime: string; // "e2b"
+  role: "user" | "scratch";
+  status: EnvironmentStatus;
+  status_detail: string | null;
+  tool_policy: ToolPolicy;
+  position_x?: number;
+  position_y?: number;
+  sandbox_id: string | null;
+  template: string;
+  idle_timeout_s: number;
+  preview_ports: number[];
+  description?: string | null;
+}
+
+// A project's canvas holds all three kinds mixed together; tell them apart
+// by `kind`.
+export type ProjectNode = AgentNode | ToolNode | EnvironmentNode;
 
 export function isAgentNode(n: ProjectNode): n is AgentNode {
   return n.kind === "agent";
@@ -62,6 +98,10 @@ export function isAgentNode(n: ProjectNode): n is AgentNode {
 
 export function isToolNode(n: ProjectNode): n is ToolNode {
   return n.kind === "tool";
+}
+
+export function isEnvironmentNode(n: ProjectNode): n is EnvironmentNode {
+  return n.kind === "environment";
 }
 
 export interface Edge {
@@ -100,6 +140,18 @@ export interface ToolType {
   auth_kind: ToolAuthKind;
 }
 
+// A ready-to-instantiate tool or skill — names the tool_slug it
+// instantiates and the config copied onto a node created from it.
+// This is what an agent type's `default_presets` refers to by slug.
+export interface ToolPreset {
+  id: string;
+  slug: string;
+  name: string;
+  description: string;
+  tool_slug: string;
+  config: Record<string, unknown>;
+}
+
 export type ToolCallStatus = "pending_approval" | "running" | "ok" | "error" | "denied";
 
 export interface ToolCall {
@@ -124,8 +176,17 @@ export interface ChatMessage {
   role: "user" | "assistant";
   content: string;
   seq: number;
-  status: "complete" | "failed" | "pending";
+  // "running" while a streamed turn is still filling in (see /chat/attach)
+  // and "cancelled" once /chat/cancel stops it — both new since the
+  // rt-stream-checkpoint change.
+  status: "complete" | "failed" | "pending" | "running" | "cancelled";
   created_at: string;
+}
+
+export interface CancelChatResponse {
+  node_id: string;
+  conversation_id: string;
+  message_id: string;
 }
 
 export interface ChatResponse {
@@ -165,3 +226,49 @@ export interface ResumeResponse {
 }
 
 export type ResumeResult = ResumeResponse | ApprovalRequiredResponse;
+
+// -------------------- Environments: files & preview --------------------
+
+export interface EnvironmentFileEntry {
+  name: string;
+  type: "dir" | "file" | "symlink";
+  path: string;
+  size: number;
+}
+
+export interface EnvironmentFilesResponse {
+  path: string;
+  entries: EnvironmentFileEntry[];
+}
+
+export interface EnvironmentFileContent {
+  path: string;
+  content: string;
+  truncated: boolean;
+}
+
+export interface EnvironmentPreview {
+  port: number;
+  url: string;
+}
+
+// -------------------- Usage --------------------
+
+export interface UsageByModel {
+  model: string;
+  input_tokens: number;
+  output_tokens: number;
+  reasoning_tokens: number;
+  cache_read_tokens: number;
+  cache_write_tokens: number;
+  requests: number;
+  message_count: number;
+}
+
+export interface UsageTotals {
+  project_id: string | null;
+  by_model: UsageByModel[];
+  input_tokens: number;
+  output_tokens: number;
+  message_count: number;
+}
