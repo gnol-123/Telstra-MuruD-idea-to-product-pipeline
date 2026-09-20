@@ -61,7 +61,7 @@ async def prepare_turn(
             )
         elif canvas_nodes:
             tools = merge_assembled(
-                tools, await assemble_canvas(repos, node, canvas_nodes, ask=ask)
+                tools, await assemble_canvas(repos, node, canvas_nodes, conversation_id, ask=ask)
             )
 
     env_ids = await to_thread.run_sync(repo.list_inbound_environment_node_ids, node.id)

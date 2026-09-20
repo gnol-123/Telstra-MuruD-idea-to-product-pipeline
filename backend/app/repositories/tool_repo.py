@@ -358,6 +358,17 @@ class ToolRepository:
             .execute()
         )
 
+    def cancel_calls(self, conversation_id: str, from_statuses: list[str]) -> None:
+        """Mark every call in the given statuses cancelled. Used when a turn is stopped."""
+        (
+            self._db.table("tool_calls")
+            .update({"status": "cancelled"})
+            .eq("conversation_id", conversation_id)
+            .eq("owner_id", self._user_id)
+            .in_("status", from_statuses)
+            .execute()
+        )
+
     def list_calls(self, tool_node_id: str, limit: int = 50) -> list[dict[str, Any]]:
         rows = (
             self._db.table("tool_calls")

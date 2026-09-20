@@ -17,6 +17,7 @@ from app.repositories.project_repo import DuplicateEdge, Node
 from app.repositories.tool_repo import ToolNode
 from app.routers.deps import TurnRepositories
 from app.routers.projects import provision_agent
+from app.services import runs
 from app.services.turns import prepare_turn
 from app.tools.assembly import AssembledTools
 from app.workflows import refresh_outbound, run_turn
@@ -79,9 +80,10 @@ def _user_env_config() -> dict:
 class CanvasTools:
     """The six functions, bound to one orchestrator node and its turn repos."""
 
-    def __init__(self, repos: TurnRepositories, orchestrator: Node) -> None:
+    def __init__(self, repos: TurnRepositories, orchestrator: Node, conversation_id: str) -> None:
         self._repos = repos
         self._orch = orchestrator
+        self._orch_conversation_id = conversation_id
 
     # -- reads ---------------------------------------------------------------
 
@@ -114,7 +116,8 @@ class CanvasTools:
                         "name": n.name,
                         "agent_slug": n.agent_slug,
                         "tool_policy": n.tool_policy,
-                        "message_count": heads.get(n.id, 0),
+                        # A seq, not a count: 0 means the agent has said nothing yet.
+                        "last_complete_seq": heads.get(n.id, 0),
                         "is_orchestrator": n.id == self._orch.id,
                     }
                     for n in agents
@@ -308,17 +311,27 @@ class CanvasTools:
         instructions = "\n\n".join(p for p in (UNATTENDED_INSTRUCTION, prepared.instructions) if p)
 
         log.info("canvas: %s running %s", self._orch.id, target.id)
-        turn = await run_turn(
-            repo,
-            conversation_id,
-            target.system_prompt,
-            target.model,
-            prompt,
-            durable=False,
-            instructions=instructions,
-            toolsets=prepared.toolsets,
-        )
+        parent = runs.get(self._orch_conversation_id)
+        try:
+            turn = await run_turn(
+                repo,
+                conversation_id,
+                target.system_prompt,
+                target.model,
+                prompt,
+                node_id=target.id,
+                project_id=target.project_id,
+                tool_repo=tool_repo,
+                durable=False,
+                instructions=instructions,
+                toolsets=prepared.toolsets,
+                parent=parent,
+            )
+        except runs.TurnBusy:
+            return f"Refused: {target.name} is already running a turn."
 
+        if turn.assistant_message is not None and turn.assistant_message.status == "cancelled":
+            return f"Cancelled by user: {target.name}. Its partial reply is on its conversation."
         if turn.pending is not None:
             return (
                 f"{target.name} paused for a tool approval and cannot be driven unattended. "
@@ -351,7 +364,12 @@ class CanvasTools:
 
 
 async def assemble_canvas(
-    repos: TurnRepositories, orchestrator: Node, nodes: list[ToolNode], *, ask: bool
+    repos: TurnRepositories,
+    orchestrator: Node,
+    nodes: list[ToolNode],
+    conversation_id: str,
+    *,
+    ask: bool,
 ) -> AssembledTools:
     """One canvas toolset for the turn. A second canvas box is reported unavailable.
 
@@ -368,7 +386,7 @@ async def assemble_canvas(
         return AssembledTools(unavailable=[n.name for n in nodes])
     primary, extra = ready[0], [*ready[1:], *(n for n in nodes if n.status != "ready")]
 
-    toolset = CanvasTools(repos, orchestrator).toolset()
+    toolset = CanvasTools(repos, orchestrator, conversation_id).toolset()
     if ask:
         toolset = ApprovalRequiredToolset(
             toolset, approval_required_func=lambda ctx, tool, args: tool.name == "run_agent"

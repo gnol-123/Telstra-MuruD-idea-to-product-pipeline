@@ -91,6 +91,11 @@ class Message:
     seq: int
     status: str
     created_at: str
+    # Ordered tool events for the bubble. Empty on user rows.
+    tool_calls: list[dict[str, Any]] = field(default_factory=list)
+
+
+_MESSAGE_COLUMNS = "id, role, content, seq, status, created_at, tool_calls"
 
 
 def _to_message(row: dict[str, Any]) -> Message:
@@ -101,6 +106,7 @@ def _to_message(row: dict[str, Any]) -> Message:
         seq=row["seq"],
         status=row["status"],
         created_at=row["created_at"],
+        tool_calls=row.get("tool_calls") or [],
     )
 
 
@@ -590,7 +596,7 @@ class ProjectRepository:
         """
         rows = (
             self._db.table("messages")
-            .select("id, role, content, seq, status, created_at")
+            .select(_MESSAGE_COLUMNS)
             .eq("conversation_id", conversation_id)
             .eq("owner_id", self._user_id)
             .order("seq", desc=True)
@@ -605,7 +611,7 @@ class ProjectRepository:
         """Messages past a seq, oldest first. For polling a transcript."""
         rows = (
             self._db.table("messages")
-            .select("id, role, content, seq, status, created_at")
+            .select(_MESSAGE_COLUMNS)
             .eq("conversation_id", conversation_id)
             .eq("owner_id", self._user_id)
             .gt("seq", after_seq)
@@ -670,7 +676,7 @@ class ProjectRepository:
     def _find_by_client_token(self, conversation_id: str, client_token: str) -> Message | None:
         rows = (
             self._db.table("messages")
-            .select("id, role, content, seq, status, created_at")
+            .select(_MESSAGE_COLUMNS)
             .eq("conversation_id", conversation_id)
             .eq("client_token", client_token)
             .eq("owner_id", self._user_id)
@@ -679,19 +685,85 @@ class ProjectRepository:
         ).data
         return _to_message(rows[0]) if rows else None
 
+    _UPDATABLE = {
+        "content",
+        "tool_calls",
+        "status",
+        "error",
+        "model",
+        "input_tokens",
+        "output_tokens",
+        "reasoning_tokens",
+        "cache_read_tokens",
+        "cache_write_tokens",
+        "requests",
+    }
+
+    def update_message(self, message_id: str, **fields: Any) -> Message:
+        """Update a message in place. Only the driver calls this, on its own running row."""
+        payload = {k: v for k, v in fields.items() if k in self._UPDATABLE}
+        rows = (
+            self._db.table("messages")
+            .update(payload)
+            .eq("id", message_id)
+            .eq("owner_id", self._user_id)
+            .execute()
+        ).data
+        return _to_message(rows[0])
+
+    def latest_message_with_status(self, conversation_id: str, status: str) -> Message | None:
+        rows = (
+            self._db.table("messages")
+            .select(_MESSAGE_COLUMNS)
+            .eq("conversation_id", conversation_id)
+            .eq("owner_id", self._user_id)
+            .eq("status", status)
+            .order("seq", desc=True)
+            .limit(1)
+            .execute()
+        ).data
+        return _to_message(rows[0]) if rows else None
+
+    def set_agent_status(self, node_id: str, status: str) -> None:
+        (
+            self._db.table("nodes")
+            .update({"status": status})
+            .eq("id", node_id)
+            .eq("owner_id", self._user_id)
+            .eq("kind", "agent")
+            .execute()
+        )
+
     # -- stale context ---------------------------------------------------------
 
     def get_conversation_head(self, node_id: str) -> int:
-        """Message count for this node's conversation. 0 when it has none."""
+        """Last complete seq in this node's conversation. 0 when there is none.
+
+        Complete rows only, matching what refresh_edge summarises through: a
+        cancelled or running tail would otherwise read as permanently stale.
+        Not conversations.message_count, which counts every row.
+        """
         rows = (
             self._db.table("conversations")
-            .select("message_count")
+            .select("id")
             .eq("owner_id", self._user_id)
             .eq("node_id", node_id)
             .limit(1)
             .execute()
         ).data
-        return rows[0]["message_count"] if rows else 0
+        if not rows:
+            return 0
+        seqs = (
+            self._db.table("messages")
+            .select("seq")
+            .eq("owner_id", self._user_id)
+            .eq("conversation_id", rows[0]["id"])
+            .eq("status", "complete")
+            .order("seq", desc=True)
+            .limit(1)
+            .execute()
+        ).data
+        return seqs[0]["seq"] if seqs else 0
 
     # -- usage -----------------------------------------------------------------
 

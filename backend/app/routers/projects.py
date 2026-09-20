@@ -28,7 +28,7 @@ from app.services.models import ModelsUnavailable, list_models
 from app.tools.base import ToolContext
 from app.tools.oauth_refresh import TokenExchangeError, with_access_token
 from app.tools.registry import get_spec, platform_secrets
-from app.workflows import refresh_edge
+from app.workflows import cancel_for_node, cancel_for_project, refresh_edge
 
 router = APIRouter(tags=["projects"])
 
@@ -101,6 +101,10 @@ async def _wrong_kind_detail(node_id: UUID, tool_repo: ToolRepo, env_repo: EnvRe
 @router.delete("/projects/{project_id}", status_code=status.HTTP_204_NO_CONTENT)
 async def delete_project(project_id: UUID, repo: ProjectRepo, env_repo: EnvRepo) -> None:
     """Delete a project, cascading to its nodes, edges, conversations and messages."""
+    # Stop every running turn first: otherwise it keeps writing into a
+    # conversation the delete is about to cascade away.
+    await cancel_for_project(str(project_id))
+
     # Every environment on the canvas, before the rows cascade away and the
     # sandbox ids go with them.
     environments = await to_thread.run_sync(env_repo.list_environment_nodes, str(project_id))
@@ -527,6 +531,11 @@ async def delete_node(
     project_id: UUID, node_id: UUID, repo: ProjectRepo, env_repo: EnvRepo
 ) -> None:
     """Remove a node of any kind, cascading to its conversation, transcript and secrets."""
+    # Stop a running turn first: only agent nodes have a conversation, so a
+    # tool/environment node's None id is a no-op.
+    conversation_id = await to_thread.run_sync(repo.get_conversation_for_node, str(node_id))
+    await cancel_for_node(conversation_id)
+
     # Kill the sandbox first: the row is about to go, and nothing else knows
     # the id. teardown never raises, so a dead E2B cannot block the delete.
     env = await to_thread.run_sync(env_repo.get_environment_node, str(node_id))
@@ -1000,4 +1009,7 @@ async def refresh_edge_summary(project_id: UUID, edge_id: UUID, repo: ProjectRep
             status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
             detail="Summary could not be stored",
         )
-    return EdgeResponse.of(updated, is_stale=False, messages_behind=0)
+    # Re-read the head: a turn can complete while the summariser runs.
+    head = await to_thread.run_sync(repo.get_conversation_head, updated.source_node_id)
+    behind = max(0, head - (updated.summarised_through_seq or 0))
+    return EdgeResponse.of(updated, is_stale=behind > 0, messages_behind=behind)
