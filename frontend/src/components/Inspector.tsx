@@ -16,6 +16,8 @@ import {
 import {
   sendChat,
   streamChat,
+  attachChat,
+  cancelChat,
   resumeChat,
   verifyNode,
   authorizeNode,
@@ -29,6 +31,7 @@ import {
   readEnvironmentFile,
   getEnvironmentPreview,
   environmentTerminalUrl,
+  StreamHandlers,
   ApiError,
 } from "@/lib/api";
 
@@ -167,6 +170,81 @@ function SectionLabel({ children }: { children: React.ReactNode }) {
 
 // -------------------- Agent inspector + chat --------------------
 
+// Shared between the initial POST /chat/stream call (handleSend) and a
+// GET /chat/attach re-join (the historyLoaded effect below) — both emit the
+// identical SSE event shape per API.md, so the UI reaction to each event
+// only needs to exist once.
+function makeStreamHandlers(
+  onChatChange: (updater: (prev: ChatState) => ChatState) => void
+): StreamHandlers {
+  return {
+    onChunk: (text) => {
+      onChatChange((prev) => {
+        const copy = [...prev.messages];
+        const last = copy[copy.length - 1];
+        copy[copy.length - 1] = { ...last, content: last.content + text };
+        return { ...prev, messages: copy };
+      });
+    },
+    onTool: (data) => {
+      // event: tool — fired once when a tool/sub-agent is called and again
+      // with its result_head when it returns. Surfaced as its own
+      // system-style line rather than mixed into the assistant's prose, and
+      // the in-flight bubble is left alone so its text keeps growing
+      // underneath.
+      const label =
+        "result_head" in data
+          ? `↳ ${data.name} → ${String(data.result_head ?? "").slice(0, 140)}`
+          : `⚙ calling ${data.name}${data.args ? ` ${JSON.stringify(data.args).slice(0, 140)}` : ""}`;
+      onChatChange((prev) => {
+        const copy = [...prev.messages];
+        // Insert the tool note before the trailing (still-growing) assistant
+        // bubble so the assistant's reply stays last.
+        const pendingIdx = copy.length - 1;
+        const before = copy.slice(0, pendingIdx);
+        const after = copy.slice(pendingIdx);
+        return { ...prev, messages: [...before, { role: "system", content: label }, ...after] };
+      });
+    },
+    onDone: () => {
+      onChatChange((prev) => {
+        const copy = [...prev.messages];
+        copy[copy.length - 1] = { ...copy[copy.length - 1], pending: false };
+        return { ...prev, messages: copy };
+      });
+    },
+    onError: (data) => {
+      // The backend's SSE payload is {"error": str(exc)} (see workflows.py's
+      // stream_turn) — data.message rarely exists, so fall through every key
+      // the backend could plausibly use before giving up and dumping the raw
+      // payload, rather than showing the uninformative literal "stream error".
+      const detail =
+        data?.message ?? data?.detail ?? data?.error ?? data?.reason ??
+        (data && Object.keys(data).length ? JSON.stringify(data) : null) ??
+        "the backend closed the stream with no error detail — check its logs for a traceback";
+      onChatChange((prev) => {
+        const copy = [...prev.messages];
+        copy[copy.length - 1] = { role: "assistant", content: `⚠ ${detail}` };
+        return { ...prev, messages: copy };
+      });
+    },
+    onApprovalRequired: (data) => {
+      const initial: Record<string, boolean> = {};
+      (data.pending_calls as PendingToolCall[]).forEach((c) => (initial[c.tool_call_id] = true));
+      onChatChange((prev) => {
+        const copy = [...prev.messages];
+        // The in-progress assistant bubble ends here per API.md — no done event follows.
+        copy[copy.length - 1] = { ...copy[copy.length - 1], pending: false };
+        copy.push({
+          role: "system",
+          content: `Waiting on approval for ${data.pending_calls.length} tool call(s).`,
+        });
+        return { ...prev, messages: copy, pendingCalls: data.pending_calls, approvals: initial };
+      });
+    },
+  };
+}
+
 function AgentInspector({
   projectId,
   node,
@@ -214,10 +292,64 @@ function AgentInspector({
           .map((m) => ({
             role: m.role,
             content: m.status === "failed" ? m.content || "⚠ This turn failed." : m.content,
+            // A turn still streaming when we fetched — seed the bubble as
+            // pending so it renders like one we started ourselves, and reach
+            // out below to pick the live stream back up.
+            pending: m.status === "running" ? true : undefined,
           }));
+        const last = history[history.length - 1];
+        const stillRunning = !!last && last.role === "assistant" && last.status === "running";
+
         onChatChange((prev) =>
-          prev.historyLoaded ? prev : { ...prev, historyLoaded: true, messages: [...fetched, ...prev.messages] }
+          prev.historyLoaded
+            ? prev
+            : {
+                ...prev,
+                historyLoaded: true,
+                messages: [...fetched, ...prev.messages],
+                busy: stillRunning ? true : prev.busy,
+              }
         );
+
+        if (!stillRunning) return;
+
+        // Re-join the turn that was already in flight (e.g. this tab was
+        // reloaded, or the turn was started from another tab) instead of
+        // leaving the bubble stuck on "…" forever.
+        attachChat(node.id, makeStreamHandlers(onChatChange))
+          .then((attached) => {
+            if (cancelled || attached) return;
+            // 204 — the backend has nothing running any more (it finished
+            // between our GET and this attach). Re-fetch just the tail to
+            // pick up the final content instead of leaving a stale pending
+            // bubble on screen.
+            listNodeMessages(projectId, node.id, Math.max(0, (last.seq ?? 1) - 1))
+              .then((tail) => {
+                if (cancelled || tail.length === 0) return;
+                const finalMsg = tail[tail.length - 1];
+                onChatChange((prev) => {
+                  const copy = [...prev.messages];
+                  if (copy.length > 0) {
+                    copy[copy.length - 1] = {
+                      role: "assistant",
+                      content:
+                        finalMsg.status === "failed"
+                          ? finalMsg.content || "⚠ This turn failed."
+                          : finalMsg.content,
+                    };
+                  }
+                  return { ...prev, messages: copy };
+                });
+              })
+              .catch(() => {});
+          })
+          .catch(() => {})
+          .finally(() => {
+            if (!cancelled) {
+              onChatChange((prev) => ({ ...prev, busy: false }));
+              onAfterTurn();
+            }
+          });
       })
       .catch(() => {
         // Don't retry forever on every re-render if the fetch failed —
@@ -283,78 +415,23 @@ function AgentInspector({
       messages: [...prev.messages, { role: "assistant", content: "", pending: true }],
     }));
     try {
-      await streamChat(node.id, prompt, clientToken, {
-        onChunk: (text) => {
-          onChatChange((prev) => {
-            const copy = [...prev.messages];
-            const last = copy[copy.length - 1];
-            copy[copy.length - 1] = { ...last, content: last.content + text };
-            return { ...prev, messages: copy };
-          });
-        },
-        onTool: (data) => {
-          // event: tool — fired once when a tool/sub-agent is called and
-          // again with its result_head when it returns. DBOS checkpoints
-          // /chat but not /chat/stream (it has no return value to
-          // checkpoint), so this is purely a live progress signal — surfaced
-          // as its own system-style line rather than mixed into the
-          // assistant's prose, and the in-flight bubble is left alone so
-          // its text keeps growing underneath.
-          const label =
-            "result_head" in data
-              ? `↳ ${data.name} → ${String(data.result_head ?? "").slice(0, 140)}`
-              : `⚙ calling ${data.name}${data.args ? ` ${JSON.stringify(data.args).slice(0, 140)}` : ""}`;
-          onChatChange((prev) => {
-            const copy = [...prev.messages];
-            // Insert the tool note before the trailing (still-growing)
-            // assistant bubble so the assistant's reply stays last.
-            const pendingIdx = copy.length - 1;
-            const before = copy.slice(0, pendingIdx);
-            const after = copy.slice(pendingIdx);
-            return { ...prev, messages: [...before, { role: "system", content: label }, ...after] };
-          });
-        },
-        onDone: () => {
-          onChatChange((prev) => {
-            const copy = [...prev.messages];
-            copy[copy.length - 1] = { ...copy[copy.length - 1], pending: false };
-            return { ...prev, messages: copy };
-          });
-        },
-        onError: (data) => {
-          // The backend's SSE payload is {"error": str(exc)} (see
-          // workflows.py's stream_turn) — data.message rarely exists, so
-          // fall through every key the backend could plausibly use before
-          // giving up and dumping the raw payload, rather than showing the
-          // uninformative literal "stream error".
-          const detail =
-            data?.message ?? data?.detail ?? data?.error ?? data?.reason ??
-            (data && Object.keys(data).length ? JSON.stringify(data) : null) ??
-            "the backend closed the stream with no error detail — check its logs for a traceback";
-          onChatChange((prev) => {
-            const copy = [...prev.messages];
-            copy[copy.length - 1] = { role: "assistant", content: `⚠ ${detail}` };
-            return { ...prev, messages: copy };
-          });
-        },
-        onApprovalRequired: (data) => {
-          const initial: Record<string, boolean> = {};
-          (data.pending_calls as PendingToolCall[]).forEach((c) => (initial[c.tool_call_id] = true));
-          onChatChange((prev) => {
-            const copy = [...prev.messages];
-            // The in-progress assistant bubble ends here per API.md — no done event follows.
-            copy[copy.length - 1] = { ...copy[copy.length - 1], pending: false };
-            copy.push({
-              role: "system",
-              content: `Waiting on approval for ${data.pending_calls.length} tool call(s).`,
-            });
-            return { ...prev, messages: copy, pendingCalls: data.pending_calls, approvals: initial };
-          });
-        },
-      });
+      await streamChat(node.id, prompt, clientToken, makeStreamHandlers(onChatChange));
     } finally {
       onChatChange((prev) => ({ ...prev, busy: false }));
       onAfterTurn();
+    }
+  }
+
+  // Stops a turn in flight — streamed, non-streamed, or parked on an
+  // approval. The stream (if one is open, ours or a re-joined /chat/attach)
+  // closes on its own once the backend finalises the message as
+  // status: "cancelled"; nothing here needs to touch `messages` directly.
+  async function handleCancel() {
+    try {
+      await cancelChat(node.id);
+    } catch {
+      // 409 means there was nothing left to stop (it just finished) — either
+      // way there's nothing more for the client to do.
     }
   }
 
@@ -582,13 +659,23 @@ function AgentInspector({
             disabled={!!pendingCalls}
             className="flex-1 bg-panel2 border border-border rounded-md px-3 py-2 text-xs outline-none focus:border-accent/50 disabled:opacity-50"
           />
-          <button
-            onClick={handleSend}
-            disabled={busy || !!pendingCalls}
-            className="bg-accent/15 text-accent border border-accent/40 rounded-md px-3 py-2 text-xs disabled:opacity-50"
-          >
-            Send
-          </button>
+          {busy ? (
+            <button
+              onClick={handleCancel}
+              title="Stop this turn (POST /chat/cancel)"
+              className="bg-red-500/15 text-red-300 border border-red-500/40 rounded-md px-3 py-2 text-xs"
+            >
+              Stop
+            </button>
+          ) : (
+            <button
+              onClick={handleSend}
+              disabled={!!pendingCalls}
+              className="bg-accent/15 text-accent border border-accent/40 rounded-md px-3 py-2 text-xs disabled:opacity-50"
+            >
+              Send
+            </button>
+          )}
         </div>
       </div>
     </>

@@ -99,6 +99,37 @@ export default function MeshCanvas({
       .catch((e: ApiError) => setError(e.message));
   }, [project.id]);
 
+  // Per the teammate's node-status addition: every node row (agent, tool,
+  // environment) now carries status/status_detail (see NodeResponse in
+  // routers/projects.py). Poll the list every 2s and merge just those two
+  // fields into whatever's already on screen — never overwriting position or
+  // anything else a drag gesture owns, and skipping the setState entirely
+  // when nothing actually changed so this doesn't fight an in-progress drag.
+  useEffect(() => {
+    const interval = setInterval(() => {
+      listNodes(project.id)
+        .then((fresh) => {
+          const byId = new Map(fresh.map((n) => [n.id, n]));
+          setNodes((prev) => {
+            let changed = false;
+            const next = prev.map((n) => {
+              const f = byId.get(n.id) as (ProjectNode & { status?: string; status_detail?: string | null }) | undefined;
+              if (!f || !("status" in f)) return n;
+              const cur = n as ProjectNode & { status?: string; status_detail?: string | null };
+              if (cur.status === f.status && cur.status_detail === f.status_detail) return n;
+              changed = true;
+              return { ...n, status: f.status, status_detail: f.status_detail } as ProjectNode;
+            });
+            return changed ? next : prev;
+          });
+        })
+        .catch(() => {
+          // Best-effort — a failed poll just tries again on the next tick.
+        });
+    }, 2000);
+    return () => clearInterval(interval);
+  }, [project.id]);
+
   function relPos(e: { clientX: number; clientY: number }) {
     const c = canvasRef.current;
     if (!c) return { x: e.clientX, y: e.clientY };

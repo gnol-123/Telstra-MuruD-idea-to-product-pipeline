@@ -17,6 +17,8 @@ import {
   EnvironmentFileContent,
   EnvironmentPreview,
   UsageTotals,
+  ChatMessage,
+  CancelChatResponse,
 } from "./types";
 
 const API_URL = (
@@ -144,6 +146,21 @@ export async function deleteProject(projectId: string) {
 
 export async function listNodes(projectId: string) {
   return request<ProjectNode[]>(`/projects/${projectId}/nodes`, { auth: true });
+}
+
+// An agent node's transcript. Used to hydrate the chat panel from the
+// backend on first open, since the frontend otherwise only keeps messages
+// in memory for the life of the tab — see Inspector.tsx's ChatState.
+export async function listNodeMessages(
+  projectId: string,
+  nodeId: string,
+  afterSeq?: number
+) {
+  const qs = afterSeq != null ? `?after_seq=${afterSeq}` : "";
+  return request<ChatMessage[]>(
+    `/projects/${projectId}/nodes/${nodeId}/messages${qs}`,
+    { auth: true }
+  );
 }
 
 export async function createAgentNode(
@@ -438,24 +455,14 @@ export interface StreamHandlers {
   onTool?: (data: any) => void;
 }
 
-export async function streamChat(
-  nodeId: string,
-  prompt: string,
-  clientToken: string | undefined,
-  handlers: StreamHandlers
-) {
-  const stored = loadAuth();
-  if (!stored) throw new ApiError(401, "Not logged in");
-
-  const res = await fetch(`${API_URL}/chat/stream`, {
-    method: "POST",
-    headers: {
-      "Content-Type": "application/json",
-      Authorization: `Bearer ${stored.access_token}`,
-    },
-    body: JSON.stringify({ node_id: nodeId, prompt, client_token: clientToken }),
-  });
-
+// Shared by streamChat (POST /chat/stream) and attachChat (GET /chat/attach)
+// — both return the identical "event: ...\ndata: ...\n\n" SSE shape per
+// API.md, so the parsing loop only needs to exist once. Per the
+// rt-stream-checkpoint change, `error` is no longer terminal: a `done`
+// carrying the final (possibly `status: "failed"`) assistant_message always
+// follows it, so this keeps reading until the response body itself ends
+// rather than stopping at the first `error`.
+async function consumeSSE(res: Response, handlers: StreamHandlers) {
   if (!res.body) throw new Error("No response body for stream");
 
   const reader = res.body.getReader();
@@ -489,6 +496,61 @@ export async function streamChat(
       else if (event === "tool") handlers.onTool?.(parsed);
     }
   }
+}
+
+export async function streamChat(
+  nodeId: string,
+  prompt: string,
+  clientToken: string | undefined,
+  handlers: StreamHandlers
+) {
+  const stored = loadAuth();
+  if (!stored) throw new ApiError(401, "Not logged in");
+
+  const res = await fetch(`${API_URL}/chat/stream`, {
+    method: "POST",
+    headers: {
+      "Content-Type": "application/json",
+      Authorization: `Bearer ${stored.access_token}`,
+    },
+    body: JSON.stringify({ node_id: nodeId, prompt, client_token: clientToken }),
+  });
+
+  await consumeSSE(res, handlers);
+}
+
+// Re-joins a turn that's still running on this node — after a reload, or
+// from a second tab. Returns `false` (no HTTP call was left hanging) when
+// the backend reports 204 "nothing running", so the caller can fall back to
+// treating the conversation as idle instead of waiting on a stream that will
+// never emit anything.
+export async function attachChat(nodeId: string, handlers: StreamHandlers): Promise<boolean> {
+  const stored = loadAuth();
+  if (!stored) throw new ApiError(401, "Not logged in");
+
+  const res = await fetch(`${API_URL}/chat/attach?node_id=${encodeURIComponent(nodeId)}`, {
+    headers: { Authorization: `Bearer ${stored.access_token}` },
+  });
+
+  if (res.status === 204) return false;
+  if (!res.ok) {
+    const data = await res.json().catch(() => ({}));
+    throw new ApiError(res.status, data?.detail ?? res.statusText);
+  }
+  await consumeSSE(res, handlers);
+  return true;
+}
+
+// Stops a turn in flight (streamed, non-streamed, or parked on an approval).
+// Nothing is deleted — the partial reply is kept and finalises with
+// status: "cancelled". 409 means there was nothing running to stop, which a
+// caller can usually treat as "already finished" rather than a real error.
+export async function cancelChat(nodeId: string) {
+  return request<CancelChatResponse>("/chat/cancel", {
+    method: "POST",
+    auth: true,
+    body: { node_id: nodeId },
+  });
 }
 
 // Usage

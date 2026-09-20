@@ -29,6 +29,10 @@ export type NodeKind = "agent" | "tool" | "environment";
 export type EdgeKind = "context" | "tool" | "environment";
 export type ToolNodeStatus = "ready" | "error" | "pending" | string;
 export type EnvironmentStatus = "pending" | "provisioning" | "ready" | "stopped" | "error" | string;
+// "ready" is the only value the backend actually writes for an agent node
+// today (see NodeResponse in routers/projects.py) — "running" is here for
+// when the backend starts setting it during a turn.
+export type AgentNodeStatus = "ready" | "running" | "error" | string;
 
 export interface AgentNode {
   kind: "agent";
@@ -38,6 +42,11 @@ export interface AgentNode {
   agent_slug: string;
   tool_policy: ToolPolicy;
   model?: string;
+  // Present on every GET /projects/{id}/nodes row as of the node-status
+  // backend change — optional here because older cached responses (or a
+  // node created before that change rolled out) may not carry it.
+  status?: AgentNodeStatus;
+  status_detail?: string | null;
   position_x?: number;
   position_y?: number;
 }
@@ -167,8 +176,17 @@ export interface ChatMessage {
   role: "user" | "assistant";
   content: string;
   seq: number;
-  status: "complete" | "failed" | "pending";
+  // "running" while a streamed turn is still filling in (see /chat/attach)
+  // and "cancelled" once /chat/cancel stops it — both new since the
+  // rt-stream-checkpoint change.
+  status: "complete" | "failed" | "pending" | "running" | "cancelled";
   created_at: string;
+}
+
+export interface CancelChatResponse {
+  node_id: string;
+  conversation_id: string;
+  message_id: string;
 }
 
 export interface ChatResponse {

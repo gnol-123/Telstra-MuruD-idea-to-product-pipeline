@@ -248,6 +248,22 @@ export default function NodeCard({
           <span>
             Policy: <span className="text-text/70">{node.tool_policy}</span>
           </span>
+          {node.status && (
+            <span className="flex items-center gap-1">
+              <span
+                className={`w-1.5 h-1.5 rounded-full ${
+                  node.status === "running"
+                    ? "bg-amber animate-pulse"
+                    : node.status === "error"
+                    ? "bg-red-400"
+                    : node.status === "ready"
+                    ? "bg-green"
+                    : "bg-white/30"
+                }`}
+              />
+              <span className="uppercase tracking-wide">{node.status}</span>
+            </span>
+          )}
           {typeof environmentCount === "number" && environmentCount > 0 && (
             <span className="ml-auto">
               {ENV_ICON} {environmentCount}
