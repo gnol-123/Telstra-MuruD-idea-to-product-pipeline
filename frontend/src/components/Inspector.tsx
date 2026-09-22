@@ -3,6 +3,7 @@
 import { useEffect, useRef, useState } from "react";
 import {
   ProjectNode,
+  AgentNode,
   Edge,
   ToolType,
   ToolCall,
@@ -10,19 +11,12 @@ import {
   EnvironmentFileEntry,
   isAgentNode,
   isEnvironmentNode,
-  isApprovalRequired,
-  PendingToolCall,
+  isToolNode,
 } from "@/lib/types";
 import {
-  sendChat,
-  streamChat,
-  attachChat,
-  cancelChat,
-  resumeChat,
   verifyNode,
   authorizeNode,
   listToolCalls,
-  listNodeMessages,
   updateEnvironment,
   startEnvironment,
   stopEnvironment,
@@ -31,41 +25,9 @@ import {
   readEnvironmentFile,
   getEnvironmentPreview,
   environmentTerminalUrl,
-  StreamHandlers,
   ApiError,
 } from "@/lib/api";
-
-export interface LocalMessage {
-  role: "user" | "assistant" | "system";
-  content: string;
-  pending?: boolean;
-}
-
-export interface ChatState {
-  messages: LocalMessage[];
-  draft: string;
-  useStream: boolean;
-  busy: boolean;
-  pendingCalls: PendingToolCall[] | null;
-  approvals: Record<string, boolean>;
-  // True once this node's history has been fetched from the backend (or
-  // that fetch failed and isn't worth retrying every render). Without this,
-  // a freshly opened tab / reloaded project has no idea the conversation
-  // already has a transcript sitting in the database.
-  historyLoaded: boolean;
-}
-
-export function defaultChatState(): ChatState {
-  return {
-    messages: [],
-    draft: "",
-    useStream: false,
-    busy: false,
-    pendingCalls: null,
-    approvals: {},
-    historyLoaded: false,
-  };
-}
+import { AGENT_ICONS, ENV_ICON, TOOL_ICONS, agentRole } from "./NodeCard";
 
 export default function Inspector({
   projectId,
@@ -73,62 +35,66 @@ export default function Inspector({
   nodes,
   edges,
   toolTypes,
-  chat,
-  onChatChange,
+  chatBusy,
+  refreshingEdgeId,
+  onOpenChat,
   onUpdateAgentPolicy,
   onRefreshEdge,
   onDeleteEdge,
   onUnequipTool,
   onNodeUpdated,
-  onAfterTurn,
 }: {
   projectId: string;
   node: ProjectNode | null;
   nodes: ProjectNode[];
   edges: Edge[];
   toolTypes: ToolType[];
-  // Keyed by node id in the parent, so a conversation survives switching
-  // between nodes within the same tab. The backend transcript is the real
-  // source of truth on first open — see the historyLoaded fetch below.
-  chat: ChatState;
-  onChatChange: (nodeId: string, updater: (prev: ChatState) => ChatState) => void;
+  // A chat turn is in flight for the selected agent (see ChatWindow).
+  chatBusy: boolean;
+  refreshingEdgeId: string | null;
+  onOpenChat: (nodeId: string) => void;
   onUpdateAgentPolicy: (nodeId: string, policy: ToolPolicy) => void;
-  onRefreshEdge: (edge: Edge) => void;
+  onRefreshEdge: (edge: Edge) => Promise<void> | void;
   onDeleteEdge: (edge: Edge) => void;
   // Tool edges specifically: removes the edge AND nudges the now-bare tool
   // node back into view near its former agent (see MeshCanvas).
   onUnequipTool: (edge: Edge) => void;
   onNodeUpdated: (node: ProjectNode) => void;
-  // Called after every chat turn settles (sent, streamed, or resumed). An
-  // orchestrator's Canvas tool can create/wire other nodes mid-turn, and
-  // those never show up on the canvas until something re-fetches it — this
-  // is that re-fetch, cheap enough to run after any agent's turn too.
-  onAfterTurn: () => void;
 }) {
-  if (!node) {
-    return (
-      <aside className="w-80 shrink-0 border-l border-border p-5 text-sm text-muted">
-        Select a node to inspect its tools, context and conversation.
-      </aside>
-    );
-  }
+  const title = !node
+    ? "Inspector"
+    : isAgentNode(node)
+    ? "Agent inspector"
+    : isEnvironmentNode(node)
+    ? "Environment inspector"
+    : "Tool inspector";
 
   return (
-    <aside className="w-80 shrink-0 border-l border-border flex flex-col min-h-0">
-      {isAgentNode(node) ? (
+    <aside className="flex-none w-[300px] border-l border-white/[0.09] flex flex-col min-h-0 bg-black">
+      <div className="flex-none px-[18px] pt-4 pb-3 border-b border-white/[0.09]">
+        <div className="text-[12.5px] font-semibold">{title}</div>
+        <div className="mt-1 text-[10.5px] text-white/[0.36] truncate">{node ? `Editing ${node.name}` : "Nothing selected"}</div>
+      </div>
+
+      {!node ? (
+        <div className="px-[18px] py-4 text-xs text-white/[0.35] leading-relaxed">
+          Select a card to inspect its tools, inherited context and downstream consumers. Double-click an agent to chat
+          with it.
+        </div>
+      ) : isAgentNode(node) ? (
         <AgentInspector
           key={node.id}
-          projectId={projectId}
           node={node}
           nodes={nodes}
           edges={edges}
-          chat={chat}
-          onChatChange={(updater) => onChatChange(node.id, updater)}
+          toolTypes={toolTypes}
+          chatBusy={chatBusy}
+          refreshingEdgeId={refreshingEdgeId}
+          onOpenChat={() => onOpenChat(node.id)}
           onUpdateAgentPolicy={onUpdateAgentPolicy}
           onRefreshEdge={onRefreshEdge}
           onDeleteEdge={onDeleteEdge}
           onUnequipTool={onUnequipTool}
-          onAfterTurn={onAfterTurn}
         />
       ) : isEnvironmentNode(node) ? (
         <EnvironmentInspector
@@ -161,524 +127,224 @@ function nodeName(nodes: ProjectNode[], id: string) {
 }
 
 function SectionLabel({ children }: { children: React.ReactNode }) {
+  return <div className="text-[9.5px] tracking-[0.11em] uppercase text-white/30 mb-2">{children}</div>;
+}
+
+function Empty({ children, dashed }: { children: React.ReactNode; dashed?: boolean }) {
   return (
-    <div className="text-[9.5px] tracking-wider uppercase text-white/30 mb-2">
+    <div
+      className={`text-[11px] text-white/[0.35] leading-[1.5] ${
+        dashed ? "border border-dashed border-white/[0.15] rounded-[7px] px-[11px] py-3" : ""
+      }`}
+    >
       {children}
     </div>
   );
 }
 
-// -------------------- Agent inspector + chat --------------------
-
-// Shared between the initial POST /chat/stream call (handleSend) and a
-// GET /chat/attach re-join (the historyLoaded effect below) — both emit the
-// identical SSE event shape per API.md, so the UI reaction to each event
-// only needs to exist once.
-function makeStreamHandlers(
-  onChatChange: (updater: (prev: ChatState) => ChatState) => void
-): StreamHandlers {
-  return {
-    onChunk: (text) => {
-      onChatChange((prev) => {
-        const copy = [...prev.messages];
-        const last = copy[copy.length - 1];
-        copy[copy.length - 1] = { ...last, content: last.content + text };
-        return { ...prev, messages: copy };
-      });
-    },
-    onTool: (data) => {
-      // event: tool — fired once when a tool/sub-agent is called and again
-      // with its result_head when it returns. Surfaced as its own
-      // system-style line rather than mixed into the assistant's prose, and
-      // the in-flight bubble is left alone so its text keeps growing
-      // underneath.
-      const label =
-        "result_head" in data
-          ? `↳ ${data.name} → ${String(data.result_head ?? "").slice(0, 140)}`
-          : `⚙ calling ${data.name}${data.args ? ` ${JSON.stringify(data.args).slice(0, 140)}` : ""}`;
-      onChatChange((prev) => {
-        const copy = [...prev.messages];
-        // Insert the tool note before the trailing (still-growing) assistant
-        // bubble so the assistant's reply stays last.
-        const pendingIdx = copy.length - 1;
-        const before = copy.slice(0, pendingIdx);
-        const after = copy.slice(pendingIdx);
-        return { ...prev, messages: [...before, { role: "system", content: label }, ...after] };
-      });
-    },
-    onDone: () => {
-      onChatChange((prev) => {
-        const copy = [...prev.messages];
-        copy[copy.length - 1] = { ...copy[copy.length - 1], pending: false };
-        return { ...prev, messages: copy };
-      });
-    },
-    onError: (data) => {
-      // The backend's SSE payload is {"error": str(exc)} (see workflows.py's
-      // stream_turn) — data.message rarely exists, so fall through every key
-      // the backend could plausibly use before giving up and dumping the raw
-      // payload, rather than showing the uninformative literal "stream error".
-      const detail =
-        data?.message ?? data?.detail ?? data?.error ?? data?.reason ??
-        (data && Object.keys(data).length ? JSON.stringify(data) : null) ??
-        "the backend closed the stream with no error detail — check its logs for a traceback";
-      onChatChange((prev) => {
-        const copy = [...prev.messages];
-        copy[copy.length - 1] = { role: "assistant", content: `⚠ ${detail}` };
-        return { ...prev, messages: copy };
-      });
-    },
-    onApprovalRequired: (data) => {
-      const initial: Record<string, boolean> = {};
-      (data.pending_calls as PendingToolCall[]).forEach((c) => (initial[c.tool_call_id] = true));
-      onChatChange((prev) => {
-        const copy = [...prev.messages];
-        // The in-progress assistant bubble ends here per API.md — no done event follows.
-        copy[copy.length - 1] = { ...copy[copy.length - 1], pending: false };
-        copy.push({
-          role: "system",
-          content: `Waiting on approval for ${data.pending_calls.length} tool call(s).`,
-        });
-        return { ...prev, messages: copy, pendingCalls: data.pending_calls, approvals: initial };
-      });
-    },
-  };
-}
+// -------------------- Agent inspector --------------------
+// Compact summary, matching the UX mockup. The conversation itself lives
+// in the ChatWindow modal, opened from the button at the bottom (or by
+// double-clicking the card / its "Open chat" button).
 
 function AgentInspector({
-  projectId,
   node,
   nodes,
   edges,
-  chat,
-  onChatChange,
+  toolTypes,
+  chatBusy,
+  refreshingEdgeId,
+  onOpenChat,
   onUpdateAgentPolicy,
   onRefreshEdge,
   onDeleteEdge,
   onUnequipTool,
-  onAfterTurn,
 }: {
-  projectId: string;
-  node: Extract<ProjectNode, { kind: "agent" }>;
+  node: AgentNode;
   nodes: ProjectNode[];
   edges: Edge[];
-  chat: ChatState;
-  onChatChange: (updater: (prev: ChatState) => ChatState) => void;
+  toolTypes: ToolType[];
+  chatBusy: boolean;
+  refreshingEdgeId: string | null;
+  onOpenChat: () => void;
   onUpdateAgentPolicy: (nodeId: string, policy: ToolPolicy) => void;
-  onRefreshEdge: (edge: Edge) => void;
+  onRefreshEdge: (edge: Edge) => Promise<void> | void;
   onDeleteEdge: (edge: Edge) => void;
   onUnequipTool: (edge: Edge) => void;
-  onAfterTurn: () => void;
 }) {
   const inboundTool = edges.filter((e) => e.kind === "tool" && e.target_node_id === node.id);
   const inboundEnv = edges.filter((e) => e.kind === "environment" && e.target_node_id === node.id);
   const inboundContext = edges.filter((e) => e.kind === "context" && e.target_node_id === node.id);
   const outbound = edges.filter((e) => e.kind === "context" && e.source_node_id === node.id);
-
-  const { messages, draft, useStream, busy, pendingCalls, approvals, historyLoaded } = chat;
-
-  // Hydrate this node's transcript from the backend the first time it's
-  // opened. Runs once per node (the `key={node.id}` on AgentInspector
-  // remounts this on every switch, and historyLoaded guards against
-  // re-fetching on every re-render of the same node).
-  useEffect(() => {
-    if (historyLoaded) return;
-    let cancelled = false;
-    listNodeMessages(projectId, node.id)
-      .then((history) => {
-        if (cancelled) return;
-        const fetched: LocalMessage[] = history
-          .filter((m) => m.role === "user" || m.role === "assistant")
-          .map((m) => ({
-            role: m.role,
-            content: m.status === "failed" ? m.content || "⚠ This turn failed." : m.content,
-            // A turn still streaming when we fetched — seed the bubble as
-            // pending so it renders like one we started ourselves, and reach
-            // out below to pick the live stream back up.
-            pending: m.status === "running" ? true : undefined,
-          }));
-        const last = history[history.length - 1];
-        const stillRunning = !!last && last.role === "assistant" && last.status === "running";
-
-        onChatChange((prev) =>
-          prev.historyLoaded
-            ? prev
-            : {
-                ...prev,
-                historyLoaded: true,
-                messages: [...fetched, ...prev.messages],
-                busy: stillRunning ? true : prev.busy,
-              }
-        );
-
-        if (!stillRunning) return;
-
-        // Re-join the turn that was already in flight (e.g. this tab was
-        // reloaded, or the turn was started from another tab) instead of
-        // leaving the bubble stuck on "…" forever.
-        attachChat(node.id, makeStreamHandlers(onChatChange))
-          .then((attached) => {
-            if (cancelled || attached) return;
-            // 204 — the backend has nothing running any more (it finished
-            // between our GET and this attach). Re-fetch just the tail to
-            // pick up the final content instead of leaving a stale pending
-            // bubble on screen.
-            listNodeMessages(projectId, node.id, Math.max(0, (last.seq ?? 1) - 1))
-              .then((tail) => {
-                if (cancelled || tail.length === 0) return;
-                const finalMsg = tail[tail.length - 1];
-                onChatChange((prev) => {
-                  const copy = [...prev.messages];
-                  if (copy.length > 0) {
-                    copy[copy.length - 1] = {
-                      role: "assistant",
-                      content:
-                        finalMsg.status === "failed"
-                          ? finalMsg.content || "⚠ This turn failed."
-                          : finalMsg.content,
-                    };
-                  }
-                  return { ...prev, messages: copy };
-                });
-              })
-              .catch(() => {});
-          })
-          .catch(() => {})
-          .finally(() => {
-            if (!cancelled) {
-              onChatChange((prev) => ({ ...prev, busy: false }));
-              onAfterTurn();
-            }
-          });
-      })
-      .catch(() => {
-        // Don't retry forever on every re-render if the fetch failed —
-        // the user can still chat, it just starts from a blank transcript.
-        if (!cancelled) onChatChange((prev) => ({ ...prev, historyLoaded: true }));
-      });
-    return () => {
-      cancelled = true;
-    };
-    // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [node.id]);
-
-  async function handleSend() {
-    if (!draft.trim() || busy) return;
-    const prompt = draft;
-    const clientToken = crypto.randomUUID();
-    onChatChange((prev) => ({
-      ...prev,
-      draft: "",
-      busy: true,
-      messages: [...prev.messages, { role: "user", content: prompt }],
-    }));
-
-    if (!useStream) {
-      try {
-        const res = await sendChat(node.id, prompt, clientToken);
-        if (isApprovalRequired(res)) {
-          const initial: Record<string, boolean> = {};
-          res.pending_calls.forEach((c) => (initial[c.tool_call_id] = true));
-          onChatChange((prev) => ({
-            ...prev,
-            pendingCalls: res.pending_calls,
-            approvals: initial,
-            messages: [
-              ...prev.messages,
-              { role: "system", content: `Waiting on approval for ${res.pending_calls.length} tool call(s).` },
-            ],
-          }));
-        } else {
-          onChatChange((prev) => ({
-            ...prev,
-            messages: [...prev.messages, { role: "assistant", content: res.assistant_message.content }],
-          }));
-        }
-      } catch (e: any) {
-        onChatChange((prev) => ({
-          ...prev,
-          messages: [...prev.messages, { role: "assistant", content: `⚠ ${e.message}` }],
-        }));
-      } finally {
-        onChatChange((prev) => ({ ...prev, busy: false }));
-        // A Canvas-equipped orchestrator can create/wire nodes as part of
-        // this turn; pick those up now instead of waiting for some other
-        // action to trigger a reload.
-        onAfterTurn();
-      }
-      return;
-    }
-
-    // Streaming path: append one growing assistant message as chunks arrive.
-    onChatChange((prev) => ({
-      ...prev,
-      messages: [...prev.messages, { role: "assistant", content: "", pending: true }],
-    }));
-    try {
-      await streamChat(node.id, prompt, clientToken, makeStreamHandlers(onChatChange));
-    } finally {
-      onChatChange((prev) => ({ ...prev, busy: false }));
-      onAfterTurn();
-    }
-  }
-
-  // Stops a turn in flight — streamed, non-streamed, or parked on an
-  // approval. The stream (if one is open, ours or a re-joined /chat/attach)
-  // closes on its own once the backend finalises the message as
-  // status: "cancelled"; nothing here needs to touch `messages` directly.
-  async function handleCancel() {
-    try {
-      await cancelChat(node.id);
-    } catch {
-      // 409 means there was nothing left to stop (it just finished) — either
-      // way there's nothing more for the client to do.
-    }
-  }
-
-  async function handleResume() {
-    onChatChange((prev) => ({ ...prev, busy: true }));
-    try {
-      const res = await resumeChat(node.id, approvals);
-      if (isApprovalRequired(res)) {
-        const initial: Record<string, boolean> = {};
-        res.pending_calls.forEach((c) => (initial[c.tool_call_id] = true));
-        onChatChange((prev) => ({
-          ...prev,
-          pendingCalls: res.pending_calls,
-          approvals: initial,
-          messages: [
-            ...prev.messages,
-            { role: "system", content: `Waiting on approval for ${res.pending_calls.length} more tool call(s).` },
-          ],
-        }));
-      } else {
-        onChatChange((prev) => ({
-          ...prev,
-          pendingCalls: null,
-          approvals: {},
-          messages: [...prev.messages, { role: "assistant", content: res.assistant_message.content }],
-        }));
-      }
-    } catch (e: any) {
-      onChatChange((prev) => ({
-        ...prev,
-        messages: [...prev.messages, { role: "assistant", content: `⚠ ${e.message}` }],
-      }));
-    } finally {
-      onChatChange((prev) => ({ ...prev, busy: false }));
-      onAfterTurn();
-    }
-  }
+  const stale = inboundContext.filter((e) => e.is_stale);
+  const clearing = stale.some((e) => e.id === refreshingEdgeId);
+  const icon = AGENT_ICONS[node.agent_slug] ?? "◆";
+  const status = chatBusy ? "running" : node.status ?? "ready";
 
   return (
-    <>
-      <div className="px-4 py-3 border-b border-border">
-        <div className="text-sm font-medium">{node.name}</div>
-        <div className="text-[10px] text-muted">{node.agent_slug}</div>
+    <div className="flex-1 overflow-auto px-[18px] py-4 flex flex-col gap-4 min-h-0">
+      <div>
+        <SectionLabel>Identity</SectionLabel>
+        <div className="flex gap-2.5 items-start">
+          <div className="flex-none w-8 h-8 rounded-lg border border-accent/50 grid place-items-center text-accent text-sm">
+            {icon}
+          </div>
+          <div className="min-w-0">
+            <div className="text-[13px] font-semibold truncate">{node.name}</div>
+            <div className="text-[11px] text-white/[0.45] mt-[3px] leading-[1.45]">{agentRole(node.agent_slug)}</div>
+            <div className="mt-1.5 flex items-center gap-1.5 text-[10px] text-white/[0.42] uppercase tracking-[0.04em]">
+              <span
+                className={`w-[5px] h-[5px] rounded-full ${
+                  status === "running" ? "bg-green anim-softpulse" : status === "error" ? "bg-red-400" : "bg-white/30"
+                }`}
+              />
+              {status}
+              {node.model && <span className="normal-case tracking-normal text-white/30">· {node.model}</span>}
+            </div>
+          </div>
+        </div>
       </div>
 
-      <div className="px-4 py-3 border-b border-border space-y-3 max-h-[48%] overflow-y-auto">
-        <div>
-          <SectionLabel>Tool policy</SectionLabel>
-          <select
-            value={node.tool_policy}
-            onChange={(e) => onUpdateAgentPolicy(node.id, e.target.value as ToolPolicy)}
-            className="w-full bg-panel2 border border-border rounded-md px-2 py-1.5 text-xs outline-none focus:border-accent/50"
-          >
-            <option value="ask">Ask before every tool call</option>
-            <option value="auto">Run tools automatically</option>
-          </select>
-        </div>
+      <div>
+        <SectionLabel>Tool policy</SectionLabel>
+        <select
+          value={node.tool_policy}
+          onChange={(e) => onUpdateAgentPolicy(node.id, e.target.value as ToolPolicy)}
+          className="w-full bg-white/[0.03] border border-white/[0.12] rounded-[7px] px-2.5 py-2 text-[11.5px] outline-none focus:border-accent/50"
+        >
+          <option value="ask">Ask before every tool call</option>
+          <option value="auto">Run tools automatically</option>
+        </select>
+      </div>
 
-        <div>
-          <SectionLabel>Tools ({inboundTool.length})</SectionLabel>
-          {inboundTool.length === 0 ? (
-            <div className="text-[11px] text-muted border border-dashed border-white/15 rounded-md px-2.5 py-2 leading-relaxed">
-              Drop a tool card from the palette straight onto this agent's card to equip it.
-            </div>
-          ) : (
-            <div className="space-y-1.5">
-              {inboundTool.map((e) => (
+      <div>
+        <SectionLabel>Tools ({inboundTool.length})</SectionLabel>
+        {inboundTool.length === 0 ? (
+          <Empty dashed>Open the Tools tab and drag a tool onto this card.</Empty>
+        ) : (
+          <div className="flex flex-col gap-1.5">
+            {inboundTool.map((e) => {
+              const t = nodes.find((n) => n.id === e.source_node_id);
+              const tool = t && isToolNode(t) ? t : null;
+              const desc =
+                tool?.status === "error"
+                  ? tool.status_detail ?? "error"
+                  : toolTypes.find((tt) => tt.slug === tool?.tool_slug)?.description ?? tool?.tool_slug ?? "";
+              return (
                 <div
                   key={e.id}
-                  className="flex items-center gap-2 text-[11px] bg-accent/5 border border-accent/20 rounded-md px-2 py-1.5"
+                  className="flex items-center gap-[9px] px-2.5 py-2 rounded-[7px] bg-accent/[0.05] border border-accent/20"
                 >
-                  <span className="text-accent text-[10px]">⌗</span>
-                  <span className="flex-1 truncate">{nodeName(nodes, e.source_node_id)}</span>
+                  <span className="text-accent text-[11px]">{tool ? TOOL_ICONS[tool.tool_slug] ?? "◆" : "◆"}</span>
+                  <div className="min-w-0 flex-1">
+                    <div className="text-[11.5px] text-text truncate">{t?.name ?? "Unknown tool"}</div>
+                    <div
+                      className={`text-[10px] mt-px truncate ${tool?.status === "error" ? "text-red-400/80" : "text-white/[0.35]"}`}
+                      title={desc}
+                    >
+                      {desc}
+                    </div>
+                  </div>
                   <button
                     onClick={() => onUnequipTool(e)}
-                    className="text-white/30 hover:text-white/70"
+                    className="text-white/30 hover:text-white/70 text-xs"
                     title="Unequip"
                   >
                     ×
                   </button>
                 </div>
-              ))}
-            </div>
-          )}
-        </div>
-
-        <div>
-          <SectionLabel>Environments ({inboundEnv.length})</SectionLabel>
-          {inboundEnv.length === 0 ? (
-            <div className="text-[11px] text-muted">
-              No sandbox linked — this agent uses the project's shared scratch environment only.
-            </div>
-          ) : (
-            <div className="space-y-1.5">
-              {inboundEnv.map((e) => (
-                <div
-                  key={e.id}
-                  className="flex items-center gap-2 text-[11px] bg-green/5 border border-green/20 rounded-md px-2 py-1.5"
-                >
-                  <span className="text-green text-[10px]">▣</span>
-                  <span className="flex-1 truncate">{nodeName(nodes, e.source_node_id)}</span>
-                  <button onClick={() => onDeleteEdge(e)} className="text-white/30 hover:text-white/70" title="Unlink">
-                    ×
-                  </button>
-                </div>
-              ))}
-            </div>
-          )}
-        </div>
-
-        <div>
-          <SectionLabel>Inherited context ({inboundContext.length})</SectionLabel>
-          {inboundContext.length === 0 ? (
-            <div className="text-[11px] text-muted">Runs on its own context only.</div>
-          ) : (
-            <div className="space-y-1.5">
-              {inboundContext.map((e) => (
-                <div key={e.id} className="flex items-center gap-2 text-[11px]">
-                  <span className={e.is_stale ? "text-amber" : "text-accent"}>◗</span>
-                  <span className="flex-1 truncate">{nodeName(nodes, e.source_node_id)}</span>
-                  {e.summary_updated_at === null ? (
-                    <span className="text-amber text-[10px]">no summary yet</span>
-                  ) : e.is_stale ? (
-                    <button
-                      onClick={() => onRefreshEdge(e)}
-                      className="text-amber text-[10px] px-1.5 py-0.5 border border-amber/40 rounded"
-                    >
-                      refresh
-                    </button>
-                  ) : (
-                    <span className="text-muted text-[10px]">synced</span>
-                  )}
-                  <button onClick={() => onDeleteEdge(e)} className="text-white/30 hover:text-white/70">
-                    ×
-                  </button>
-                </div>
-              ))}
-            </div>
-          )}
-        </div>
-
-        {outbound.length > 0 && (
-          <div>
-            <SectionLabel>Shares with</SectionLabel>
-            <div className="space-y-1">
-              {outbound.map((e) => (
-                <div key={e.id} className="text-[11px] text-white/70">
-                  ▸ {nodeName(nodes, e.target_node_id)}
-                </div>
-              ))}
-            </div>
+              );
+            })}
           </div>
         )}
       </div>
 
-      <div className="flex-1 overflow-y-auto px-4 py-3 space-y-3 min-h-0">
-        {messages.length === 0 && <div className="text-xs text-muted">No history</div>}
-        {messages.map((m, i) => (
-          <div key={i} className={m.role === "user" ? "text-right" : ""}>
-            <div
-              className={`inline-block max-w-[240px] text-xs px-3 py-2 rounded-lg text-left ${
-                m.role === "user"
-                  ? "bg-accent/10 border border-accent/30"
-                  : m.role === "system"
-                  ? "bg-green/10 border border-green/30 text-green"
-                  : "bg-panel2 border border-border"
-              }`}
-            >
-              {m.content || (m.pending ? "…" : "")}
-            </div>
-          </div>
-        ))}
-
-        {pendingCalls && (
-          <div className="border border-amber/40 bg-amber/5 rounded-lg p-3 space-y-2">
-            <div className="text-[11px] font-medium text-amber">Approval required</div>
-            {pendingCalls.map((c) => (
-              <label key={c.tool_call_id} className="flex items-start gap-2 text-[11px]">
-                <input
-                  type="checkbox"
-                  checked={approvals[c.tool_call_id] ?? true}
-                  onChange={(e) =>
-                    onChatChange((prev) => ({
-                      ...prev,
-                      approvals: { ...prev.approvals, [c.tool_call_id]: e.target.checked },
-                    }))
-                  }
-                  className="mt-0.5 accent-amber"
-                />
-                <span>
-                  <span className="font-medium">{c.tool_name}</span>
-                  <span className="block text-muted text-[10px] break-all">
-                    {JSON.stringify(c.arguments)}
-                  </span>
-                </span>
-              </label>
+      <div>
+        <SectionLabel>Environments ({inboundEnv.length})</SectionLabel>
+        {inboundEnv.length === 0 ? (
+          <Empty>No sandbox linked — uses the project&apos;s shared scratch environment only.</Empty>
+        ) : (
+          <div className="flex flex-col gap-1.5">
+            {inboundEnv.map((e) => (
+              <div
+                key={e.id}
+                className="flex items-center gap-[9px] px-2.5 py-2 rounded-[7px] bg-green/[0.05] border border-green/20"
+              >
+                <span className="text-green text-[11px]">{ENV_ICON}</span>
+                <span className="flex-1 truncate text-[11.5px]">{nodeName(nodes, e.source_node_id)}</span>
+                <button onClick={() => onDeleteEdge(e)} className="text-white/30 hover:text-white/70 text-xs" title="Unlink">
+                  ×
+                </button>
+              </div>
             ))}
-            <button
-              onClick={handleResume}
-              disabled={busy}
-              className="w-full bg-amber text-[#2b1a00] font-medium rounded-md py-1.5 text-xs disabled:opacity-50"
-            >
-              {busy ? "Resuming…" : "Resume with these decisions"}
-            </button>
           </div>
         )}
       </div>
 
-      <div className="border-t border-border p-3 space-y-2">
-        <label className="flex items-center gap-2 text-[10px] text-muted">
-          <input
-            type="checkbox"
-            checked={useStream}
-            onChange={(e) => onChatChange((prev) => ({ ...prev, useStream: e.target.checked }))}
-            className="accent-accent"
-          />
-          Stream response (chat/stream) — shows tool checkpoints live
-        </label>
-        <div className="flex items-center gap-2">
-          <input
-            value={draft}
-            onChange={(e) => onChatChange((prev) => ({ ...prev, draft: e.target.value }))}
-            onKeyDown={(e) => e.key === "Enter" && handleSend()}
-            placeholder="Message this agent…"
-            disabled={!!pendingCalls}
-            className="flex-1 bg-panel2 border border-border rounded-md px-3 py-2 text-xs outline-none focus:border-accent/50 disabled:opacity-50"
-          />
-          {busy ? (
-            <button
-              onClick={handleCancel}
-              title="Stop this turn (POST /chat/cancel)"
-              className="bg-red-500/15 text-red-300 border border-red-500/40 rounded-md px-3 py-2 text-xs"
-            >
-              Stop
-            </button>
+      <div>
+        <SectionLabel>Inherited context</SectionLabel>
+        <div className="flex flex-col gap-1.5">
+          {stale.length > 0 && (
+            <div className="flex flex-wrap items-center gap-2 px-2.5 py-[9px] rounded-[7px] mb-0.5 border border-amber/[0.35] bg-amber/[0.06]">
+              <span className="text-amber text-[11px]">⟳</span>
+              <span className="text-[10.5px] text-white/60 leading-[1.4] flex-1 min-w-[110px]">
+                Upstream output changed — this agent holds stale context
+              </span>
+              <button
+                disabled={clearing}
+                onClick={() => stale.forEach((e) => onRefreshEdge(e))}
+                className="whitespace-nowrap bg-amber text-[#2b1a00] rounded-[5px] px-2.5 py-[5px] text-[10px] font-semibold disabled:opacity-60"
+              >
+                {clearing ? "Clearing…" : "⟳ Clear stale context"}
+              </button>
+            </div>
+          )}
+          {inboundContext.length === 0 ? (
+            <Empty>Runs on its own context only.</Empty>
           ) : (
-            <button
-              onClick={handleSend}
-              disabled={!!pendingCalls}
-              className="bg-accent/15 text-accent border border-accent/40 rounded-md px-3 py-2 text-xs disabled:opacity-50"
-            >
-              Send
-            </button>
+            inboundContext.map((e) => (
+              <div key={e.id} className="group flex items-center gap-2 text-[11.5px] text-white/[0.72]">
+                <span className={`text-[10px] ${e.is_stale ? "text-amber" : "text-accent"}`}>◗</span>
+                <span className="truncate">{nodeName(nodes, e.source_node_id)}</span>
+                <span className="ml-auto text-[10px] text-white/30">
+                  {e.summary_updated_at === null ? "no summary" : e.is_stale ? "stale" : "synced"}
+                </span>
+                <button
+                  onClick={() => onDeleteEdge(e)}
+                  className="text-white/0 group-hover:text-white/40 hover:!text-white/70 text-xs"
+                  title="Cut this link"
+                >
+                  ×
+                </button>
+              </div>
+            ))
           )}
         </div>
       </div>
-    </>
+
+      <div>
+        <SectionLabel>Shares with</SectionLabel>
+        {outbound.length === 0 ? (
+          <Empty>No downstream consumers.</Empty>
+        ) : (
+          <div className="flex flex-col gap-1.5">
+            {outbound.map((e) => (
+              <div key={e.id} className="flex items-center gap-2 text-[11.5px] text-white/[0.72]">
+                <span className="text-accent text-[10px]">▸</span>
+                {nodeName(nodes, e.target_node_id)}
+              </div>
+            ))}
+          </div>
+        )}
+      </div>
+
+      <button
+        onClick={onOpenChat}
+        className="mt-0.5 bg-accent hover:bg-[#5eeaf6] text-[#00191d] rounded-lg px-3.5 py-2.5 text-xs font-semibold transition-colors"
+      >
+        {chatBusy ? "● Reply in progress — open chat" : `Open chat with ${node.name}`}
+      </button>
+    </div>
   );
 }
 
@@ -745,12 +411,20 @@ function ToolInspector({
 
   return (
     <>
-      <div className="px-4 py-3 border-b border-border">
-        <div className="text-sm font-medium">{node.name}</div>
-        <div className="text-[10px] text-muted">{node.tool_slug}</div>
-      </div>
+      <div className="flex-1 overflow-y-auto px-[18px] py-4 space-y-4">
+        <div>
+          <SectionLabel>Identity</SectionLabel>
+          <div className="flex gap-2.5 items-start">
+            <div className="flex-none w-8 h-8 rounded-lg border border-accent/50 grid place-items-center text-accent text-sm">
+              {TOOL_ICONS[node.tool_slug] ?? "◆"}
+            </div>
+            <div className="min-w-0">
+              <div className="text-[13px] font-semibold truncate">{node.name}</div>
+              <div className="text-[11px] text-white/[0.45] mt-[3px]">{toolType?.name ?? node.tool_slug}</div>
+            </div>
+          </div>
+        </div>
 
-      <div className="flex-1 overflow-y-auto px-4 py-3 space-y-4">
         {attachedTo.length > 0 && (
           <div className="text-[11px] text-accent bg-accent/5 border border-accent/20 rounded-md px-2.5 py-1.5">
             Equipped on {attachedTo.map((e) => nodeName(nodes, e.target_node_id)).join(", ")} — shown as a
@@ -965,14 +639,19 @@ function EnvironmentInspector({
 
   return (
     <>
-      <div className="px-4 py-3 border-b border-border">
-        <div className="text-sm font-medium">{node.name}</div>
-        <div className="text-[10px] text-muted">
-          {node.runtime} sandbox · {node.role === "scratch" ? "shared scratch space" : "user-provisioned"}
+      <div className="flex-1 overflow-y-auto px-[18px] py-4 space-y-4">
+        <div className="flex gap-2.5 items-start">
+          <div className="flex-none w-8 h-8 rounded-lg border border-green/50 grid place-items-center text-green text-sm">
+            {ENV_ICON}
+          </div>
+          <div className="min-w-0">
+            <div className="text-[13px] font-semibold truncate">{node.name}</div>
+            <div className="text-[11px] text-white/[0.45] mt-[3px]">
+              {node.runtime} sandbox · {node.role === "scratch" ? "shared scratch space" : "user-provisioned"}
+            </div>
+          </div>
         </div>
-      </div>
 
-      <div className="flex-1 overflow-y-auto px-4 py-3 space-y-4">
         <div>
           <SectionLabel>Status</SectionLabel>
           <div className="flex items-center gap-2">
@@ -1024,12 +703,12 @@ function EnvironmentInspector({
         </div>
 
         <div>
-          <SectionLabel>Identity</SectionLabel>
+          <SectionLabel>Name &amp; policy</SectionLabel>
           <div className="flex gap-1.5">
             <input
               value={name}
               onChange={(e) => setName(e.target.value)}
-              className="flex-1 bg-panel2 border border-border rounded-md px-2 py-1.5 text-xs outline-none focus:border-accent/50"
+              className="flex-1 min-w-0 bg-panel2 border border-border rounded-md px-2 py-1.5 text-xs outline-none focus:border-accent/50"
             />
             <button
               onClick={async () => {

@@ -36,6 +36,7 @@ export default function EdgeLayer({
   refreshingId,
   onRefresh,
   onDelete,
+  onSelectNode,
 }: {
   nodes: ProjectNode[];
   edges: Edge[];
@@ -44,6 +45,8 @@ export default function EdgeLayer({
   refreshingId: string | null;
   onRefresh: (edge: Edge) => void;
   onDelete: (edge: Edge) => void;
+  // Clicking a healthy link's pill jumps the inspector to its target.
+  onSelectNode?: (id: string) => void;
 }) {
   const nodeById = (id: string) => nodes.find((n) => n.id === id);
 
@@ -157,6 +160,7 @@ export default function EdgeLayer({
                 onClick={(ev) => {
                   ev.stopPropagation();
                   if (stale) onRefresh(e);
+                  else onSelectNode?.(e.target_node_id);
                 }}
                 title={
                   isEnv
@@ -165,7 +169,6 @@ export default function EdgeLayer({
                     ? `Stale — click to refresh ${a.name}'s summary for ${b.name}`
                     : `Context link — ${a.name} → ${b.name}`
                 }
-                disabled={e.kind !== "context"}
                 className="inline-flex items-center gap-1.5 whitespace-nowrap rounded-full px-2.5 py-1 text-[9.5px] tracking-wide"
                 style={{
                   fontWeight: stale ? 600 : 400,
@@ -173,11 +176,11 @@ export default function EdgeLayer({
                   color: stale ? "#2b1a00" : hot ? accentCol : "rgba(255,255,255,.5)",
                   border: `1px solid ${stale ? AMBER : hot ? `${accentCol}80` : "rgba(255,255,255,.16)"}`,
                   boxShadow: stale ? "0 0 16px rgba(255,183,77,.35)" : "none",
-                  cursor: e.kind === "context" ? "pointer" : "default",
+                  cursor: "pointer",
                 }}
               >
                 <span>{isEnv ? "▣" : stale ? "⟳" : "◗"}</span>
-                {busy ? "REFRESHING…" : label}
+                {busy ? "CLEARING…" : label}
               </button>
               <button
                 onPointerDown={(ev) => ev.stopPropagation()}
@@ -186,7 +189,7 @@ export default function EdgeLayer({
                   onDelete(e);
                 }}
                 title="Cut this link"
-                className="w-[19px] h-[19px] rounded-full grid place-items-center leading-none bg-[#05080a] border border-white/15 text-white/40 text-[11px]"
+                className="w-[19px] h-[19px] rounded-full grid place-items-center leading-none bg-[#05080a] border border-white/15 text-white/40 hover:text-white/80 hover:border-white/40 text-[11px]"
               >
                 ×
               </button>
