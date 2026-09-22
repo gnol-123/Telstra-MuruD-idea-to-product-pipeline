@@ -32,7 +32,7 @@ import {
   ApiError,
 } from "@/lib/api";
 import Palette, { PaletteTab, PaletteTabs } from "./Palette";
-import NodeCard, { AttachedTool } from "./NodeCard";
+import NodeCard, { AttachedTool, AttachedEnvironment } from "./NodeCard";
 import EdgeLayer, { LinkDraft, LAYER_W, LAYER_H } from "./EdgeLayer";
 import Inspector from "./Inspector";
 import ChatWindow, { ChatState, defaultChatState } from "./ChatWindow";
@@ -465,8 +465,9 @@ export default function MeshCanvas({
   // render as a chip on the target agent's card instead of a floating box
   // of their own, per the design. Build that lookup once per render.
   const attachedToolsByAgent = new Map<string, AttachedTool[]>();
+  const attachedEnvsByAgent = new Map<string, AttachedEnvironment[]>();
   const attachedToolNodeIds = new Set<string>();
-  const environmentCountByAgent = new Map<string, number>();
+  const attachedEnvNodeIds = new Set<string>();
   for (const e of edges) {
     if (e.kind === "tool") {
       const tool = nodes.find((n) => n.id === e.source_node_id);
@@ -477,11 +478,21 @@ export default function MeshCanvas({
         attachedToolsByAgent.set(e.target_node_id, list);
       }
     } else if (e.kind === "environment") {
-      environmentCountByAgent.set(e.target_node_id, (environmentCountByAgent.get(e.target_node_id) ?? 0) + 1);
+      const env = nodes.find((n) => n.id === e.source_node_id);
+      if (env && isEnvironmentNode(env)) {
+        attachedEnvNodeIds.add(env.id);
+        const list = attachedEnvsByAgent.get(e.target_node_id) ?? [];
+        list.push({ edge: e, env });
+        attachedEnvsByAgent.set(e.target_node_id, list);
+      }
     }
   }
 
-  const visibleNodes = nodes.filter((n) => !(isToolNode(n) && attachedToolNodeIds.has(n.id)));
+    const visibleNodes = nodes.filter(
+    (n) =>
+      !(isToolNode(n) && attachedToolNodeIds.has(n.id)) &&
+      !(isEnvironmentNode(n) && attachedEnvNodeIds.has(n.id))
+  );
 
   const toolNodeCount = nodes.filter(isToolNode).length;
   const agentNodeCount = nodes.filter(isAgentNode).length;
@@ -615,7 +626,7 @@ export default function MeshCanvas({
           <div data-canvas-layer="1" style={{ position: "relative", width: LAYER_W, height: LAYER_H }}>
             <EdgeLayer
               nodes={nodes}
-              edges={edges}
+              edges={edges.filter((e) => e.kind !== "environment")}
               selectedId={selectedId}
               link={link}
               refreshingId={refreshingEdgeId}
@@ -633,10 +644,10 @@ export default function MeshCanvas({
                   linking={!!link}
                   linkHover={!!link && hoverNodeId === node.id && link.fromId !== node.id}
                   attachedTools={isAgentNode(node) ? attachedToolsByAgent.get(node.id) ?? [] : undefined}
-                  environmentCount={isAgentNode(node) ? environmentCountByAgent.get(node.id) ?? 0 : undefined}
                   inboundCount={inbound.length}
                   staleCount={inbound.filter((e) => e.is_stale).length}
                   busy={!!chatByNode[node.id]?.busy}
+                  attachedEnvironments={isAgentNode(node) ? attachedEnvsByAgent.get(node.id) ?? [] : undefined}
                   onSelect={() => setSelectedId(node.id)}
                   onDragMove={(x, y) => handleDragMove(node, x, y)}
                   onDragEnd={(x, y) => handleDragEnd(node, x, y)}
