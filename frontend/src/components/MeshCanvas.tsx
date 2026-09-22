@@ -277,6 +277,11 @@ export default function MeshCanvas({
     }
   }
 
+  // Live position during a drag. No save; edges re-render off this.
+  function handleDragMove(node: ProjectNode, x: number, y: number) {
+    setNodes((prev) => prev.map((n) => (n.id === node.id ? { ...n, position_x: x, position_y: y } : n)));
+  }
+
   async function handleDragEnd(node: ProjectNode, x: number, y: number) {
     setNodes((prev) => prev.map((n) => (n.id === node.id ? { ...n, position_x: x, position_y: y } : n)));
     try {
@@ -566,6 +571,7 @@ export default function MeshCanvas({
                   environmentCount={isAgentNode(node) ? environmentCountByAgent.get(node.id) ?? 0 : undefined}
                   inboundCount={inboundCount}
                   onSelect={() => setSelectedId(node.id)}
+                  onDragMove={(x, y) => handleDragMove(node, x, y)}
                   onDragEnd={(x, y) => handleDragEnd(node, x, y)}
                   onDelete={() => handleDeleteNode(node)}
                   onPortDown={(side) => handlePortDown(node, side)}

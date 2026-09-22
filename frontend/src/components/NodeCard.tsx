@@ -38,6 +38,7 @@ export default function NodeCard({
   environmentCount,
   inboundCount,
   onSelect,
+  onDragMove,
   onDragEnd,
   onDelete,
   onPortDown,
@@ -57,6 +58,8 @@ export default function NodeCard({
   environmentCount?: number;
   inboundCount?: number;
   onSelect: () => void;
+  // Fires per pointermove. State only; PATCH happens on drag end.
+  onDragMove: (x: number, y: number) => void;
   onDragEnd: (x: number, y: number) => void;
   onDelete: () => void;
   onPortDown: (side: "in" | "out") => void;
@@ -91,13 +94,11 @@ export default function NodeCard({
     let latestX = originX;
     let latestY = originY;
 
-    const card = e.currentTarget;
-
     function onMove(ev: PointerEvent) {
       latestX = originX + (ev.clientX - startX);
       latestY = originY + (ev.clientY - startY);
-      card.style.left = `${latestX}px`;
-      card.style.top = `${latestY}px`;
+      // State, not card.style; EdgeLayer reads the same position.
+      onDragMove(latestX, latestY);
     }
 
     function onUp() {
