@@ -1,7 +1,7 @@
 "use client";
 
 import { useState } from "react";
-import { Edge, ProjectNode, ToolNode, isAgentNode, isEnvironmentNode } from "@/lib/types";
+import { Edge, ProjectNode, ToolNode, EnvironmentNode, isAgentNode, isEnvironmentNode } from "@/lib/types";
 
 export const AGENT_ICONS: Record<string, string> = {
   market_research: "◈",
@@ -44,6 +44,10 @@ export interface AttachedTool {
   edge: Edge;
   tool: ToolNode;
 }
+export interface AttachedEnvironment {
+  edge: Edge;
+  env: EnvironmentNode;
+}
 
 export default function NodeCard({
   node,
@@ -51,7 +55,7 @@ export default function NodeCard({
   linking,
   linkHover,
   attachedTools,
-  environmentCount,
+  attachedEnvironments,
   inboundCount,
   staleCount,
   busy,
@@ -74,7 +78,7 @@ export default function NodeCard({
   // Agent nodes only: tool nodes attached via an inbound `tool` edge,
   // rendered as chips on the card itself rather than as separate boxes.
   attachedTools?: AttachedTool[];
-  environmentCount?: number;
+  attachedEnvironments?: AttachedEnvironment[];
   inboundCount?: number;
   // Agent nodes only: inbound context links whose summary is out of date.
   staleCount?: number;
@@ -242,39 +246,78 @@ export default function NodeCard({
         </button>
       </div>
 
-      {agent && (
+            {agent && (
         <div className="mt-[11px] flex flex-wrap gap-[5px] min-h-[24px]">
-          {attachedTools && attachedTools.length > 0 ? (
-            attachedTools.map(({ edge, tool }) => (
-              <span
-                key={edge.id}
-                data-chip
-                onPointerDown={(e) => e.stopPropagation()}
-                onClick={(e) => {
-                  e.stopPropagation();
-                  onChipClick?.(tool.id);
-                }}
-                title={`${tool.name} — click to inspect`}
-                className="inline-flex items-center gap-1 pl-[7px] pr-1 py-[3px] rounded-[5px] text-[10px] bg-accent/10 border border-accent/30 text-accent cursor-pointer hover:bg-accent/15"
-              >
-                <span className="opacity-80">{TOOL_ICONS[tool.tool_slug] ?? "◆"}</span>
-                <span className="max-w-[86px] truncate">{tool.name}</span>
+          {(attachedTools?.length ?? 0) === 0 && (attachedEnvironments?.length ?? 0) === 0 ? (
+            <span className="text-[10px] text-white/25 border border-dashed border-white/[0.13] rounded-[5px] px-2 py-[3px]">
+              no tools or environments — drop one here
+            </span>
+          ) : (
+            <>
+              {attachedTools?.map(({ edge, tool }) => (
                 <span
+                  key={edge.id}
+                  data-chip
+                  onPointerDown={(e) => e.stopPropagation()}
                   onClick={(e) => {
                     e.stopPropagation();
-                    onChipRemove?.(edge);
+                    onChipClick?.(tool.id);
                   }}
-                  title={`Unequip ${tool.name}`}
-                  className="ml-0.5 text-accent/60 hover:text-accent px-0.5"
+                  title={`${tool.name} — click to inspect`}
+                  className="inline-flex items-center gap-1 pl-[7px] pr-1 py-[3px] rounded-[5px] text-[10px] bg-accent/10 border border-accent/30 text-accent cursor-pointer hover:bg-accent/15"
                 >
-                  ×
+                  <span className="opacity-80">{TOOL_ICONS[tool.tool_slug] ?? "◆"}</span>
+                  <span className="max-w-[86px] truncate">{tool.name}</span>
+                  <span
+                    onClick={(e) => {
+                      e.stopPropagation();
+                      onChipRemove?.(edge);
+                    }}
+                    title={`Unequip ${tool.name}`}
+                    className="ml-0.5 text-accent/60 hover:text-accent px-0.5"
+                  >
+                    ×
+                  </span>
                 </span>
-              </span>
-            ))
-          ) : (
-            <span className="text-[10px] text-white/[0.26] border border-dashed border-white/[0.16] rounded-[5px] px-2 py-1">
-              no tools — drop one here
-            </span>
+              ))}
+              {attachedEnvironments?.map(({ edge, env: envNode }) => (
+                <span
+                  key={edge.id}
+                  data-chip
+                  onPointerDown={(e) => e.stopPropagation()}
+                  onClick={(e) => {
+                    e.stopPropagation();
+                    onChipClick?.(envNode.id);
+                  }}
+                  title={`${envNode.name} — click to inspect`}
+                  className="inline-flex items-center gap-1 pl-[7px] pr-1 py-[3px] rounded-[5px] text-[10px] bg-accent/10 border border-accent/30 text-accent cursor-pointer hover:bg-accent/15"
+                >
+                  <span
+                    className={`w-1.5 h-1.5 rounded-full ${
+                      envNode.status === "ready"
+                        ? "bg-green"
+                        : envNode.status === "error"
+                        ? "bg-red-400"
+                        : envNode.status === "provisioning"
+                        ? "bg-amber animate-pulse"
+                        : "bg-white/30"
+                    }`}
+                  />
+                  <span className="opacity-80">{ENV_ICON}</span>
+                  <span className="max-w-[86px] truncate">{envNode.name}</span>
+                  <span
+                    onClick={(e) => {
+                      e.stopPropagation();
+                      onChipRemove?.(edge);
+                    }}
+                    title={`Detach ${envNode.name}`}
+                    className="ml-0.5 text-accent/60 hover:text-accent px-0.5"
+                  >
+                    ×
+                  </span>
+                </span>
+              ))}
+            </>
           )}
         </div>
       )}
