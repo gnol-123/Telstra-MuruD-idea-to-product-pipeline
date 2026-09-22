@@ -6,9 +6,24 @@
   box-sizing: border-box;
 }
 
+html,
+body {
+  height: 100%;
+}
+
 body {
   background: #000;
   color: #e8ecee;
+  font-family: Poppins, system-ui, -apple-system, sans-serif;
+  -webkit-font-smoothing: antialiased;
+}
+
+a {
+  color: #22e0f0;
+  text-decoration: none;
+}
+a:hover {
+  color: #7cf0fa;
 }
 
 ::-webkit-scrollbar {
@@ -18,4 +33,50 @@ body {
 ::-webkit-scrollbar-thumb {
   background: rgba(255, 255, 255, 0.14);
   border-radius: 8px;
+}
+
+/* Motion from the UX mockup. `dash` drives the flowing context-link dashes
+   in EdgeLayer — it was referenced there but never defined, so links sat
+   still until now. */
+@keyframes pop {
+  from {
+    opacity: 0;
+    transform: translateY(10px) scale(0.99);
+  }
+  to {
+    opacity: 1;
+    transform: none;
+  }
+}
+@keyframes fadein {
+  from {
+    opacity: 0;
+  }
+  to {
+    opacity: 1;
+  }
+}
+@keyframes dash {
+  to {
+    stroke-dashoffset: -24;
+  }
+}
+@keyframes softpulse {
+  0%,
+  100% {
+    opacity: 0.5;
+  }
+  50% {
+    opacity: 1;
+  }
+}
+
+.anim-pop {
+  animation: pop 0.18s ease-out;
+}
+.anim-fadein {
+  animation: fadein 0.14s ease-out;
+}
+.anim-softpulse {
+  animation: softpulse 1.6s infinite;
 }
