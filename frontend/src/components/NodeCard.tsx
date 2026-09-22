@@ -24,6 +24,22 @@ export const TOOL_ICONS: Record<string, string> = {
 
 export const ENV_ICON = "▣";
 
+// One-line role descriptions shown under an agent's name, matching the UX
+// mockup. The catalog (/agent-types) only returns a name + slug, so these
+// live client-side; unknown slugs just fall back to the slug itself.
+export const AGENT_ROLES: Record<string, string> = {
+  market_research: "Gathers market + competitor evidence",
+  project_scoping: "Shapes the concept, brief and scope",
+  coding: "Scaffolds, tests and ships code",
+  ux_ui: "Turns briefs into UI and mockups",
+  orchestrator: "Plans the work and provisions other agents",
+};
+
+export function agentRole(slug: string | undefined) {
+  if (!slug) return "Agent";
+  return AGENT_ROLES[slug] ?? slug.replace(/_/g, " ");
+}
+
 export interface AttachedTool {
   edge: Edge;
   tool: ToolNode;
@@ -37,6 +53,8 @@ export default function NodeCard({
   attachedTools,
   environmentCount,
   inboundCount,
+  staleCount,
+  busy,
   onSelect,
   onDragEnd,
   onDelete,
@@ -46,6 +64,8 @@ export default function NodeCard({
   onDropOnCard,
   onChipClick,
   onChipRemove,
+  onClearStale,
+  onOpenChat,
 }: {
   node: ProjectNode;
   selected: boolean;
@@ -56,6 +76,10 @@ export default function NodeCard({
   attachedTools?: AttachedTool[];
   environmentCount?: number;
   inboundCount?: number;
+  // Agent nodes only: inbound context links whose summary is out of date.
+  staleCount?: number;
+  // Agent nodes only: a chat turn is in flight for this agent right now.
+  busy?: boolean;
   onSelect: () => void;
   onDragEnd: (x: number, y: number) => void;
   onDelete: () => void;
@@ -68,6 +92,8 @@ export default function NodeCard({
   onDropOnCard?: (raw: string) => void;
   onChipClick?: (toolNodeId: string) => void;
   onChipRemove?: (edge: Edge) => void;
+  onClearStale?: () => void;
+  onOpenChat?: () => void;
 }) {
   const agent = isAgentNode(node);
   const env = isEnvironmentNode(node);
@@ -121,7 +147,7 @@ export default function NodeCard({
     ? "border-green"
     : selected
     ? "border-accent"
-    : "border-border";
+    : "border-white/[0.13]";
 
   return (
     <div
@@ -148,9 +174,15 @@ export default function NodeCard({
         const raw = e.dataTransfer.getData("text/plain");
         onDropOnCard(raw);
       }}
+      onDoubleClick={(e) => {
+        if ((e.target as HTMLElement).closest("[data-port],[data-btn],[data-chip]")) return;
+        if (agent) onOpenChat?.();
+      }}
       style={{ left: node.position_x ?? 0, top: node.position_y ?? 0, zIndex: selected ? 5 : 2 }}
-      className={`absolute w-60 cursor-grab active:cursor-grabbing bg-panel/90 backdrop-blur border rounded-xl p-3 select-none transition-colors ${borderColor} ${
-        selected ? "shadow-[0_18px_44px_rgba(0,0,0,.6),0_0_34px_rgba(34,224,240,.1)]" : "shadow-[0_14px_34px_rgba(0,0,0,.5)]"
+      className={`absolute w-60 cursor-grab active:cursor-grabbing backdrop-blur-md border rounded-[13px] px-3.5 pt-[13px] pb-3 select-none transition-colors ${borderColor} ${
+        selected
+          ? "bg-accent/[0.045] shadow-[0_18px_44px_rgba(0,0,0,.6),0_0_34px_rgba(34,224,240,.1)]"
+          : "bg-white/[0.022] shadow-[0_14px_34px_rgba(0,0,0,.5)]"
       }`}
     >
       {/* in port: agents and environments-as-sources don't receive; only agents can be an edge target */}
@@ -180,16 +212,20 @@ export default function NodeCard({
 
       <div className="flex items-start gap-2.5">
         <div
-          className={`shrink-0 w-7 h-7 rounded-md border grid place-items-center text-sm ${
-            selected ? "border-accent text-accent" : "border-white/20 text-white/60"
+          className={`shrink-0 w-[30px] h-[30px] rounded-lg border grid place-items-center text-[13px] ${
+            selected ? "border-accent text-accent" : "border-white/[0.18] text-white/60"
           }`}
         >
           {icon}
         </div>
         <div className="min-w-0 flex-1">
-          <div className="text-sm font-medium truncate">{node.name}</div>
-          <div className="text-[10px] text-muted truncate">
-            {agent ? node.agent_slug : env ? `${node.runtime} sandbox` : (node as ToolNode).tool_slug}
+          <div className="text-[13px] font-semibold tracking-[-0.01em] truncate">{node.name}</div>
+          <div className="mt-[3px] text-[10.5px] text-white/40 leading-[1.35] line-clamp-2">
+            {agent
+              ? agentRole(node.agent_slug)
+              : env
+              ? `${node.runtime} sandbox · ${node.role === "scratch" ? "shared scratch space" : "shell + filesystem"}`
+              : ((node as ToolNode).tool_slug ?? "tool").replace(/_/g, " ")}
           </div>
         </div>
         <button
@@ -200,14 +236,14 @@ export default function NodeCard({
             onDelete();
           }}
           title={agent ? "Delete agent" : env ? "Delete environment" : "Delete tool"}
-          className="shrink-0 text-white/30 hover:text-white/70 text-sm px-0.5"
+          className="shrink-0 text-white/[0.28] hover:text-white/70 text-[13px] px-0.5 leading-none"
         >
           ×
         </button>
       </div>
 
       {agent && (
-        <div className="mt-2.5 flex flex-wrap gap-1.5 min-h-[26px]">
+        <div className="mt-[11px] flex flex-wrap gap-[5px] min-h-[24px]">
           {attachedTools && attachedTools.length > 0 ? (
             attachedTools.map(({ edge, tool }) => (
               <span
@@ -219,7 +255,7 @@ export default function NodeCard({
                   onChipClick?.(tool.id);
                 }}
                 title={`${tool.name} — click to inspect`}
-                className="inline-flex items-center gap-1.5 pl-2 pr-1 py-1 rounded-md text-[10px] bg-accent/10 border border-accent/30 text-accent cursor-pointer hover:bg-accent/15"
+                className="inline-flex items-center gap-1 pl-[7px] pr-1 py-[3px] rounded-[5px] text-[10px] bg-accent/10 border border-accent/30 text-accent cursor-pointer hover:bg-accent/15"
               >
                 <span className="opacity-80">{TOOL_ICONS[tool.tool_slug] ?? "◆"}</span>
                 <span className="max-w-[86px] truncate">{tool.name}</span>
@@ -236,7 +272,7 @@ export default function NodeCard({
               </span>
             ))
           ) : (
-            <span className="text-[10px] text-white/25 border border-dashed border-white/15 rounded-md px-2 py-1">
+            <span className="text-[10px] text-white/[0.26] border border-dashed border-white/[0.16] rounded-[5px] px-2 py-1">
               no tools — drop one here
             </span>
           )}
@@ -244,34 +280,63 @@ export default function NodeCard({
       )}
 
       {agent ? (
-        <div className="mt-2.5 pt-2.5 border-t border-border flex items-center gap-2 text-[10px] text-muted">
-          <span>
-            Policy: <span className="text-text/70">{node.tool_policy}</span>
-          </span>
-          {node.status && (
-            <span className="flex items-center gap-1">
-              <span
-                className={`w-1.5 h-1.5 rounded-full ${
-                  node.status === "running"
-                    ? "bg-amber animate-pulse"
-                    : node.status === "error"
-                    ? "bg-red-400"
-                    : node.status === "ready"
-                    ? "bg-green"
-                    : "bg-white/30"
-                }`}
-              />
-              <span className="uppercase tracking-wide">{node.status}</span>
-            </span>
+        <div className="mt-[11px] pt-2.5 border-t border-white/[0.07] flex items-center gap-2">
+          {(() => {
+            // A turn in flight on this client wins over the polled backend
+            // value, which today only ever reads "ready" for agents.
+            const status = busy ? "running" : node.status ?? "ready";
+            return (
+              <>
+                <span
+                  className={`w-[5px] h-[5px] rounded-full shrink-0 ${
+                    status === "running"
+                      ? "bg-green anim-softpulse"
+                      : status === "error"
+                      ? "bg-red-400"
+                      : "bg-white/30"
+                  }`}
+                />
+                <span className="shrink-0 text-[10px] text-white/[0.42] tracking-[0.04em] uppercase whitespace-nowrap">
+                  {status}
+                </span>
+              </>
+            );
+          })()}
+          {(inboundCount ?? 0) > 0 && (
+            <span className="shrink-0 whitespace-nowrap text-[10px] text-white/[0.32]">· {inboundCount} in</span>
           )}
-          {typeof environmentCount === "number" && environmentCount > 0 && (
-            <span className="ml-auto">
-              {ENV_ICON} {environmentCount}
-            </span>
+          {(staleCount ?? 0) > 0 && (
+            <button
+              data-btn
+              onPointerDown={(e) => e.stopPropagation()}
+              onClick={(e) => {
+                e.stopPropagation();
+                onClearStale?.();
+              }}
+              title="Stale context — click to clear and pull the latest upstream output"
+              className="shrink-0 w-5 h-5 grid place-items-center rounded-full text-[11px] leading-none text-amber border border-amber/45 bg-amber/10 hover:bg-amber/20"
+            >
+              ⟳
+            </button>
           )}
+          <button
+            data-btn
+            onPointerDown={(e) => e.stopPropagation()}
+            onClick={(e) => {
+              e.stopPropagation();
+              onOpenChat?.();
+            }}
+            className={`ml-auto shrink-0 whitespace-nowrap bg-transparent border rounded-md px-2.5 py-[5px] text-[10.5px] font-medium transition-colors ${
+              selected
+                ? "border-accent/45 text-accent"
+                : "border-white/[0.16] text-white/60 hover:text-text hover:border-white/30"
+            }`}
+          >
+            Open chat
+          </button>
         </div>
       ) : env ? (
-        <div className="mt-2.5 pt-2.5 border-t border-border flex items-center gap-2 text-[10px]">
+        <div className="mt-[11px] pt-2.5 border-t border-white/[0.07] flex items-center gap-2 text-[10px]">
           <span
             className={`w-1.5 h-1.5 rounded-full ${
               node.status === "ready"
@@ -291,7 +356,7 @@ export default function NodeCard({
           )}
         </div>
       ) : (
-        <div className="mt-2.5 pt-2.5 border-t border-border flex items-center gap-2 text-[10px]">
+        <div className="mt-[11px] pt-2.5 border-t border-white/[0.07] flex items-center gap-2 text-[10px]">
           <span
             className={`w-1.5 h-1.5 rounded-full ${
               (node as ToolNode).status === "ready"
