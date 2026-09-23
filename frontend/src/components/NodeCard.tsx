@@ -186,7 +186,7 @@ export default function NodeCard({
         if (agent) onOpenChat?.();
       }}
       style={{ left: node.position_x ?? 0, top: node.position_y ?? 0, zIndex: selected ? 5 : 2 }}
-      className={`absolute w-60 cursor-grab active:cursor-grabbing backdrop-blur-md border rounded-[13px] px-3.5 pt-[13px] pb-3 select-none transition-all ${borderColor} ${
+      className={`absolute w-60 cursor-grab active:cursor-grabbing backdrop-blur-md border rounded-[13px] px-3.5 pt-[13px] pb-3 select-none transition-[border-color,background-color,opacity] ${borderColor} ${
         selected
           ? "bg-accent/[0.045] shadow-[0_18px_44px_rgba(0,0,0,.6),0_0_34px_rgba(34,224,240,.1)]"
           : "bg-white/[0.022] shadow-[0_14px_34px_rgba(0,0,0,.5)]"

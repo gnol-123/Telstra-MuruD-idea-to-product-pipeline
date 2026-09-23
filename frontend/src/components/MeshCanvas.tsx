@@ -87,6 +87,10 @@ export default function MeshCanvas({
   const toolModalOpen = useRef(false);
   // Nodes with a delete in flight. Spinner until the row actually goes.
   const [deletingIds, setDeletingIds] = useState<Set<string>>(new Set());
+  // Live position of the node being dragged, null when nothing is.
+  const [dragPos, setDragPos] = useState<{ id: string; x: number; y: number } | null>(null);
+  // Same fact as dragPos, as a ref the poll's closure can read live.
+  const draggingRef = useRef(false);
 
   async function reloadCanvas() {
     try {
@@ -144,6 +148,9 @@ export default function MeshCanvas({
     const interval = setInterval(() => {
       Promise.all([listNodes(project.id), listEdges(project.id)])
         .then(([fresh, freshEdges]) => {
+          // A drag is a gesture in progress: adding or removing cards under
+          // the cursor stutters it, so leave the canvas alone until release.
+          if (draggingRef.current) return;
           const settled = pendingMutations.current === 0 && !toolModalOpen.current;
           const byId = new Map(fresh.map((n) => [n.id, n]));
           setNodes((prev) => {
@@ -371,11 +378,17 @@ export default function MeshCanvas({
   }
 
   // Live position during a drag. No save; edges re-render off this.
+  // One small state for the node under the cursor, instead of rewriting the
+  // whole nodes array on every pointermove. Edges still follow, because
+  // positionsFor() overlays this before anything reads a position.
   function handleDragMove(node: ProjectNode, x: number, y: number) {
-    setNodes((prev) => prev.map((n) => (n.id === node.id ? { ...n, position_x: x, position_y: y } : n)));
+    draggingRef.current = true;
+    setDragPos({ id: node.id, x, y });
   }
 
   async function handleDragEnd(node: ProjectNode, x: number, y: number) {
+    draggingRef.current = false;
+    setDragPos(null);
     setNodes((prev) => prev.map((n) => (n.id === node.id ? { ...n, position_x: x, position_y: y } : n)));
     try {
       await savePosition(node, x, y);
@@ -577,7 +590,16 @@ export default function MeshCanvas({
     }
   }
 
-  const visibleNodes = nodes.filter(
+  // The dragging node's live position, overlaid on the one node it applies
+  // to. Cards and EdgeLayer both read this, so edges track the drag without
+  // rebuilding the whole array on every pointermove.
+  const positioned = dragPos
+    ? nodes.map((n) =>
+        n.id === dragPos.id ? { ...n, position_x: dragPos.x, position_y: dragPos.y } : n
+      )
+    : nodes;
+
+  const visibleNodes = positioned.filter(
     (n) =>
       !(isToolNode(n) && attachedToolNodeIds.has(n.id)) &&
       !(isEnvironmentNode(n) && attachedEnvNodeIds.has(n.id)) &&
@@ -715,7 +737,7 @@ export default function MeshCanvas({
         >
           <div data-canvas-layer="1" style={{ position: "relative", width: LAYER_W, height: LAYER_H }}>
             <EdgeLayer
-              nodes={nodes}
+              nodes={positioned}
               edges={edges.filter((e) => e.kind !== "environment")}
               selectedId={selectedId}
               link={link}
