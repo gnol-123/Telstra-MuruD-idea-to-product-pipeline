@@ -80,6 +80,11 @@ export default function MeshCanvas({
   // Which agent's chat window is open, if any.
   const [chatNodeId, setChatNodeId] = useState<string | null>(null);
   const canvasRef = useRef<HTMLDivElement | null>(null);
+  // In-flight create/delete calls. Non-zero means the server list is behind
+  // the UI, so the poll merges status only and skips add/remove.
+  const pendingMutations = useRef(0);
+  // Same idea for the tool modal: its create call lives inside the modal.
+  const toolModalOpen = useRef(false);
 
   async function reloadCanvas() {
     try {
@@ -88,6 +93,16 @@ export default function MeshCanvas({
       setEdges(dedupeById(es));
     } catch (e) {
       setError(e instanceof ApiError ? e.message : "Could not refresh the canvas");
+    }
+  }
+
+  // Holds off the poll's add/remove while a create or delete is mid-flight.
+  async function mutating<T>(fn: () => Promise<T>): Promise<T> {
+    pendingMutations.current += 1;
+    try {
+      return await fn();
+    } finally {
+      pendingMutations.current -= 1;
     }
   }
 
@@ -105,30 +120,61 @@ export default function MeshCanvas({
 
   // Per the teammate's node-status addition: every node row (agent, tool,
   // environment) now carries status/status_detail (see NodeResponse in
-  // routers/projects.py). Poll the list every 2s and merge just those two
-  // fields into whatever's already on screen — never overwriting position or
-  // anything else a drag gesture owns, and skipping the setState entirely
-  // when nothing actually changed so this doesn't fight an in-progress drag.
+  // routers/projects.py). Poll nodes and edges every 2s so server-side
+  // creates (orchestrator provisioning) and deletes land on the canvas.
+  // Merge rules: known nodes take status/status_detail/name only, never
+  // position, which a drag owns locally until release. Unknown nodes are
+  // added whole. Missing nodes are removed, but only from a non-empty
+  // response with no mutation in flight, so a dropped request or a
+  // mid-create tick can't wipe the canvas. setState is skipped entirely
+  // when nothing actually changed.
   useEffect(() => {
     const interval = setInterval(() => {
-      listNodes(project.id)
-        .then((fresh) => {
+      Promise.all([listNodes(project.id), listEdges(project.id)])
+        .then(([fresh, freshEdges]) => {
+          const settled = pendingMutations.current === 0 && !toolModalOpen.current;
           const byId = new Map(fresh.map((n) => [n.id, n]));
           setNodes((prev) => {
             let changed = false;
-            const next = prev.map((n) => {
-              const f = byId.get(n.id) as (ProjectNode & { status?: string; status_detail?: string | null }) | undefined;
-              if (!f || !("status" in f)) return n;
-              const cur = n as ProjectNode & { status?: string; status_detail?: string | null };
-              if (cur.status === f.status && cur.status_detail === f.status_detail) return n;
+            const merged = prev.flatMap((n) => {
+              const f = byId.get(n.id);
+              if (!f) {
+                if (!settled || fresh.length === 0) return [n];
+                changed = true;
+                return [];
+              }
+              const cur = n as ProjectNode & { status?: string };
+              const fs = f as ProjectNode & { status?: string };
+              if (cur.status === fs.status && n.status_detail === f.status_detail && n.name === f.name) {
+                return [n];
+              }
               changed = true;
-              return { ...n, status: f.status, status_detail: f.status_detail } as ProjectNode;
+              return [{ ...n, status: fs.status, status_detail: f.status_detail, name: f.name } as ProjectNode];
             });
-            return changed ? next : prev;
+            if (settled) {
+              const known = new Set(prev.map((n) => n.id));
+              const added = fresh.filter((n) => !known.has(n.id));
+              if (added.length > 0) {
+                changed = true;
+                return dedupeById([...merged, ...added]);
+              }
+            }
+            return changed ? merged : prev;
+          });
+          // Don't leave the inspector on a node the poll just removed.
+          if (settled && fresh.length > 0) {
+            setSelectedId((sel) => (sel && !byId.has(sel) ? null : sel));
+          }
+          // Nothing edits an edge locally, so replacing wholesale is safe.
+          setEdges((prev) => {
+            const next = dedupeById(freshEdges);
+            if (!settled && next.length === 0) return prev;
+            if (prev.length === next.length && prev.every((e, i) => e.id === next[i].id)) return prev;
+            return next;
           });
         })
         .catch(() => {
-          // Best-effort — a failed poll just tries again on the next tick.
+          // Best-effort: a failed poll just tries again on the next tick.
         });
     }, 2000);
     return () => clearInterval(interval);
@@ -169,10 +215,12 @@ export default function MeshCanvas({
   async function handleAddAgent(agentSlug: string, pos?: { x: number; y: number }) {
     try {
       const offset = nodes.length * 40;
-      const node = await createAgentNode(project.id, agentSlug, {
-        position_x: pos?.x ?? 120 + offset,
-        position_y: pos?.y ?? 100 + offset,
-      });
+      const node = await mutating(() =>
+        createAgentNode(project.id, agentSlug, {
+          position_x: pos?.x ?? 120 + offset,
+          position_y: pos?.y ?? 100 + offset,
+        })
+      );
       setNodes((n) => dedupeById([...n, node]));
       setSelectedId(node.id);
 
@@ -198,6 +246,7 @@ export default function MeshCanvas({
     const toolType = toolTypes.find((t) => t.slug === toolSlug);
     if (!toolType) return;
     const offset = nodes.length * 40;
+    toolModalOpen.current = true;
     setToolModal({
       toolType,
       position: pos ?? { x: 120 + offset, y: 100 + offset },
@@ -215,12 +264,14 @@ export default function MeshCanvas({
     const offset = nodes.length * 40;
     const position = pos ?? { x: 120 + offset, y: 100 + offset };
     try {
-      const node = await createToolNode(project.id, {
-        presetSlug: preset.slug,
-        name: preset.name,
-        position_x: position.x,
-        position_y: position.y,
-      });
+      const node = await mutating(() =>
+        createToolNode(project.id, {
+          presetSlug: preset.slug,
+          name: preset.name,
+          position_x: position.x,
+          position_y: position.y,
+        })
+      );
       setNodes((n) => dedupeById([...n, node]));
 
       if (attachToAgentId) {
@@ -246,10 +297,12 @@ export default function MeshCanvas({
   async function handleAddEnvironment(pos?: { x: number; y: number }) {
     try {
       const offset = nodes.length * 40;
-      const node = await createEnvironmentNode(project.id, {
-        position_x: pos?.x ?? 120 + offset,
-        position_y: pos?.y ?? 100 + offset,
-      });
+      const node = await mutating(() =>
+        createEnvironmentNode(project.id, {
+          position_x: pos?.x ?? 120 + offset,
+          position_y: pos?.y ?? 100 + offset,
+        })
+      );
       setNodes((n) => dedupeById([...n, node]));
       setSelectedId(node.id);
     } catch (e) {
@@ -265,6 +318,7 @@ export default function MeshCanvas({
     } else {
       setSelectedId(node.id);
     }
+    toolModalOpen.current = false;
     setToolModal(null);
   }
 
@@ -314,11 +368,13 @@ export default function MeshCanvas({
 
   async function handleDeleteNode(node: ProjectNode) {
     try {
-      await deleteNode(project.id, node.id);
-      setNodes((prev) => prev.filter((n) => n.id !== node.id));
-      setEdges((prev) => prev.filter((e) => e.source_node_id !== node.id && e.target_node_id !== node.id));
-      setSelectedId((sel) => (sel === node.id ? null : sel));
-      setChatNodeId((c) => (c === node.id ? null : c));
+      // Backend cascades orphaned tools, so drop every id it reports.
+      const { deleted_node_ids } = await mutating(() => deleteNode(project.id, node.id));
+      const gone = new Set(deleted_node_ids ?? [node.id]);
+      setNodes((prev) => prev.filter((n) => !gone.has(n.id)));
+      setEdges((prev) => prev.filter((e) => !gone.has(e.source_node_id) && !gone.has(e.target_node_id)));
+      setSelectedId((sel) => (sel && gone.has(sel) ? null : sel));
+      setChatNodeId((c) => (c && gone.has(c) ? null : c));
     } catch (e) {
       setError(e instanceof ApiError ? e.message : "Could not delete node");
     }
@@ -718,7 +774,10 @@ export default function MeshCanvas({
           position={toolModal.position}
           attachToAgentId={toolModal.attachToAgentId}
           onCreated={handleToolCreated}
-          onCancel={() => setToolModal(null)}
+          onCancel={() => {
+            toolModalOpen.current = false;
+            setToolModal(null);
+          }}
         />
       )}
     </div>
