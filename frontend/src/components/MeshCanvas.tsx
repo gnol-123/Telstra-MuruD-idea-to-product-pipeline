@@ -31,11 +31,13 @@ import {
   deleteEdge,
   ApiError,
 } from "@/lib/api";
-import Palette, { PaletteTab } from "./Palette";
-import NodeCard, { AttachedTool } from "./NodeCard";
+import Palette, { PaletteTab, PaletteTabs } from "./Palette";
+import NodeCard, { AttachedTool, AttachedEnvironment } from "./NodeCard";
 import EdgeLayer, { LinkDraft, LAYER_W, LAYER_H } from "./EdgeLayer";
-import Inspector, { ChatState, defaultChatState } from "./Inspector";
+import Inspector from "./Inspector";
+import ChatWindow, { ChatState, defaultChatState } from "./ChatWindow";
 import ToolConfigModal from "./ToolConfigModal";
+import { BrandMark } from "./Brand";
 
 // Defensive: if the backend ever returns the same row twice (e.g. a join
 // without DISTINCT), collapsing by id here keeps React's keys unique
@@ -70,11 +72,13 @@ export default function MeshCanvas({
     position: { x: number; y: number };
     attachToAgentId?: string;
   } | null>(null);
-  // Keyed by agent node id — kept here, above the Inspector, so a
-  // conversation survives switching to another node and back. The API has
-  // no endpoint to re-fetch a conversation's history (see API.md's "Not
-  // implemented yet"), so this is the only copy of it once it's sent.
+  // Keyed by agent node id — kept here, above the chat window, so an
+  // in-flight turn keeps streaming into state even after the window is
+  // closed, and reopening shows it without re-fetching. The backend
+  // transcript is fetched once per node on first open (see ChatWindow).
   const [chatByNode, setChatByNode] = useState<Record<string, ChatState>>({});
+  // Which agent's chat window is open, if any.
+  const [chatNodeId, setChatNodeId] = useState<string | null>(null);
   const canvasRef = useRef<HTMLDivElement | null>(null);
 
   async function reloadCanvas() {
@@ -129,6 +133,23 @@ export default function MeshCanvas({
     }, 2000);
     return () => clearInterval(interval);
   }, [project.id]);
+
+  // Notices are informational — let them fade on their own. Errors stay
+  // until dismissed so they can't be missed.
+  useEffect(() => {
+    if (!notice) return;
+    const t = setTimeout(() => setNotice(null), 7000);
+    return () => clearTimeout(t);
+  }, [notice]);
+
+  // Esc abandons a half-drawn link (the chat window handles its own Esc).
+  useEffect(() => {
+    const onKey = (e: KeyboardEvent) => {
+      if (e.key === "Escape") setLink(null);
+    };
+    window.addEventListener("keydown", onKey);
+    return () => window.removeEventListener("keydown", onKey);
+  }, []);
 
   function relPos(e: { clientX: number; clientY: number }) {
     const c = canvasRef.current;
@@ -277,6 +298,11 @@ export default function MeshCanvas({
     }
   }
 
+  // Live position during a drag. No save; edges re-render off this.
+  function handleDragMove(node: ProjectNode, x: number, y: number) {
+    setNodes((prev) => prev.map((n) => (n.id === node.id ? { ...n, position_x: x, position_y: y } : n)));
+  }
+
   async function handleDragEnd(node: ProjectNode, x: number, y: number) {
     setNodes((prev) => prev.map((n) => (n.id === node.id ? { ...n, position_x: x, position_y: y } : n)));
     try {
@@ -292,6 +318,7 @@ export default function MeshCanvas({
       setNodes((prev) => prev.filter((n) => n.id !== node.id));
       setEdges((prev) => prev.filter((e) => e.source_node_id !== node.id && e.target_node_id !== node.id));
       setSelectedId((sel) => (sel === node.id ? null : sel));
+      setChatNodeId((c) => (c === node.id ? null : c));
     } catch (e) {
       setError(e instanceof ApiError ? e.message : "Could not delete node");
     }
@@ -359,6 +386,13 @@ export default function MeshCanvas({
     } finally {
       setRefreshingEdgeId(null);
     }
+  }
+
+  // Refresh every stale inbound context link on an agent at once — the
+  // card's ⟳ button and the inspector's "Clear stale context" both use it.
+  async function clearStaleFor(nodeId: string) {
+    const stale = edges.filter((e) => e.kind === "context" && e.target_node_id === nodeId && e.is_stale);
+    await Promise.all(stale.map((e) => handleRefreshEdge(e)));
   }
 
   async function handleDeleteEdge(edge: Edge) {
@@ -431,8 +465,9 @@ export default function MeshCanvas({
   // render as a chip on the target agent's card instead of a floating box
   // of their own, per the design. Build that lookup once per render.
   const attachedToolsByAgent = new Map<string, AttachedTool[]>();
+  const attachedEnvsByAgent = new Map<string, AttachedEnvironment[]>();
   const attachedToolNodeIds = new Set<string>();
-  const environmentCountByAgent = new Map<string, number>();
+  const attachedEnvNodeIds = new Set<string>();
   for (const e of edges) {
     if (e.kind === "tool") {
       const tool = nodes.find((n) => n.id === e.source_node_id);
@@ -443,33 +478,69 @@ export default function MeshCanvas({
         attachedToolsByAgent.set(e.target_node_id, list);
       }
     } else if (e.kind === "environment") {
-      environmentCountByAgent.set(e.target_node_id, (environmentCountByAgent.get(e.target_node_id) ?? 0) + 1);
+      const env = nodes.find((n) => n.id === e.source_node_id);
+      if (env && isEnvironmentNode(env)) {
+        attachedEnvNodeIds.add(env.id);
+        const list = attachedEnvsByAgent.get(e.target_node_id) ?? [];
+        list.push({ edge: e, env });
+        attachedEnvsByAgent.set(e.target_node_id, list);
+      }
     }
   }
 
-  const visibleNodes = nodes.filter((n) => !(isToolNode(n) && attachedToolNodeIds.has(n.id)));
+    const visibleNodes = nodes.filter(
+    (n) =>
+      !(isToolNode(n) && attachedToolNodeIds.has(n.id)) &&
+      !(isEnvironmentNode(n) && attachedEnvNodeIds.has(n.id))
+  );
 
   const toolNodeCount = nodes.filter(isToolNode).length;
   const agentNodeCount = nodes.filter(isAgentNode).length;
   const environmentNodeCount = nodes.filter(isEnvironmentNode).length;
   const equippedToolCount = attachedToolNodeIds.size;
+  const contextLinkCount = edges.filter((e) => e.kind === "context").length;
+
+  const chatNode = nodes.find((n) => n.id === chatNodeId);
+  const openChat = (id: string) => {
+    setSelectedId(id);
+    setChatNodeId(id);
+  };
 
   return (
-    <div className="h-screen flex flex-col bg-bg text-text">
-      <header className="flex items-center gap-4 px-5 h-14 border-b border-border shrink-0">
-        <button onClick={onBack} className="text-xs text-muted hover:text-text">
-          ← Projects
-        </button>
-        <div className="text-sm font-medium">{project.name}</div>
-        <div className="ml-auto flex items-center gap-3">
-          <div className="text-[10px] text-muted whitespace-nowrap">
-            {agentNodeCount} agent{agentNodeCount === 1 ? "" : "s"} · {equippedToolCount} equipped tool
-            {equippedToolCount === 1 ? "" : "s"} · {toolNodeCount - equippedToolCount} unattached · {environmentNodeCount}{" "}
-            environment{environmentNodeCount === 1 ? "" : "s"} · {edges.length} link{edges.length === 1 ? "" : "s"}
+    <div className="h-screen flex flex-col bg-bg text-text select-none">
+      <header className="flex-none flex items-center gap-[22px] px-5 h-[60px] border-b border-white/[0.09] z-[5]">
+        <div className="flex items-center gap-3 flex-none min-w-0">
+          <button
+            onClick={onBack}
+            title="Back to projects"
+            className="w-7 h-7 rounded-lg border border-white/[0.12] text-white/50 hover:text-text hover:border-white/30 text-sm grid place-items-center"
+          >
+            ‹
+          </button>
+          <BrandMark />
+          <div className="min-w-0">
+            <div className="text-sm font-semibold tracking-[-0.01em]">Agent Mesh</div>
+            <div className="text-[10.5px] text-white/[0.38] truncate max-w-[200px]" title={project.name}>
+              {project.name}
+            </div>
+          </div>
+        </div>
+
+        <PaletteTabs tab={paletteTab} onTabChange={setPaletteTab} />
+
+        <div className="ml-auto flex items-center gap-2.5">
+          <div
+            className="hidden lg:flex items-center gap-[7px] px-[11px] py-1.5 border border-white/10 rounded-lg text-[11.5px] text-white/50 whitespace-nowrap"
+            title={`${equippedToolCount} equipped · ${toolNodeCount - equippedToolCount} unattached tool node(s)`}
+          >
+            <span className="w-1.5 h-1.5 rounded-full bg-green anim-softpulse" />
+            {agentNodeCount} agent{agentNodeCount === 1 ? "" : "s"} · {contextLinkCount} link
+            {contextLinkCount === 1 ? "" : "s"} · {equippedToolCount} tool{equippedToolCount === 1 ? "" : "s"} ·{" "}
+            {environmentNodeCount} env{environmentNodeCount === 1 ? "" : "s"}
           </div>
           <button
             onClick={handleTidy}
-            className="text-xs text-muted hover:text-text border border-border rounded-md px-3 py-1.5"
+            className="bg-transparent border border-white/[0.14] text-white/60 hover:text-text hover:border-white/30 rounded-lg px-3 py-2 text-xs transition-colors"
           >
             ⌗ Tidy
           </button>
@@ -478,48 +549,59 @@ export default function MeshCanvas({
 
       <Palette
         tab={paletteTab}
-        onTabChange={setPaletteTab}
         agentTypes={agentTypes}
         toolTypes={toolTypes}
         toolPresets={toolPresets}
+        nodes={nodes}
+        edges={edges}
+        refreshingEdgeId={refreshingEdgeId}
         onAddAgent={(slug) => handleAddAgent(slug)}
         onAddTool={(slug) => openToolConfig(slug)}
         onAddPreset={(slug) => handleAddPreset(slug)}
         onAddEnvironment={() => handleAddEnvironment()}
+        onRefreshEdge={handleRefreshEdge}
+        onDeleteEdge={handleDeleteEdge}
       />
 
-      {notice && (
-        <div className="px-5 py-2 text-xs text-accent border-b border-border bg-accent/5 flex items-center gap-3">
-          <span className="flex-1">{notice}</span>
-          <button onClick={() => setNotice(null)} className="text-accent/70 hover:text-accent">
-            dismiss
-          </button>
+      <div className="flex-1 flex min-h-0 relative">
+        {/* Toasts float over the canvas instead of pushing it down. */}
+        {(notice || error) && (
+          <div className="absolute top-3 left-5 right-[320px] z-20 flex flex-col items-center gap-2 pointer-events-none">
+            {error && (
+              <div className="pointer-events-auto max-w-2xl flex items-start gap-3 px-3.5 py-2.5 rounded-[9px] border border-red-400/40 bg-[#1a0b0c]/95 backdrop-blur text-xs text-red-300 shadow-[0_14px_34px_rgba(0,0,0,.5)] anim-pop">
+                <span className="text-red-400">⚠</span>
+                <span className="flex-1 leading-relaxed">{error}</span>
+                <button onClick={() => setError(null)} className="text-red-300/60 hover:text-red-200">
+                  ×
+                </button>
+              </div>
+            )}
+            {notice && (
+              <div className="pointer-events-auto max-w-2xl flex items-start gap-3 px-3.5 py-2.5 rounded-[9px] border border-accent/30 bg-[#041517]/95 backdrop-blur text-xs text-accent shadow-[0_14px_34px_rgba(0,0,0,.5)] anim-pop">
+                <span>◗</span>
+                <span className="flex-1 leading-relaxed">{notice}</span>
+                <button onClick={() => setNotice(null)} className="text-accent/60 hover:text-accent">
+                  ×
+                </button>
+              </div>
+            )}
+          </div>
+        )}
+
+        <div className="absolute left-0 right-[300px] bottom-0 z-[4] flex flex-wrap gap-[18px] px-5 py-2 bg-black border-t border-white/[0.08] text-[10.5px] text-white/[0.34] pointer-events-none">
+          <span>Drag a card to move it</span>
+          <span>Drag from ◗ port to port to share context</span>
+          <span>Drop a tool onto a card to equip it</span>
+          <span>Double-click an agent to chat</span>
         </div>
-      )}
 
-      {error && (
-        <div className="px-5 py-2 text-xs text-red-400 border-b border-border flex items-center gap-3">
-          <span className="flex-1">{error}</span>
-          <button onClick={() => setError(null)} className="text-red-300/70 hover:text-red-200">
-            dismiss
-          </button>
-        </div>
-      )}
-
-      <div className="px-5 py-1.5 border-b border-border text-[10px] text-muted flex flex-wrap gap-4">
-        <span>Drag an agent, tool or environment card onto the canvas to add it</span>
-        <span>Drop a tool onto an agent card to equip it — it shows up as a chip</span>
-        <span>Drag from a node&apos;s ◗ port onto another node to link them</span>
-        <span>Click a node&apos;s × to remove it</span>
-      </div>
-
-      <div className="flex-1 flex min-h-0">
         <main
           ref={canvasRef}
-          className="flex-1 relative overflow-auto"
+          className="flex-1 min-w-0 relative overflow-auto pb-9"
           style={{
-            backgroundImage: "radial-gradient(rgba(255,255,255,.07) 1px, transparent 1px)",
-            backgroundSize: "22px 22px",
+            backgroundColor: "#000",
+            backgroundImage: "radial-gradient(rgba(255,255,255,.075) 1px, transparent 1px)",
+            backgroundSize: "26px 26px",
             cursor: link ? "crosshair" : "default",
           }}
           onDragOver={(e) => e.preventDefault()}
@@ -538,23 +620,22 @@ export default function MeshCanvas({
           }}
           onPointerUp={() => setLink(null)}
           onClick={(e) => {
-            if (e.target === canvasRef.current) setSelectedId(null);
+            if (e.target === canvasRef.current || (e.target as HTMLElement).dataset.canvasLayer) setSelectedId(null);
           }}
         >
-          <div style={{ position: "relative", width: LAYER_W, height: LAYER_H }}>
+          <div data-canvas-layer="1" style={{ position: "relative", width: LAYER_W, height: LAYER_H }}>
             <EdgeLayer
               nodes={nodes}
-              edges={edges}
+              edges={edges.filter((e) => e.kind !== "environment")}
               selectedId={selectedId}
               link={link}
               refreshingId={refreshingEdgeId}
               onRefresh={handleRefreshEdge}
               onDelete={handleDeleteEdge}
+              onSelectNode={setSelectedId}
             />
             {visibleNodes.map((node) => {
-              const inboundCount = edges.filter(
-                (e) => e.target_node_id === node.id && e.kind === "context"
-              ).length;
+              const inbound = edges.filter((e) => e.target_node_id === node.id && e.kind === "context");
               return (
                 <NodeCard
                   key={node.id}
@@ -563,9 +644,12 @@ export default function MeshCanvas({
                   linking={!!link}
                   linkHover={!!link && hoverNodeId === node.id && link.fromId !== node.id}
                   attachedTools={isAgentNode(node) ? attachedToolsByAgent.get(node.id) ?? [] : undefined}
-                  environmentCount={isAgentNode(node) ? environmentCountByAgent.get(node.id) ?? 0 : undefined}
-                  inboundCount={inboundCount}
+                  inboundCount={inbound.length}
+                  staleCount={inbound.filter((e) => e.is_stale).length}
+                  busy={!!chatByNode[node.id]?.busy}
+                  attachedEnvironments={isAgentNode(node) ? attachedEnvsByAgent.get(node.id) ?? [] : undefined}
                   onSelect={() => setSelectedId(node.id)}
+                  onDragMove={(x, y) => handleDragMove(node, x, y)}
                   onDragEnd={(x, y) => handleDragEnd(node, x, y)}
                   onDelete={() => handleDeleteNode(node)}
                   onPortDown={(side) => handlePortDown(node, side)}
@@ -574,15 +658,25 @@ export default function MeshCanvas({
                   onDropOnCard={isAgentNode(node) ? (raw) => handleDropOnAgent(node, raw) : undefined}
                   onChipClick={(toolNodeId) => setSelectedId(toolNodeId)}
                   onChipRemove={(edge) => handleUnequipTool(edge)}
+                  onClearStale={() => clearStaleFor(node.id)}
+                  onOpenChat={isAgentNode(node) ? () => openChat(node.id) : undefined}
                 />
               );
             })}
-            {visibleNodes.length === 0 && (
-              <div className="absolute inset-0 flex items-center justify-center text-sm text-muted">
-                Drag an agent from the palette above to get started.
-              </div>
-            )}
           </div>
+          {visibleNodes.length === 0 && (
+            <div className="absolute inset-0 grid place-items-center pointer-events-none">
+              <div className="text-center">
+                <div className="mx-auto w-fit opacity-70">
+                  <BrandMark size={40} />
+                </div>
+                <div className="mt-4 text-sm text-white/70">An empty mesh</div>
+                <div className="mt-1 text-xs text-white/[0.38]">
+                  Drag an agent from the library above — or click one — to get started.
+                </div>
+              </div>
+            </div>
+          )}
         </main>
 
         <Inspector
@@ -591,16 +685,31 @@ export default function MeshCanvas({
           nodes={nodes}
           edges={edges}
           toolTypes={toolTypes}
-          chat={selectedNode ? chatByNode[selectedNode.id] ?? defaultChatState() : defaultChatState()}
-          onChatChange={handleChatChange}
+          chatBusy={!!(selectedNode && chatByNode[selectedNode.id]?.busy)}
+          refreshingEdgeId={refreshingEdgeId}
+          onOpenChat={openChat}
           onUpdateAgentPolicy={handleUpdateAgentPolicy}
           onRefreshEdge={handleRefreshEdge}
           onDeleteEdge={handleDeleteEdge}
           onUnequipTool={handleUnequipTool}
           onNodeUpdated={handleNodeUpdated}
-          onAfterTurn={reloadCanvas}
         />
       </div>
+
+      {chatNode && isAgentNode(chatNode) && (
+        <ChatWindow
+          key={chatNode.id}
+          projectId={project.id}
+          node={chatNode}
+          nodes={nodes}
+          edges={edges}
+          chat={chatByNode[chatNode.id] ?? defaultChatState()}
+          onChatChange={(updater) => handleChatChange(chatNode.id, updater)}
+          onClose={() => setChatNodeId(null)}
+          onAfterTurn={reloadCanvas}
+          onRefreshEdge={handleRefreshEdge}
+        />
+      )}
 
       {toolModal && (
         <ToolConfigModal
