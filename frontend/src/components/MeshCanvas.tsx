@@ -85,6 +85,8 @@ export default function MeshCanvas({
   const pendingMutations = useRef(0);
   // Same idea for the tool modal: its create call lives inside the modal.
   const toolModalOpen = useRef(false);
+  // Nodes with a delete in flight. Spinner until the row actually goes.
+  const [deletingIds, setDeletingIds] = useState<Set<string>>(new Set());
 
   async function reloadCanvas() {
     try {
@@ -104,6 +106,16 @@ export default function MeshCanvas({
     } finally {
       pendingMutations.current -= 1;
     }
+  }
+
+  function markDeleting(nodeId: string, on: boolean) {
+    setDeletingIds((prev) => {
+      if (prev.has(nodeId) === on) return prev;
+      const next = new Set(prev);
+      if (on) next.add(nodeId);
+      else next.delete(nodeId);
+      return next;
+    });
   }
 
   useEffect(() => {
@@ -153,6 +165,9 @@ export default function MeshCanvas({
             });
             if (settled) {
               const known = new Set(prev.map((n) => n.id));
+              // A tool/environment arrives hidden if this same response says
+              // it is equipped. Adding it before its edge lands would flash
+              // it as a floating box for one tick.
               const added = fresh.filter((n) => !known.has(n.id));
               if (added.length > 0) {
                 changed = true;
@@ -166,9 +181,12 @@ export default function MeshCanvas({
             setSelectedId((sel) => (sel && !byId.has(sel) ? null : sel));
           }
           // Nothing edits an edge locally, so replacing wholesale is safe.
+          // Only while settled: nodes and edges are two separate requests, so
+          // an unsettled tick can pair stale nodes with fresh edges and flash
+          // an equipped tool as a floating box.
+          if (!settled) return;
           setEdges((prev) => {
             const next = dedupeById(freshEdges);
-            if (!settled && next.length === 0) return prev;
             if (prev.length === next.length && prev.every((e, i) => e.id === next[i].id)) return prev;
             return next;
           });
@@ -367,6 +385,8 @@ export default function MeshCanvas({
   }
 
   async function handleDeleteNode(node: ProjectNode) {
+    if (deletingIds.has(node.id)) return;
+    markDeleting(node.id, true);
     try {
       // Backend cascades orphaned tools, so drop every id it reports.
       const { deleted_node_ids } = await mutating(() => deleteNode(project.id, node.id));
@@ -377,6 +397,9 @@ export default function MeshCanvas({
       setChatNodeId((c) => (c && gone.has(c) ? null : c));
     } catch (e) {
       setError(e instanceof ApiError ? e.message : "Could not delete node");
+    } finally {
+      // Clears the spinner on failure; on success the node is already gone.
+      markDeleting(node.id, false);
     }
   }
 
@@ -544,10 +567,21 @@ export default function MeshCanvas({
     }
   }
 
-    const visibleNodes = nodes.filter(
+  // Tools equipped to an agent being deleted go with it. Hide them now
+  // rather than let them surface as floating boxes for the tick between
+  // their edge dying and the cascade removing the node.
+  const doomedToolIds = new Set<string>();
+  for (const e of edges) {
+    if ((e.kind === "tool" || e.kind === "environment") && deletingIds.has(e.target_node_id)) {
+      doomedToolIds.add(e.source_node_id);
+    }
+  }
+
+  const visibleNodes = nodes.filter(
     (n) =>
       !(isToolNode(n) && attachedToolNodeIds.has(n.id)) &&
-      !(isEnvironmentNode(n) && attachedEnvNodeIds.has(n.id))
+      !(isEnvironmentNode(n) && attachedEnvNodeIds.has(n.id)) &&
+      !(isToolNode(n) && doomedToolIds.has(n.id))
   );
 
   const toolNodeCount = nodes.filter(isToolNode).length;
@@ -703,6 +737,7 @@ export default function MeshCanvas({
                   inboundCount={inbound.length}
                   staleCount={inbound.filter((e) => e.is_stale).length}
                   busy={!!chatByNode[node.id]?.busy}
+                  deleting={deletingIds.has(node.id)}
                   attachedEnvironments={isAgentNode(node) ? attachedEnvsByAgent.get(node.id) ?? [] : undefined}
                   onSelect={() => setSelectedId(node.id)}
                   onDragMove={(x, y) => handleDragMove(node, x, y)}
