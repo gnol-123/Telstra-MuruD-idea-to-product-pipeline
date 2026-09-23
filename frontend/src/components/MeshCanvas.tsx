@@ -85,6 +85,9 @@ export default function MeshCanvas({
   const pendingMutations = useRef(0);
   // Same idea for the tool modal: its create call lives inside the modal.
   const toolModalOpen = useRef(false);
+  // Ticks once per completed mutation, so a poll can detect one landed while
+  // its own request was in flight.
+  const mutationSeq = useRef(0);
   // Nodes with a delete in flight. Spinner until the row actually goes.
   const [deletingIds, setDeletingIds] = useState<Set<string>>(new Set());
   // Live position of the node being dragged, null when nothing is.
@@ -109,6 +112,9 @@ export default function MeshCanvas({
       return await fn();
     } finally {
       pendingMutations.current -= 1;
+      // Bumped on completion so an in-flight poll can tell its response
+      // predates this change and skip adding from it.
+      mutationSeq.current += 1;
     }
   }
 
@@ -146,12 +152,23 @@ export default function MeshCanvas({
   // when nothing actually changed.
   useEffect(() => {
     const interval = setInterval(() => {
+      // Counted when the request goes out, compared when it comes back. A
+      // response that overlapped a create or delete describes a canvas from
+      // before it, so adding from it resurrects nodes the server just
+      // removed: they sit there until the next tick, and every call against
+      // them 404s.
+      const startedAt = mutationSeq.current;
+      const startedInFlight = pendingMutations.current;
       Promise.all([listNodes(project.id), listEdges(project.id)])
         .then(([fresh, freshEdges]) => {
           // A drag is a gesture in progress: adding or removing cards under
           // the cursor stutters it, so leave the canvas alone until release.
           if (draggingRef.current) return;
-          const settled = pendingMutations.current === 0 && !toolModalOpen.current;
+          const settled =
+            pendingMutations.current === 0 &&
+            startedInFlight === 0 &&
+            mutationSeq.current === startedAt &&
+            !toolModalOpen.current;
           const byId = new Map(fresh.map((n) => [n.id, n]));
           setNodes((prev) => {
             let changed = false;
@@ -344,6 +361,8 @@ export default function MeshCanvas({
       setSelectedId(node.id);
     }
     toolModalOpen.current = false;
+    // The modal created a node, so polls already in flight are stale.
+    mutationSeq.current += 1;
     setToolModal(null);
   }
 
@@ -401,7 +420,6 @@ export default function MeshCanvas({
     if (deletingIds.has(node.id)) return;
     markDeleting(node.id, true);
     try {
-      // Backend cascades orphaned tools, so drop every id it reports.
       const { deleted_node_ids } = await mutating(() => deleteNode(project.id, node.id));
       const gone = new Set(deleted_node_ids ?? [node.id]);
       setNodes((prev) => prev.filter((n) => !gone.has(n.id)));
@@ -580,16 +598,6 @@ export default function MeshCanvas({
     }
   }
 
-  // Tools equipped to an agent being deleted go with it. Hide them now
-  // rather than let them surface as floating boxes for the tick between
-  // their edge dying and the cascade removing the node.
-  const doomedToolIds = new Set<string>();
-  for (const e of edges) {
-    if ((e.kind === "tool" || e.kind === "environment") && deletingIds.has(e.target_node_id)) {
-      doomedToolIds.add(e.source_node_id);
-    }
-  }
-
   // The dragging node's live position, overlaid on the one node it applies
   // to. Cards and EdgeLayer both read this, so edges track the drag without
   // rebuilding the whole array on every pointermove.
@@ -602,8 +610,7 @@ export default function MeshCanvas({
   const visibleNodes = positioned.filter(
     (n) =>
       !(isToolNode(n) && attachedToolNodeIds.has(n.id)) &&
-      !(isEnvironmentNode(n) && attachedEnvNodeIds.has(n.id)) &&
-      !(isToolNode(n) && doomedToolIds.has(n.id))
+      !(isEnvironmentNode(n) && attachedEnvNodeIds.has(n.id))
   );
 
   const toolNodeCount = nodes.filter(isToolNode).length;

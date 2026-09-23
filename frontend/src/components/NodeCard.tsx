@@ -86,6 +86,7 @@ export default function NodeCard({
   staleCount?: number;
   // Agent nodes only: a chat turn is in flight for this agent right now.
   busy?: boolean;
+  // Delete is in flight: card dims, x becomes a spinner.
   deleting?: boolean;
   onSelect: () => void;
   // Fires per pointermove. State only; PATCH happens on drag end.

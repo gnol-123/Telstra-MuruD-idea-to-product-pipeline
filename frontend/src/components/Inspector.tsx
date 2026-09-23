@@ -867,10 +867,11 @@ function TerminalPanel({ projectId, nodeId, ready }: { projectId: string; nodeId
     outRef.current?.scrollTo({ top: outRef.current.scrollHeight });
   }, [lines]);
 
-  function connect() {
+  async function connect() {
     let ws: WebSocket;
     try {
-      ws = new WebSocket(environmentTerminalUrl(projectId, nodeId, 100, 30));
+      // Awaited: the url carries an access token that may need refreshing.
+      ws = new WebSocket(await environmentTerminalUrl(projectId, nodeId, 100, 30));
     } catch (e) {
       setLines((l) => l + `\n[terminal] ${e instanceof Error ? e.message : "could not connect"}`);
       return;
