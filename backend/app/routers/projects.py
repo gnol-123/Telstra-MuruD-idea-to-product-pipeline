@@ -523,13 +523,18 @@ async def update_node(
     return NodeResponse.of(node)
 
 
+class DeleteNodeResponse(BaseModel):
+    # The clicked node, plus any tool nodes orphaned by removing it.
+    deleted_node_ids: list[UUID]
+
+
 @router.delete(
     "/projects/{project_id}/nodes/{node_id}",
-    status_code=status.HTTP_204_NO_CONTENT,
+    response_model=DeleteNodeResponse,
 )
 async def delete_node(
     project_id: UUID, node_id: UUID, repo: ProjectRepo, env_repo: EnvRepo
-) -> None:
+) -> DeleteNodeResponse:
     """Remove a node of any kind, cascading to its conversation, transcript and secrets."""
     # Stop a running turn first: only agent nodes have a conversation, so a
     # tool/environment node's None id is a no-op.
@@ -545,6 +550,7 @@ async def delete_node(
     deleted = await to_thread.run_sync(repo.delete_node, str(node_id))
     if not deleted:
         raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Node not found")
+    return DeleteNodeResponse(deleted_node_ids=deleted)
 
 
 # -- TOOL NODES ------------------------------------------------------------------
