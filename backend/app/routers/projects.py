@@ -965,15 +965,24 @@ async def list_edges(project_id: UUID, repo: ProjectRepo) -> list[EdgeResponse]:
 
     edges = await to_thread.run_sync(repo.list_edges, str(project_id))
 
-    # One head lookup per edge.
+    # One head lookup per context edge, cached per source node: a canvas of
+    # tool edges was paying two Supabase round trips each for a staleness
+    # number only context edges carry.
+    heads: dict[str, int] = {}
     out = []
     for e in edges:
-        head = await to_thread.run_sync(repo.get_conversation_head, e.source_node_id)
+        if e.kind != "context":
+            out.append(EdgeResponse.of(e, is_stale=False, messages_behind=None))
+            continue
         if e.summarised_through_seq is None:
             # Never summarised: stale, with no meaningful gap.
             out.append(EdgeResponse.of(e, is_stale=True, messages_behind=None))
             continue
-        behind = max(0, head - e.summarised_through_seq)
+        if e.source_node_id not in heads:
+            heads[e.source_node_id] = await to_thread.run_sync(
+                repo.get_conversation_head, e.source_node_id
+            )
+        behind = max(0, heads[e.source_node_id] - e.summarised_through_seq)
         out.append(EdgeResponse.of(e, is_stale=behind > 0, messages_behind=behind))
     return out
 
