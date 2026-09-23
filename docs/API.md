@@ -248,8 +248,10 @@ matches the prompt that produced it.
 name.
 
 ### `DELETE /projects/{project_id}/nodes/{node_id}`
-→ `204`. **Cascades**: the node's conversation and its whole transcript go
-with it. `404` if the node is not yours or is already gone.
+→ `200` `{ "deleted_node_ids": ["uuid", ...] }`. **Cascades**: the node's
+conversation and its whole transcript go with it. Deleting an **agent** also
+removes any tool node left with no edges, so the returned list can be longer
+than one. `404` if the node is not yours or is already gone.
 
 ### `GET /projects/{project_id}/nodes/{node_id}/messages`
 Optional `?after_seq=N` returns only messages with `seq > N`, for polling.
