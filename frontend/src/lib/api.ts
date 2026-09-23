@@ -219,8 +219,9 @@ export async function updateNode(
   });
 }
 
+// Returns every id the backend removed: the node plus any tools it orphaned.
 export async function deleteNode(projectId: string, nodeId: string) {
-  return request<void>(`/projects/${projectId}/nodes/${nodeId}`, {
+  return request<{ deleted_node_ids: string[] }>(`/projects/${projectId}/nodes/${nodeId}`, {
     method: "DELETE",
     auth: true,
   });
