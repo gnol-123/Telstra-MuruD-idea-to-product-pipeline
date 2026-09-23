@@ -132,7 +132,8 @@ values
       || '4. Milestones: deliverables grouped in the order they unblock each other. Name what each milestone makes possible.' || chr(10)
       || '5. Dependencies: things outside this scope it needs (accounts, data, decisions, other work).' || chr(10)
       || '6. Open questions: what you had to guess. Ask these before inventing answers.' || chr(10)
-      || chr(10)
+      || '7. Stakeholders: identify the stakeholders & intended audience' || chr(10)
+      || '8. Success criteria: define sucess criteria' || chr(10)
       || 'Rules: no adjectives where a number will do. A deliverable that cannot be checked is a wish, rewrite it. If the user''s ask is larger than one scope, say so and propose the split before scoping the first piece.'
     ),
     20
