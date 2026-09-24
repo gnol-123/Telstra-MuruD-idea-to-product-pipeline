@@ -33,23 +33,80 @@ class ApiError extends Error {
   }
 }
 
+// Supabase access tokens last an hour. Swapping the refresh token for a new
+// pair keeps a session alive as long as it stays in use, instead of dying
+// mid-task. Shared so concurrent 401s trigger one refresh, not a stampede.
+let refreshInFlight: Promise<string> | null = null;
+
+async function refreshAccessToken(): Promise<string> {
+  const stored = loadAuth();
+  if (!stored?.refresh_token) throw new ApiError(401, "Not logged in");
+
+  refreshInFlight ??= (async () => {
+    try {
+      const res = await fetch(`${API_URL}/auth/refresh`, {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ refresh_token: stored.refresh_token }),
+      });
+      if (!res.ok) {
+        // The refresh token is dead too, so there is no session to save.
+        clearAuth();
+        throw new ApiError(401, "Session expired. Log in again.");
+      }
+      const tokens = (await res.json()) as AuthTokens;
+      saveAuth({ access_token: tokens.access_token, refresh_token: tokens.refresh_token });
+      return tokens.access_token;
+    } finally {
+      refreshInFlight = null;
+    }
+  })();
+
+  return refreshInFlight;
+}
+
+// The current access token, refreshed first if the stored one has expired.
+// Every authenticated call goes through this, including the SSE and
+// WebSocket paths that build their own headers.
+export async function authToken(): Promise<string> {
+  const stored = loadAuth();
+  if (!stored) throw new ApiError(401, "Not logged in");
+  return isExpired(stored.access_token) ? refreshAccessToken() : stored.access_token;
+}
+
+// Reads `exp` out of the JWT payload. Treats an unparseable token as expired
+// so a malformed value refreshes rather than wedging the session.
+function isExpired(token: string, skewSeconds = 60): boolean {
+  try {
+    const payload = JSON.parse(atob(token.split(".")[1]));
+    if (typeof payload.exp !== "number") return true;
+    return Date.now() / 1000 >= payload.exp - skewSeconds;
+  } catch {
+    return true;
+  }
+}
+
 async function request<T>(
   path: string,
   opts: { method?: string; body?: unknown; auth?: boolean } = {}
 ): Promise<T> {
-  const headers: Record<string, string> = { "Content-Type": "application/json" };
+  const send = async (token?: string) => {
+    const headers: Record<string, string> = { "Content-Type": "application/json" };
+    if (token) headers["Authorization"] = `Bearer ${token}`;
+    return fetch(`${API_URL}${path}`, {
+      method: opts.method ?? "GET",
+      headers,
+      body: opts.body ? JSON.stringify(opts.body) : undefined,
+    });
+  };
 
-  if (opts.auth) {
-    const stored = loadAuth();
-    if (!stored) throw new ApiError(401, "Not logged in");
-    headers["Authorization"] = `Bearer ${stored.access_token}`;
+  let res = await send(opts.auth ? await authToken() : undefined);
+
+  // A 401 despite a fresh-looking token: the server rejected it anyway
+  // (revoked, or clocks disagree). One refresh and one retry, then give up.
+  if (res.status === 401 && opts.auth) {
+    res = await send(await refreshAccessToken());
   }
-
-  const res = await fetch(`${API_URL}${path}`, {
-    method: opts.method ?? "GET",
-    headers,
-    body: opts.body ? JSON.stringify(opts.body) : undefined,
-  });
 
   if (res.status === 204) return undefined as T;
 
@@ -82,7 +139,18 @@ export async function login(email: string, password: string) {
 
 export async function logout() {
   try {
-    await request("/auth/logout", { method: "POST", auth: true });
+    // Raw fetch, not request(): refreshing a session we are about to throw
+    // away just to say goodbye is wasted work.
+    const stored = loadAuth();
+    if (stored) {
+      await fetch(`${API_URL}/auth/logout`, {
+        method: "POST",
+        headers: {
+          "Content-Type": "application/json",
+          Authorization: `Bearer ${stored.access_token}`,
+        },
+      });
+    }
   } catch {
     // A dead or already-expired token means the server call was never going
     // to succeed anyway — that is not a reason to keep the user signed in
@@ -219,8 +287,9 @@ export async function updateNode(
   });
 }
 
+// Returns every id the backend removed: the node plus any tools it orphaned.
 export async function deleteNode(projectId: string, nodeId: string) {
-  return request<void>(`/projects/${projectId}/nodes/${nodeId}`, {
+  return request<{ deleted_node_ids: string[] }>(`/projects/${projectId}/nodes/${nodeId}`, {
     method: "DELETE",
     auth: true,
   });
@@ -363,16 +432,16 @@ export async function getEnvironmentPreview(
 // The terminal is a raw WebSocket, not a JSON endpoint — browsers can't set
 // a bearer header on a socket, so the token travels in the query string.
 // This just builds the URL; the terminal component owns the socket itself.
-export function environmentTerminalUrl(
+export async function environmentTerminalUrl(
   projectId: string,
   nodeId: string,
   cols: number,
   rows: number
 ) {
-  const stored = loadAuth();
-  if (!stored) throw new ApiError(401, "Not logged in");
   const wsBase = API_URL.replace(/^http/, "ws");
-  const token = encodeURIComponent(stored.access_token);
+  // A socket authenticates once at connect, so a token that expires a minute
+  // later takes the terminal down with it. Refresh before dialling.
+  const token = encodeURIComponent(await authToken());
   return `${wsBase}/projects/${projectId}/environments/${nodeId}/terminal?token=${token}&cols=${cols}&rows=${rows}`;
 }
 
@@ -504,14 +573,11 @@ export async function streamChat(
   clientToken: string | undefined,
   handlers: StreamHandlers
 ) {
-  const stored = loadAuth();
-  if (!stored) throw new ApiError(401, "Not logged in");
-
   const res = await fetch(`${API_URL}/chat/stream`, {
     method: "POST",
     headers: {
       "Content-Type": "application/json",
-      Authorization: `Bearer ${stored.access_token}`,
+      Authorization: `Bearer ${await authToken()}`,
     },
     body: JSON.stringify({ node_id: nodeId, prompt, client_token: clientToken }),
   });
@@ -525,11 +591,8 @@ export async function streamChat(
 // treating the conversation as idle instead of waiting on a stream that will
 // never emit anything.
 export async function attachChat(nodeId: string, handlers: StreamHandlers): Promise<boolean> {
-  const stored = loadAuth();
-  if (!stored) throw new ApiError(401, "Not logged in");
-
   const res = await fetch(`${API_URL}/chat/attach?node_id=${encodeURIComponent(nodeId)}`, {
-    headers: { Authorization: `Bearer ${stored.access_token}` },
+    headers: { Authorization: `Bearer ${await authToken()}` },
   });
 
   if (res.status === 204) return false;

@@ -60,6 +60,8 @@ Rules:
 7. If a reply asks questions instead of delivering, answer them with sensible assumptions and run the same agent again with those answers; its conversation continues.
 8. If run_agent reports a failure, run it once more. If it fails again, stop and report. If a run is denied, stop and ask the user what to change.
 9. Finish with a short report: one paragraph per stage saying what it produced and which agent holds the full output, the prototype URL if one was given, and the three assumptions that most need the user's confirmation. Plain language, no headings deeper than one level, no filler.
+10. Coding agent: alway preview work with environment preview skill on ***localhost:3000***
+11. Coding agent: if localhost:3000 is not available **KILL** the process on localhost:3000, verify preview and services work!
 
 Do not narrate tool calls. Do not apologise. If the idea is too vague to scope at all, ask one question and stop.$prompt$,
   'deepseek-v4.1-flash',

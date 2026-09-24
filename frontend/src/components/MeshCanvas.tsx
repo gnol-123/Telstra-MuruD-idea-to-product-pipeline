@@ -80,6 +80,20 @@ export default function MeshCanvas({
   // Which agent's chat window is open, if any.
   const [chatNodeId, setChatNodeId] = useState<string | null>(null);
   const canvasRef = useRef<HTMLDivElement | null>(null);
+  // In-flight create/delete calls. Non-zero means the server list is behind
+  // the UI, so the poll merges status only and skips add/remove.
+  const pendingMutations = useRef(0);
+  // Same idea for the tool modal: its create call lives inside the modal.
+  const toolModalOpen = useRef(false);
+  // Ticks once per completed mutation, so a poll can detect one landed while
+  // its own request was in flight.
+  const mutationSeq = useRef(0);
+  // Nodes with a delete in flight. Spinner until the row actually goes.
+  const [deletingIds, setDeletingIds] = useState<Set<string>>(new Set());
+  // Live position of the node being dragged, null when nothing is.
+  const [dragPos, setDragPos] = useState<{ id: string; x: number; y: number } | null>(null);
+  // Same fact as dragPos, as a ref the poll's closure can read live.
+  const draggingRef = useRef(false);
 
   async function reloadCanvas() {
     try {
@@ -89,6 +103,29 @@ export default function MeshCanvas({
     } catch (e) {
       setError(e instanceof ApiError ? e.message : "Could not refresh the canvas");
     }
+  }
+
+  // Holds off the poll's add/remove while a create or delete is mid-flight.
+  async function mutating<T>(fn: () => Promise<T>): Promise<T> {
+    pendingMutations.current += 1;
+    try {
+      return await fn();
+    } finally {
+      pendingMutations.current -= 1;
+      // Bumped on completion so an in-flight poll can tell its response
+      // predates this change and skip adding from it.
+      mutationSeq.current += 1;
+    }
+  }
+
+  function markDeleting(nodeId: string, on: boolean) {
+    setDeletingIds((prev) => {
+      if (prev.has(nodeId) === on) return prev;
+      const next = new Set(prev);
+      if (on) next.add(nodeId);
+      else next.delete(nodeId);
+      return next;
+    });
   }
 
   useEffect(() => {
@@ -105,30 +142,81 @@ export default function MeshCanvas({
 
   // Per the teammate's node-status addition: every node row (agent, tool,
   // environment) now carries status/status_detail (see NodeResponse in
-  // routers/projects.py). Poll the list every 2s and merge just those two
-  // fields into whatever's already on screen — never overwriting position or
-  // anything else a drag gesture owns, and skipping the setState entirely
-  // when nothing actually changed so this doesn't fight an in-progress drag.
+  // routers/projects.py). Poll nodes and edges every 2s so server-side
+  // creates (orchestrator provisioning) and deletes land on the canvas.
+  // Merge rules: known nodes take status/status_detail/name only, never
+  // position, which a drag owns locally until release. Unknown nodes are
+  // added whole. Missing nodes are removed, but only from a non-empty
+  // response with no mutation in flight, so a dropped request or a
+  // mid-create tick can't wipe the canvas. setState is skipped entirely
+  // when nothing actually changed.
   useEffect(() => {
     const interval = setInterval(() => {
-      listNodes(project.id)
-        .then((fresh) => {
+      // Counted when the request goes out, compared when it comes back. A
+      // response that overlapped a create or delete describes a canvas from
+      // before it, so adding from it resurrects nodes the server just
+      // removed: they sit there until the next tick, and every call against
+      // them 404s.
+      const startedAt = mutationSeq.current;
+      const startedInFlight = pendingMutations.current;
+      Promise.all([listNodes(project.id), listEdges(project.id)])
+        .then(([fresh, freshEdges]) => {
+          // A drag is a gesture in progress: adding or removing cards under
+          // the cursor stutters it, so leave the canvas alone until release.
+          if (draggingRef.current) return;
+          const settled =
+            pendingMutations.current === 0 &&
+            startedInFlight === 0 &&
+            mutationSeq.current === startedAt &&
+            !toolModalOpen.current;
           const byId = new Map(fresh.map((n) => [n.id, n]));
           setNodes((prev) => {
             let changed = false;
-            const next = prev.map((n) => {
-              const f = byId.get(n.id) as (ProjectNode & { status?: string; status_detail?: string | null }) | undefined;
-              if (!f || !("status" in f)) return n;
-              const cur = n as ProjectNode & { status?: string; status_detail?: string | null };
-              if (cur.status === f.status && cur.status_detail === f.status_detail) return n;
+            const merged = prev.flatMap((n) => {
+              const f = byId.get(n.id);
+              if (!f) {
+                if (!settled || fresh.length === 0) return [n];
+                changed = true;
+                return [];
+              }
+              const cur = n as ProjectNode & { status?: string };
+              const fs = f as ProjectNode & { status?: string };
+              if (cur.status === fs.status && n.status_detail === f.status_detail && n.name === f.name) {
+                return [n];
+              }
               changed = true;
-              return { ...n, status: f.status, status_detail: f.status_detail } as ProjectNode;
+              return [{ ...n, status: fs.status, status_detail: f.status_detail, name: f.name } as ProjectNode];
             });
-            return changed ? next : prev;
+            if (settled) {
+              const known = new Set(prev.map((n) => n.id));
+              // A tool/environment arrives hidden if this same response says
+              // it is equipped. Adding it before its edge lands would flash
+              // it as a floating box for one tick.
+              const added = fresh.filter((n) => !known.has(n.id));
+              if (added.length > 0) {
+                changed = true;
+                return dedupeById([...merged, ...added]);
+              }
+            }
+            return changed ? merged : prev;
+          });
+          // Don't leave the inspector on a node the poll just removed.
+          if (settled && fresh.length > 0) {
+            setSelectedId((sel) => (sel && !byId.has(sel) ? null : sel));
+          }
+          // Nothing edits an edge locally, so replacing wholesale is safe.
+          // Only while settled: nodes and edges are two separate requests, so
+          // an unsettled tick can pair stale nodes with fresh edges and flash
+          // an equipped tool as a floating box.
+          if (!settled) return;
+          setEdges((prev) => {
+            const next = dedupeById(freshEdges);
+            if (prev.length === next.length && prev.every((e, i) => e.id === next[i].id)) return prev;
+            return next;
           });
         })
         .catch(() => {
-          // Best-effort — a failed poll just tries again on the next tick.
+          // Best-effort: a failed poll just tries again on the next tick.
         });
     }, 2000);
     return () => clearInterval(interval);
@@ -169,10 +257,12 @@ export default function MeshCanvas({
   async function handleAddAgent(agentSlug: string, pos?: { x: number; y: number }) {
     try {
       const offset = nodes.length * 40;
-      const node = await createAgentNode(project.id, agentSlug, {
-        position_x: pos?.x ?? 120 + offset,
-        position_y: pos?.y ?? 100 + offset,
-      });
+      const node = await mutating(() =>
+        createAgentNode(project.id, agentSlug, {
+          position_x: pos?.x ?? 120 + offset,
+          position_y: pos?.y ?? 100 + offset,
+        })
+      );
       setNodes((n) => dedupeById([...n, node]));
       setSelectedId(node.id);
 
@@ -198,6 +288,7 @@ export default function MeshCanvas({
     const toolType = toolTypes.find((t) => t.slug === toolSlug);
     if (!toolType) return;
     const offset = nodes.length * 40;
+    toolModalOpen.current = true;
     setToolModal({
       toolType,
       position: pos ?? { x: 120 + offset, y: 100 + offset },
@@ -215,12 +306,14 @@ export default function MeshCanvas({
     const offset = nodes.length * 40;
     const position = pos ?? { x: 120 + offset, y: 100 + offset };
     try {
-      const node = await createToolNode(project.id, {
-        presetSlug: preset.slug,
-        name: preset.name,
-        position_x: position.x,
-        position_y: position.y,
-      });
+      const node = await mutating(() =>
+        createToolNode(project.id, {
+          presetSlug: preset.slug,
+          name: preset.name,
+          position_x: position.x,
+          position_y: position.y,
+        })
+      );
       setNodes((n) => dedupeById([...n, node]));
 
       if (attachToAgentId) {
@@ -246,10 +339,12 @@ export default function MeshCanvas({
   async function handleAddEnvironment(pos?: { x: number; y: number }) {
     try {
       const offset = nodes.length * 40;
-      const node = await createEnvironmentNode(project.id, {
-        position_x: pos?.x ?? 120 + offset,
-        position_y: pos?.y ?? 100 + offset,
-      });
+      const node = await mutating(() =>
+        createEnvironmentNode(project.id, {
+          position_x: pos?.x ?? 120 + offset,
+          position_y: pos?.y ?? 100 + offset,
+        })
+      );
       setNodes((n) => dedupeById([...n, node]));
       setSelectedId(node.id);
     } catch (e) {
@@ -265,6 +360,9 @@ export default function MeshCanvas({
     } else {
       setSelectedId(node.id);
     }
+    toolModalOpen.current = false;
+    // The modal created a node, so polls already in flight are stale.
+    mutationSeq.current += 1;
     setToolModal(null);
   }
 
@@ -299,11 +397,17 @@ export default function MeshCanvas({
   }
 
   // Live position during a drag. No save; edges re-render off this.
+  // One small state for the node under the cursor, instead of rewriting the
+  // whole nodes array on every pointermove. Edges still follow, because
+  // positionsFor() overlays this before anything reads a position.
   function handleDragMove(node: ProjectNode, x: number, y: number) {
-    setNodes((prev) => prev.map((n) => (n.id === node.id ? { ...n, position_x: x, position_y: y } : n)));
+    draggingRef.current = true;
+    setDragPos({ id: node.id, x, y });
   }
 
   async function handleDragEnd(node: ProjectNode, x: number, y: number) {
+    draggingRef.current = false;
+    setDragPos(null);
     setNodes((prev) => prev.map((n) => (n.id === node.id ? { ...n, position_x: x, position_y: y } : n)));
     try {
       await savePosition(node, x, y);
@@ -313,14 +417,20 @@ export default function MeshCanvas({
   }
 
   async function handleDeleteNode(node: ProjectNode) {
+    if (deletingIds.has(node.id)) return;
+    markDeleting(node.id, true);
     try {
-      await deleteNode(project.id, node.id);
-      setNodes((prev) => prev.filter((n) => n.id !== node.id));
-      setEdges((prev) => prev.filter((e) => e.source_node_id !== node.id && e.target_node_id !== node.id));
-      setSelectedId((sel) => (sel === node.id ? null : sel));
-      setChatNodeId((c) => (c === node.id ? null : c));
+      const { deleted_node_ids } = await mutating(() => deleteNode(project.id, node.id));
+      const gone = new Set(deleted_node_ids ?? [node.id]);
+      setNodes((prev) => prev.filter((n) => !gone.has(n.id)));
+      setEdges((prev) => prev.filter((e) => !gone.has(e.source_node_id) && !gone.has(e.target_node_id)));
+      setSelectedId((sel) => (sel && gone.has(sel) ? null : sel));
+      setChatNodeId((c) => (c && gone.has(c) ? null : c));
     } catch (e) {
       setError(e instanceof ApiError ? e.message : "Could not delete node");
+    } finally {
+      // Clears the spinner on failure; on success the node is already gone.
+      markDeleting(node.id, false);
     }
   }
 
@@ -488,7 +598,16 @@ export default function MeshCanvas({
     }
   }
 
-    const visibleNodes = nodes.filter(
+  // The dragging node's live position, overlaid on the one node it applies
+  // to. Cards and EdgeLayer both read this, so edges track the drag without
+  // rebuilding the whole array on every pointermove.
+  const positioned = dragPos
+    ? nodes.map((n) =>
+        n.id === dragPos.id ? { ...n, position_x: dragPos.x, position_y: dragPos.y } : n
+      )
+    : nodes;
+
+  const visibleNodes = positioned.filter(
     (n) =>
       !(isToolNode(n) && attachedToolNodeIds.has(n.id)) &&
       !(isEnvironmentNode(n) && attachedEnvNodeIds.has(n.id))
@@ -625,7 +744,7 @@ export default function MeshCanvas({
         >
           <div data-canvas-layer="1" style={{ position: "relative", width: LAYER_W, height: LAYER_H }}>
             <EdgeLayer
-              nodes={nodes}
+              nodes={positioned}
               edges={edges.filter((e) => e.kind !== "environment")}
               selectedId={selectedId}
               link={link}
@@ -647,6 +766,7 @@ export default function MeshCanvas({
                   inboundCount={inbound.length}
                   staleCount={inbound.filter((e) => e.is_stale).length}
                   busy={!!chatByNode[node.id]?.busy}
+                  deleting={deletingIds.has(node.id)}
                   attachedEnvironments={isAgentNode(node) ? attachedEnvsByAgent.get(node.id) ?? [] : undefined}
                   onSelect={() => setSelectedId(node.id)}
                   onDragMove={(x, y) => handleDragMove(node, x, y)}
@@ -718,7 +838,10 @@ export default function MeshCanvas({
           position={toolModal.position}
           attachToAgentId={toolModal.attachToAgentId}
           onCreated={handleToolCreated}
-          onCancel={() => setToolModal(null)}
+          onCancel={() => {
+            toolModalOpen.current = false;
+            setToolModal(null);
+          }}
         />
       )}
     </div>

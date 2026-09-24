@@ -337,12 +337,27 @@ class ProjectRepository:
         ).data
         return self.get_agent_node(node_id) if rows else None
 
-    def delete_node(self, node_id: str) -> bool:
+    def delete_node(self, node_id: str) -> list[str]:
         """
         Remove a node of any kind owned by the caller.
         Does not filter by kind, blanket delete over
         Every kind of node and cascades to any child objects e.g. conversations, secrets ...
+
+        Deleting an agent also sweeps the project's now-orphaned tool nodes.
+        Returns every node id removed. Empty means nothing matched.
         """
+        # kind and project_id are gone after the delete, so read them first.
+        found = (
+            self._db.table("nodes")
+            .select("kind, project_id")
+            .eq("id", node_id)
+            .eq("owner_id", self._user_id)
+            .limit(1)
+            .execute()
+        ).data
+        if not found:
+            return []
+
         rows = (
             self._db.table("nodes")
             .delete()
@@ -350,7 +365,53 @@ class ProjectRepository:
             .eq("owner_id", self._user_id)
             .execute()
         ).data
-        return bool(rows)
+        if not rows:
+            return []
+        if found[0]["kind"] != "agent":
+            return [node_id]
+        return [node_id, *self._sweep_orphan_tools(found[0]["project_id"])]
+
+    def _sweep_orphan_tools(self, project_id: str) -> list[str]:
+        """Delete the project's tool nodes that no edge references any more.
+
+        ponytail: two reads and a Python subtraction, PostgREST has no
+        anti-join. Canvases are small. Move to an RPC if one ever is not.
+        """
+        tool_ids = {
+            r["id"]
+            for r in (
+                self._db.table("nodes")
+                .select("id")
+                .eq("project_id", project_id)
+                .eq("owner_id", self._user_id)
+                .eq("kind", "tool")
+                .execute()
+            ).data
+        }
+        if not tool_ids:
+            return []
+
+        attached: set[str] = set()
+        for edge in (
+            self._db.table("edges")
+            .select("source_node_id, target_node_id")
+            .eq("project_id", project_id)
+            .eq("owner_id", self._user_id)
+            .execute()
+        ).data:
+            attached.add(edge["source_node_id"])
+            attached.add(edge["target_node_id"])
+
+        orphans = sorted(tool_ids - attached)
+        if orphans:
+            (
+                self._db.table("nodes")
+                .delete()
+                .in_("id", orphans)
+                .eq("owner_id", self._user_id)
+                .execute()
+            )
+        return orphans
 
     def list_nodes(self, project_id: str) -> list[Node]:
         rows = (

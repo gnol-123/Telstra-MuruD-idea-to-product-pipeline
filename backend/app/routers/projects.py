@@ -5,6 +5,7 @@ from datetime import datetime
 from typing import Any, Literal
 from uuid import UUID
 
+import anyio
 from anyio import to_thread
 from fastapi import APIRouter, HTTPException, Query, status
 from postgrest.exceptions import APIError
@@ -20,7 +21,13 @@ from app.repositories.project_repo import (
     Project,
     UsageTotal,
 )
-from app.repositories.tool_repo import ToolNode, ToolPreset, ToolType, load_node_secrets
+from app.repositories.tool_repo import (
+    ToolNode,
+    ToolPreset,
+    ToolRepository,
+    ToolType,
+    load_node_secrets,
+)
 from app.routers.chat import ChatMessage
 from app.routers.deps import EnvRepo, ProjectRepo, ToolRepo, TurnRepos
 from app.routers.environments import EnvironmentNodeResponse, create_environment_node
@@ -523,13 +530,18 @@ async def update_node(
     return NodeResponse.of(node)
 
 
+class DeleteNodeResponse(BaseModel):
+    # The clicked node, plus any tool nodes orphaned by removing it.
+    deleted_node_ids: list[UUID]
+
+
 @router.delete(
     "/projects/{project_id}/nodes/{node_id}",
-    status_code=status.HTTP_204_NO_CONTENT,
+    response_model=DeleteNodeResponse,
 )
 async def delete_node(
     project_id: UUID, node_id: UUID, repo: ProjectRepo, env_repo: EnvRepo
-) -> None:
+) -> DeleteNodeResponse:
     """Remove a node of any kind, cascading to its conversation, transcript and secrets."""
     # Stop a running turn first: only agent nodes have a conversation, so a
     # tool/environment node's None id is a no-op.
@@ -545,6 +557,7 @@ async def delete_node(
     deleted = await to_thread.run_sync(repo.delete_node, str(node_id))
     if not deleted:
         raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Node not found")
+    return DeleteNodeResponse(deleted_node_ids=deleted)
 
 
 # -- TOOL NODES ------------------------------------------------------------------
@@ -678,6 +691,16 @@ async def _create_tool_node(
     return ToolNodeResponse.of(node, secrets_set)
 
 
+def _load_catalog(
+    tool_repo: ToolRepository,
+) -> tuple[dict[str, ToolPreset], dict[str, ToolType]]:
+    """The preset and tool type catalogs, keyed by slug. Two reads, not two per preset."""
+    return (
+        {p.slug: p for p in tool_repo.list_presets()},
+        {t.slug: t for t in tool_repo.list_tool_types()},
+    )
+
+
 async def _wire_default_presets(
     project_id: str,
     node_id: str,
@@ -694,16 +717,29 @@ async def _wire_default_presets(
     half-wired agent is visible and deletable. Nothing here is idempotent: a
     retried request creates a second agent and a second set of defaults.
     """
-    created: list[str] = []
+    if not agent_type.default_presets:
+        return
+
+    # Two catalog reads instead of two per preset: these rows are static for
+    # the life of the request, and a 12 preset agent was paying 24 round
+    # trips to re-read them.
+    presets, tool_types = await to_thread.run_sync(_load_catalog, tool_repo)
+
+    # Slot index is fixed up front so the presets can run concurrently
+    # without their positions depending on completion order.
+    planned: list[tuple[int, ToolPreset, ToolType]] = []
     for slug in agent_type.default_presets:
-        preset = await to_thread.run_sync(tool_repo.get_preset, slug)
+        preset = presets.get(slug)
         if preset is None:
             log.warning("agent type %s lists unknown preset %s", agent_type.slug, slug)
             continue
-        tool_type = await to_thread.run_sync(tool_repo.get_tool_type, preset.tool_slug)
+        tool_type = tool_types.get(preset.tool_slug)
         if tool_type is None:
             log.warning("preset %s names unknown tool type %s", slug, preset.tool_slug)
             continue
+        planned.append((len(planned), preset, tool_type))
+
+    async def wire(slot: int, preset: ToolPreset, tool_type: ToolType) -> None:
         try:
             tool_id = await _provision_tool_node(
                 project_id,
@@ -712,18 +748,23 @@ async def _wire_default_presets(
                 dict(preset.config),
                 {},
                 position_x=req.position_x + _DEFAULT_TOOL_DX,
-                position_y=req.position_y + len(created) * _DEFAULT_TOOL_DY,
+                position_y=req.position_y + slot * _DEFAULT_TOOL_DY,
                 tool_repo=tool_repo,
             )
         except Exception:
-            log.exception("default preset %s failed for agent %s", slug, node_id)
-            continue
-        created.append(tool_id)
+            log.exception("default preset %s failed for agent %s", preset.slug, node_id)
+            return
         try:
             await to_thread.run_sync(lambda t=tool_id: repo.create_edge(t, node_id, "tool"))
         except Exception:
             # The tool node exists with no edge. Named so it can be cleaned up.
-            log.exception("edge for preset %s failed; orphan tool node %s", slug, tool_id)
+            log.exception("edge for preset %s failed; orphan tool node %s", preset.slug, tool_id)
+
+    # Each preset is independent, so wire them at once rather than paying
+    # ~6 sequential round trips each. gather never raises: wire swallows.
+    async with anyio.create_task_group() as tg:
+        for slot, preset, tool_type in planned:
+            tg.start_soon(wire, slot, preset, tool_type)
 
 
 async def _verify_tool_node(node_id: str, tool_repo: ToolRepo) -> None:
@@ -959,15 +1000,24 @@ async def list_edges(project_id: UUID, repo: ProjectRepo) -> list[EdgeResponse]:
 
     edges = await to_thread.run_sync(repo.list_edges, str(project_id))
 
-    # One head lookup per edge.
+    # One head lookup per context edge, cached per source node: a canvas of
+    # tool edges was paying two Supabase round trips each for a staleness
+    # number only context edges carry.
+    heads: dict[str, int] = {}
     out = []
     for e in edges:
-        head = await to_thread.run_sync(repo.get_conversation_head, e.source_node_id)
+        if e.kind != "context":
+            out.append(EdgeResponse.of(e, is_stale=False, messages_behind=None))
+            continue
         if e.summarised_through_seq is None:
             # Never summarised: stale, with no meaningful gap.
             out.append(EdgeResponse.of(e, is_stale=True, messages_behind=None))
             continue
-        behind = max(0, head - e.summarised_through_seq)
+        if e.source_node_id not in heads:
+            heads[e.source_node_id] = await to_thread.run_sync(
+                repo.get_conversation_head, e.source_node_id
+            )
+        behind = max(0, heads[e.source_node_id] - e.summarised_through_seq)
         out.append(EdgeResponse.of(e, is_stale=behind > 0, messages_behind=behind))
     return out
 

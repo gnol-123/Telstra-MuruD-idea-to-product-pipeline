@@ -59,6 +59,7 @@ export default function NodeCard({
   inboundCount,
   staleCount,
   busy,
+  deleting,
   onSelect,
   onDragMove,
   onDragEnd,
@@ -85,6 +86,8 @@ export default function NodeCard({
   staleCount?: number;
   // Agent nodes only: a chat turn is in flight for this agent right now.
   busy?: boolean;
+  // Delete is in flight: card dims, x becomes a spinner.
+  deleting?: boolean;
   onSelect: () => void;
   // Fires per pointermove. State only; PATCH happens on drag end.
   onDragMove: (x: number, y: number) => void;
@@ -184,11 +187,11 @@ export default function NodeCard({
         if (agent) onOpenChat?.();
       }}
       style={{ left: node.position_x ?? 0, top: node.position_y ?? 0, zIndex: selected ? 5 : 2 }}
-      className={`absolute w-60 cursor-grab active:cursor-grabbing backdrop-blur-md border rounded-[13px] px-3.5 pt-[13px] pb-3 select-none transition-colors ${borderColor} ${
+      className={`absolute w-60 cursor-grab active:cursor-grabbing backdrop-blur-md border rounded-[13px] px-3.5 pt-[13px] pb-3 select-none transition-[border-color,background-color,opacity] ${borderColor} ${
         selected
           ? "bg-accent/[0.045] shadow-[0_18px_44px_rgba(0,0,0,.6),0_0_34px_rgba(34,224,240,.1)]"
           : "bg-white/[0.022] shadow-[0_14px_34px_rgba(0,0,0,.5)]"
-      }`}
+      } ${deleting ? "opacity-45 pointer-events-none" : ""}`}
     >
       {/* in port: agents and environments-as-sources don't receive; only agents can be an edge target */}
       {agent && (
@@ -235,15 +238,22 @@ export default function NodeCard({
         </div>
         <button
           data-btn
+          disabled={deleting}
           onPointerDown={(e) => e.stopPropagation()}
           onClick={(e) => {
             e.stopPropagation();
             onDelete();
           }}
-          title={agent ? "Delete agent" : env ? "Delete environment" : "Delete tool"}
-          className="shrink-0 text-white/[0.28] hover:text-white/70 text-[13px] px-0.5 leading-none"
+          title={
+            deleting ? "Deleting..." : agent ? "Delete agent" : env ? "Delete environment" : "Delete tool"
+          }
+          className="shrink-0 text-white/[0.28] hover:text-white/70 text-[13px] px-0.5 leading-none disabled:hover:text-white/[0.28]"
         >
-          ×
+          {deleting ? (
+            <span className="block w-[11px] h-[11px] rounded-full border border-white/25 border-t-white/70 animate-spin" />
+          ) : (
+            "×"
+          )}
         </button>
       </div>
 
