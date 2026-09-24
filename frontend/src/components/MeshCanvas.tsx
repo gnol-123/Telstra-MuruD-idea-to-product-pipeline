@@ -1,6 +1,7 @@
 "use client";
 
 import { useEffect, useRef, useState } from "react";
+import { flushSync } from "react-dom";
 import {
   Project,
   AgentType,
@@ -80,6 +81,9 @@ export default function MeshCanvas({
   // Which agent's chat window is open, if any.
   const [chatNodeId, setChatNodeId] = useState<string | null>(null);
   const canvasRef = useRef<HTMLDivElement | null>(null);
+  const panFrom = useRef<{ x: number; y: number; dist: number } | null>(null);
+  const [zoom, setZoom] = useState(1);
+  const zoomRef = useRef(1);
   // In-flight create/delete calls. Non-zero means the server list is behind
   // the UI, so the poll merges status only and skips add/remove.
   const pendingMutations = useRef(0);
@@ -239,11 +243,69 @@ export default function MeshCanvas({
     return () => window.removeEventListener("keydown", onKey);
   }, []);
 
+  // Zoom keeping the canvas point under (clientX, clientY) fixed.
+  function zoomAt(next: number, clientX: number, clientY: number) {
+    const c = canvasRef.current;
+    if (!c) return;
+    next = Math.min(2, Math.max(0.3, next));
+    const r = c.getBoundingClientRect();
+    const px = clientX - r.left;
+    const py = clientY - r.top;
+    const wx = (px + c.scrollLeft) / zoomRef.current;
+    const wy = (py + c.scrollTop) / zoomRef.current;
+    zoomRef.current = next;
+    // Layout must grow before scroll can be set past the old extent.
+    flushSync(() => setZoom(next));
+    c.scrollLeft = wx * next - px;
+    c.scrollTop = wy * next - py;
+  }
+
+  function zoomCenter(next: number) {
+    const r = canvasRef.current?.getBoundingClientRect();
+    if (r) zoomAt(next, r.left + r.width / 2, r.top + r.height / 2);
+  }
+
+  // ctrl/cmd+wheel (and trackpad pinch) zooms; needs a non-passive listener.
+  useEffect(() => {
+    const c = canvasRef.current;
+    if (!c) return;
+    function onWheel(e: WheelEvent) {
+      if (!e.ctrlKey && !e.metaKey) return;
+      e.preventDefault();
+      zoomAt(zoomRef.current * Math.exp(-e.deltaY * 0.01), e.clientX, e.clientY);
+    }
+    c.addEventListener("wheel", onWheel, { passive: false });
+    return () => c.removeEventListener("wheel", onWheel);
+  }, []);
+
+  // Two fingers pan + pinch; one finger is left to cards/ports (canvas is touch-none).
+  function handleTouchMove(e: React.TouchEvent) {
+    const c = canvasRef.current;
+    if (!c || e.touches.length !== 2) {
+      panFrom.current = null;
+      return;
+    }
+    const [a, b] = [e.touches[0], e.touches[1]];
+    const x = (a.clientX + b.clientX) / 2;
+    const y = (a.clientY + b.clientY) / 2;
+    const dist = Math.hypot(a.clientX - b.clientX, a.clientY - b.clientY);
+    const prev = panFrom.current;
+    if (prev) {
+      c.scrollLeft -= x - prev.x;
+      c.scrollTop -= y - prev.y;
+      if (prev.dist > 0) zoomAt(zoomRef.current * (dist / prev.dist), x, y);
+    } else {
+      setLink(null);
+    }
+    panFrom.current = { x, y, dist };
+  }
+
   function relPos(e: { clientX: number; clientY: number }) {
     const c = canvasRef.current;
     if (!c) return { x: e.clientX, y: e.clientY };
     const r = c.getBoundingClientRect();
-    return { x: e.clientX - r.left + c.scrollLeft, y: e.clientY - r.top + c.scrollTop };
+    const z = zoomRef.current;
+    return { x: (e.clientX - r.left + c.scrollLeft) / z, y: (e.clientY - r.top + c.scrollTop) / z };
   }
 
   // Where a tool/preset lands visually if it's created near an agent it's
@@ -714,9 +776,15 @@ export default function MeshCanvas({
           <span>Double-click an agent to chat</span>
         </div>
 
+        <div className="absolute right-[316px] bottom-12 z-[4] flex items-center border border-white/[0.13] rounded-md bg-black/80 text-[11px] text-white/60">
+          <button onClick={() => zoomCenter(zoom / 1.2)} className="px-2 py-1 hover:text-white" title="Zoom out">−</button>
+          <button onClick={() => zoomCenter(1)} className="px-1.5 py-1 w-12 hover:text-white" title="Reset zoom">{Math.round(zoom * 100)}%</button>
+          <button onClick={() => zoomCenter(zoom * 1.2)} className="px-2 py-1 hover:text-white" title="Zoom in">+</button>
+        </div>
+
         <main
           ref={canvasRef}
-          className="flex-1 min-w-0 relative overflow-auto pb-9"
+          className="flex-1 min-w-0 relative overflow-auto touch-none pb-9"
           style={{
             backgroundColor: "#000",
             backgroundImage: "radial-gradient(rgba(255,255,255,.075) 1px, transparent 1px)",
@@ -738,11 +806,17 @@ export default function MeshCanvas({
             if (link) setLink((l) => (l ? { ...l, cursor: relPos(e) } : l));
           }}
           onPointerUp={() => setLink(null)}
+          onTouchMove={handleTouchMove}
+          onTouchEnd={() => (panFrom.current = null)}
           onClick={(e) => {
             if (e.target === canvasRef.current || (e.target as HTMLElement).dataset.canvasLayer) setSelectedId(null);
           }}
         >
-          <div data-canvas-layer="1" style={{ position: "relative", width: LAYER_W, height: LAYER_H }}>
+          <div data-canvas-layer="1" style={{ width: LAYER_W * zoom, height: LAYER_H * zoom }}>
+          <div
+            data-canvas-layer="1"
+            style={{ position: "relative", width: LAYER_W, height: LAYER_H, transform: `scale(${zoom})`, transformOrigin: "0 0" }}
+          >
             <EdgeLayer
               nodes={positioned}
               edges={edges.filter((e) => e.kind !== "environment")}
@@ -767,6 +841,7 @@ export default function MeshCanvas({
                   staleCount={inbound.filter((e) => e.is_stale).length}
                   busy={!!chatByNode[node.id]?.busy}
                   deleting={deletingIds.has(node.id)}
+                  zoom={zoom}
                   attachedEnvironments={isAgentNode(node) ? attachedEnvsByAgent.get(node.id) ?? [] : undefined}
                   onSelect={() => setSelectedId(node.id)}
                   onDragMove={(x, y) => handleDragMove(node, x, y)}
@@ -783,6 +858,7 @@ export default function MeshCanvas({
                 />
               );
             })}
+          </div>
           </div>
           {visibleNodes.length === 0 && (
             <div className="absolute inset-0 grid place-items-center pointer-events-none">

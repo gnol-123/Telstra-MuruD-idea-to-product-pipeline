@@ -60,6 +60,7 @@ export default function NodeCard({
   staleCount,
   busy,
   deleting,
+  zoom,
   onSelect,
   onDragMove,
   onDragEnd,
@@ -88,6 +89,8 @@ export default function NodeCard({
   busy?: boolean;
   // Delete is in flight: card dims, x becomes a spinner.
   deleting?: boolean;
+  // Canvas scale; pointer deltas are divided by it.
+  zoom: number;
   onSelect: () => void;
   // Fires per pointermove. State only; PATCH happens on drag end.
   onDragMove: (x: number, y: number) => void;
@@ -128,8 +131,8 @@ export default function NodeCard({
     let latestY = originY;
 
     function onMove(ev: PointerEvent) {
-      latestX = originX + (ev.clientX - startX);
-      latestY = originY + (ev.clientY - startY);
+      latestX = originX + (ev.clientX - startX) / zoom;
+      latestY = originY + (ev.clientY - startY) / zoom;
       // State, not card.style; EdgeLayer reads the same position.
       onDragMove(latestX, latestY);
     }
@@ -187,7 +190,7 @@ export default function NodeCard({
         if (agent) onOpenChat?.();
       }}
       style={{ left: node.position_x ?? 0, top: node.position_y ?? 0, zIndex: selected ? 5 : 2 }}
-      className={`absolute w-60 cursor-grab active:cursor-grabbing backdrop-blur-md border rounded-[13px] px-3.5 pt-[13px] pb-3 select-none transition-[border-color,background-color,opacity] ${borderColor} ${
+      className={`absolute w-60 cursor-grab active:cursor-grabbing touch-none backdrop-blur-md border rounded-[13px] px-3.5 pt-[13px] pb-3 select-none transition-[border-color,background-color,opacity] ${borderColor} ${
         selected
           ? "bg-accent/[0.045] shadow-[0_18px_44px_rgba(0,0,0,.6),0_0_34px_rgba(34,224,240,.1)]"
           : "bg-white/[0.022] shadow-[0_14px_34px_rgba(0,0,0,.5)]"
@@ -199,10 +202,12 @@ export default function NodeCard({
           data-port="in"
           onPointerDown={(e) => {
             e.stopPropagation();
+            // Touch implicitly captures to the port; release so pointerup hits the target card.
+            e.currentTarget.releasePointerCapture(e.pointerId);
             onPortDown("in");
           }}
           title="Receive context"
-          className={`absolute -left-[7px] top-[26px] w-3.5 h-3.5 rounded-full bg-panel2 cursor-crosshair border-2 ${
+          className={`absolute -left-[7px] top-[26px] w-3.5 h-3.5 rounded-full bg-panel2 cursor-crosshair touch-none border-2 ${
             (inboundCount ?? 0) > 0 ? "border-accent" : "border-white/30"
           }`}
         />
@@ -212,10 +217,11 @@ export default function NodeCard({
         data-port="out"
         onPointerDown={(e) => {
           e.stopPropagation();
+          e.currentTarget.releasePointerCapture(e.pointerId);
           onPortDown("out");
         }}
         title={agent ? "Share context" : env ? "Attach this environment to an agent" : "Attach this tool to an agent"}
-        className="absolute -right-2 top-[24px] w-4 h-4 rounded-full bg-accent border-2 border-panel2 cursor-crosshair shadow-[0_0_10px_rgba(34,224,240,0.5)]"
+        className="absolute -right-2 top-[24px] w-4 h-4 rounded-full bg-accent border-2 border-panel2 cursor-crosshair touch-none shadow-[0_0_10px_rgba(34,224,240,0.5)]"
       />
 
       <div className="flex items-start gap-2.5">
