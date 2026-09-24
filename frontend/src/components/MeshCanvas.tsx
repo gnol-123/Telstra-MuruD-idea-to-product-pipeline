@@ -34,7 +34,7 @@ import {
 } from "@/lib/api";
 import Palette, { PaletteTab, PaletteTabs } from "./Palette";
 import NodeCard, { AttachedTool, AttachedEnvironment } from "./NodeCard";
-import EdgeLayer, { LinkDraft, LAYER_W, LAYER_H } from "./EdgeLayer";
+import EdgeLayer, { LinkDraft, LAYER_W, LAYER_H, portOf } from "./EdgeLayer";
 import Inspector from "./Inspector";
 import ChatWindow, { ChatState, defaultChatState } from "./ChatWindow";
 import ToolConfigModal from "./ToolConfigModal";
@@ -489,9 +489,7 @@ export default function MeshCanvas({
   }
 
   function handlePortDown(node: ProjectNode, side: "in" | "out") {
-    const x = (node.position_x ?? 0) + (side === "out" ? 240 : 0);
-    const y = (node.position_y ?? 0) + 32;
-    setLink({ fromId: node.id, side, cursor: { x, y } });
+    setLink({ fromId: node.id, side, cursor: portOf(node, side) });
   }
 
   function edgeKindFor(source: ProjectNode, target: ProjectNode): EdgeKind | null {
