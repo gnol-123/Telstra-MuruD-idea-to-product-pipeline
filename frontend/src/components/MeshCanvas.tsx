@@ -81,7 +81,7 @@ export default function MeshCanvas({
   // Which agent's chat window is open, if any.
   const [chatNodeId, setChatNodeId] = useState<string | null>(null);
   const canvasRef = useRef<HTMLDivElement | null>(null);
-  const panFrom = useRef<{ x: number; y: number; dist: number } | null>(null);
+  const pinchDist = useRef<number | null>(null);
   const [zoom, setZoom] = useState(1);
   const zoomRef = useRef(1);
   // In-flight create/delete calls. Non-zero means the server list is behind
@@ -278,26 +278,18 @@ export default function MeshCanvas({
     return () => c.removeEventListener("wheel", onWheel);
   }, []);
 
-  // Two fingers pan + pinch; one finger is left to cards/ports (canvas is touch-none).
+  // Two-finger pinch zooms; one finger is left to cards/ports (canvas is touch-none).
   function handleTouchMove(e: React.TouchEvent) {
-    const c = canvasRef.current;
-    if (!c || e.touches.length !== 2) {
-      panFrom.current = null;
+    if (e.touches.length !== 2) {
+      pinchDist.current = null;
       return;
     }
     const [a, b] = [e.touches[0], e.touches[1]];
-    const x = (a.clientX + b.clientX) / 2;
-    const y = (a.clientY + b.clientY) / 2;
     const dist = Math.hypot(a.clientX - b.clientX, a.clientY - b.clientY);
-    const prev = panFrom.current;
-    if (prev) {
-      c.scrollLeft -= x - prev.x;
-      c.scrollTop -= y - prev.y;
-      if (prev.dist > 0) zoomAt(zoomRef.current * (dist / prev.dist), x, y);
-    } else {
-      setLink(null);
-    }
-    panFrom.current = { x, y, dist };
+    const prev = pinchDist.current;
+    if (prev) zoomAt(zoomRef.current * (dist / prev), (a.clientX + b.clientX) / 2, (a.clientY + b.clientY) / 2);
+    else setLink(null);
+    pinchDist.current = dist;
   }
 
   function relPos(e: { clientX: number; clientY: number }) {
@@ -807,7 +799,7 @@ export default function MeshCanvas({
           }}
           onPointerUp={() => setLink(null)}
           onTouchMove={handleTouchMove}
-          onTouchEnd={() => (panFrom.current = null)}
+          onTouchEnd={() => (pinchDist.current = null)}
           onClick={(e) => {
             if (e.target === canvasRef.current || (e.target as HTMLElement).dataset.canvasLayer) setSelectedId(null);
           }}
