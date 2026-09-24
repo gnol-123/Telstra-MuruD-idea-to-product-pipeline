@@ -7,8 +7,8 @@ const AMBER = "#ffb74d";
 const GREEN = "#7ee787";
 
 export const CARD_W = 240;
-// Port center, well below the delete x.
-export const PORT_Y = 48;
+// Used until a card has been measured.
+const FALLBACK_CARD_H = 120;
 export const LAYER_W = 2400;
 export const LAYER_H = 1600;
 
@@ -18,9 +18,10 @@ export interface LinkDraft {
   cursor: { x: number; y: number };
 }
 
-export function portOf(n: ProjectNode, side: "in" | "out") {
+// Ports sit at the vertical middle of the card's edge.
+export function portOf(n: ProjectNode, side: "in" | "out", heights: Record<string, number>) {
   const x = (n.position_x ?? 0) + (side === "out" ? CARD_W : 0);
-  const y = (n.position_y ?? 0) + PORT_Y;
+  const y = (n.position_y ?? 0) + (heights[n.id] ?? FALLBACK_CARD_H) / 2;
   return { x, y };
 }
 
@@ -34,6 +35,7 @@ export default function EdgeLayer({
   edges,
   selectedId,
   link,
+  heights,
   refreshingId,
   onRefresh,
   onDelete,
@@ -43,6 +45,7 @@ export default function EdgeLayer({
   edges: Edge[];
   selectedId: string | null;
   link: LinkDraft | null;
+  heights: Record<string, number>;
   refreshingId: string | null;
   onRefresh: (edge: Edge) => void;
   onDelete: (edge: Edge) => void;
@@ -74,8 +77,8 @@ export default function EdgeLayer({
           const a = nodeById(e.source_node_id);
           const b = nodeById(e.target_node_id);
           if (!a || !b) return null;
-          const p1 = portOf(a, "out");
-          const p2 = portOf(b, "in");
+          const p1 = portOf(a, "out", heights);
+          const p2 = portOf(b, "in", heights);
           const d = curve(p1, p2);
           const hot = selectedId === e.source_node_id || selectedId === e.target_node_id;
           const stale = e.kind === "context" && e.is_stale;
@@ -101,7 +104,7 @@ export default function EdgeLayer({
           (() => {
             const a = nodeById(link.fromId);
             if (!a) return null;
-            const p1 = portOf(a, link.side);
+            const p1 = portOf(a, link.side, heights);
             const c = link.cursor;
             return (
               <>
@@ -134,8 +137,8 @@ export default function EdgeLayer({
           const a = nodeById(e.source_node_id);
           const b = nodeById(e.target_node_id);
           if (!a || !b) return null;
-          const p1 = portOf(a, "out");
-          const p2 = portOf(b, "in");
+          const p1 = portOf(a, "out", heights);
+          const p2 = portOf(b, "in", heights);
           const stale = e.kind === "context" && e.is_stale;
           const isEnv = e.kind === "environment";
           const hot = selectedId === e.source_node_id || selectedId === e.target_node_id;

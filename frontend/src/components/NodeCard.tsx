@@ -1,7 +1,6 @@
 "use client";
 
-import { useState } from "react";
-import { PORT_Y } from "./EdgeLayer";
+import { useEffect, useRef, useState } from "react";
 import { Edge, ProjectNode, ToolNode, EnvironmentNode, isAgentNode, isEnvironmentNode } from "@/lib/types";
 
 export const AGENT_ICONS: Record<string, string> = {
@@ -62,6 +61,7 @@ export default function NodeCard({
   busy,
   deleting,
   zoom,
+  onHeight,
   onSelect,
   onDragMove,
   onDragEnd,
@@ -92,6 +92,8 @@ export default function NodeCard({
   deleting?: boolean;
   // Canvas scale; pointer deltas are divided by it.
   zoom: number;
+  // Reports the card's rendered height so edges can hit the port centers.
+  onHeight: (id: string, h: number) => void;
   onSelect: () => void;
   // Fires per pointermove. State only; PATCH happens on drag end.
   onDragMove: (x: number, y: number) => void;
@@ -115,6 +117,16 @@ export default function NodeCard({
   // palette), tracked separately from `linkHover` — that one is for the
   // pointer-based port-to-port linking gesture, a different drag system.
   const [nativeDragOver, setNativeDragOver] = useState(false);
+  const cardRef = useRef<HTMLDivElement | null>(null);
+
+  useEffect(() => {
+    const el = cardRef.current;
+    if (!el) return;
+    // offsetHeight is layout px, unaffected by the canvas scale.
+    const ro = new ResizeObserver(() => onHeight(node.id, el.offsetHeight));
+    ro.observe(el);
+    return () => ro.disconnect();
+  }, [node.id, onHeight]);
   const icon = agent
     ? AGENT_ICONS[node.agent_slug] ?? "◆"
     : env
@@ -163,6 +175,7 @@ export default function NodeCard({
 
   return (
     <div
+      ref={cardRef}
       onPointerDown={handlePointerDown}
       onPointerUp={onCardPointerUp}
       onPointerEnter={() => onHoverChange(true)}
@@ -208,8 +221,7 @@ export default function NodeCard({
             onPortDown("in");
           }}
           title="Receive context"
-          style={{ top: PORT_Y - 10 }}
-          className={`absolute -left-[10px] w-5 h-5 rounded-full bg-panel2 cursor-crosshair touch-none border-2 ${
+          className={`absolute -left-[10px] top-1/2 -translate-y-1/2 w-5 h-5 rounded-full bg-panel2 cursor-crosshair touch-none border-2 ${
             (inboundCount ?? 0) > 0 ? "border-accent" : "border-white/30"
           }`}
         />
@@ -223,8 +235,7 @@ export default function NodeCard({
           onPortDown("out");
         }}
         title={agent ? "Share context" : env ? "Attach this environment to an agent" : "Attach this tool to an agent"}
-        style={{ top: PORT_Y - 10 }}
-        className="absolute -right-[10px] w-5 h-5 rounded-full bg-accent border-2 border-panel2 cursor-crosshair touch-none shadow-[0_0_10px_rgba(34,224,240,0.5)]"
+        className="absolute -right-[10px] top-1/2 -translate-y-1/2 w-5 h-5 rounded-full bg-accent border-2 border-panel2 cursor-crosshair touch-none shadow-[0_0_10px_rgba(34,224,240,0.5)]"
       />
 
       <div className="flex items-start gap-2.5">

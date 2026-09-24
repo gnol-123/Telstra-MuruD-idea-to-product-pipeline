@@ -1,6 +1,6 @@
 "use client";
 
-import { useEffect, useRef, useState } from "react";
+import { useCallback, useEffect, useRef, useState } from "react";
 import { flushSync } from "react-dom";
 import {
   Project,
@@ -82,6 +82,13 @@ export default function MeshCanvas({
   const [chatNodeId, setChatNodeId] = useState<string | null>(null);
   const canvasRef = useRef<HTMLDivElement | null>(null);
   const pinchDist = useRef<number | null>(null);
+  // Set when a canvas pan actually moved, so the trailing click doesn't deselect.
+  const panMoved = useRef(false);
+  const [cardHeights, setCardHeights] = useState<Record<string, number>>({});
+  const handleCardHeight = useCallback(
+    (id: string, h: number) => setCardHeights((prev) => (prev[id] === h ? prev : { ...prev, [id]: h })),
+    []
+  );
   const [zoom, setZoom] = useState(1);
   const zoomRef = useRef(1);
   // In-flight create/delete calls. Non-zero means the server list is behind
@@ -292,6 +299,38 @@ export default function MeshCanvas({
     pinchDist.current = dist;
   }
 
+  // One-finger (or mouse) drag on empty canvas pans it.
+  function handleCanvasPointerDown(e: React.PointerEvent) {
+    const c = canvasRef.current;
+    const t = e.target as HTMLElement;
+    panMoved.current = false;
+    if (!c || !e.isPrimary || (t !== c && !t.dataset.canvasLayer)) return;
+    const { pointerId, clientX: startX, clientY: startY } = e;
+    const startLeft = c.scrollLeft;
+    const startTop = c.scrollTop;
+
+    function onMove(ev: PointerEvent) {
+      if (ev.pointerId !== pointerId || !c) return;
+      // A pinch took over; its zoom invalidates the start scroll.
+      if (pinchDist.current !== null) return onUp();
+      const dx = ev.clientX - startX;
+      const dy = ev.clientY - startY;
+      if (Math.abs(dx) + Math.abs(dy) > 3) panMoved.current = true;
+      c.scrollLeft = startLeft - dx;
+      c.scrollTop = startTop - dy;
+    }
+
+    function onUp() {
+      window.removeEventListener("pointermove", onMove);
+      window.removeEventListener("pointerup", onUp);
+      window.removeEventListener("pointercancel", onUp);
+    }
+
+    window.addEventListener("pointermove", onMove);
+    window.addEventListener("pointerup", onUp);
+    window.addEventListener("pointercancel", onUp);
+  }
+
   function relPos(e: { clientX: number; clientY: number }) {
     const c = canvasRef.current;
     if (!c) return { x: e.clientX, y: e.clientY };
@@ -489,7 +528,7 @@ export default function MeshCanvas({
   }
 
   function handlePortDown(node: ProjectNode, side: "in" | "out") {
-    setLink({ fromId: node.id, side, cursor: portOf(node, side) });
+    setLink({ fromId: node.id, side, cursor: portOf(node, side, cardHeights) });
   }
 
   function edgeKindFor(source: ProjectNode, target: ProjectNode): EdgeKind | null {
@@ -499,43 +538,42 @@ export default function MeshCanvas({
     return null;
   }
 
+  // Reads `link` directly: side effects in a setLink updater run twice under StrictMode.
   function completeLink(targetId: string) {
-    setLink((current) => {
-      if (!current) return null;
-      const dragNode = nodes.find((n) => n.id === current.fromId);
-      const targetNode = nodes.find((n) => n.id === targetId);
-      if (dragNode && targetNode && dragNode.id !== targetNode.id) {
-        const source = current.side === "out" ? dragNode : targetNode;
-        const target = current.side === "out" ? targetNode : dragNode;
-        const kind = edgeKindFor(source, target);
-        if (!kind) {
-          setError(
-            "That link isn't supported — tools and environments can only connect to agents, and agents only share context with other agents."
-          );
-        } else if (
-          edges.some(
-            (e) => e.source_node_id === source.id && e.target_node_id === target.id && e.kind === kind
-          )
-        ) {
-          setError(`${source.name} → ${target.name} is already linked.`);
-        } else {
-          createEdge(project.id, source.id, target.id, kind)
-            .then((edge) => {
-              setEdges((es) => dedupeById([...es, edge]));
-              if (kind === "context") {
-                setNotice(
-                  `Linked ${source.name} → ${target.name}. It starts stale with no summary — click the pill on the link and hit refresh to actually pull ${source.name}'s context into ${target.name}.`
-                );
-              } else if (kind === "tool") {
-                setNotice(`${source.name} is now equipped on ${target.name} — see the chip on its card.`);
-                setSelectedId(target.id);
-              }
-            })
-            .catch((e) => setError(e instanceof ApiError ? e.message : "Could not create link"));
-        }
-      }
-      return null;
-    });
+    const current = link;
+    setLink(null);
+    if (!current) return;
+    const dragNode = nodes.find((n) => n.id === current.fromId);
+    const targetNode = nodes.find((n) => n.id === targetId);
+    if (!dragNode || !targetNode || dragNode.id === targetNode.id) return;
+    const source = current.side === "out" ? dragNode : targetNode;
+    const target = current.side === "out" ? targetNode : dragNode;
+    const kind = edgeKindFor(source, target);
+    if (!kind) {
+      setError(
+        "That link isn't supported — tools and environments can only connect to agents, and agents only share context with other agents."
+      );
+    } else if (
+      edges.some(
+        (e) => e.source_node_id === source.id && e.target_node_id === target.id && e.kind === kind
+      )
+    ) {
+      setError(`${source.name} → ${target.name} is already linked.`);
+    } else {
+      createEdge(project.id, source.id, target.id, kind)
+        .then((edge) => {
+          setEdges((es) => dedupeById([...es, edge]));
+          if (kind === "context") {
+            setNotice(
+              `Linked ${source.name} → ${target.name}. It starts stale with no summary — click the pill on the link and hit refresh to actually pull ${source.name}'s context into ${target.name}.`
+            );
+          } else if (kind === "tool") {
+            setNotice(`${source.name} is now equipped on ${target.name} — see the chip on its card.`);
+            setSelectedId(target.id);
+          }
+        })
+        .catch((e) => setError(e instanceof ApiError ? e.message : "Could not create link"));
+    }
   }
 
   async function handleRefreshEdge(edge: Edge) {
@@ -795,10 +833,12 @@ export default function MeshCanvas({
           onPointerMove={(e) => {
             if (link) setLink((l) => (l ? { ...l, cursor: relPos(e) } : l));
           }}
+          onPointerDown={handleCanvasPointerDown}
           onPointerUp={() => setLink(null)}
           onTouchMove={handleTouchMove}
           onTouchEnd={() => (pinchDist.current = null)}
           onClick={(e) => {
+            if (panMoved.current) return;
             if (e.target === canvasRef.current || (e.target as HTMLElement).dataset.canvasLayer) setSelectedId(null);
           }}
         >
@@ -812,6 +852,7 @@ export default function MeshCanvas({
               edges={edges.filter((e) => e.kind !== "environment")}
               selectedId={selectedId}
               link={link}
+              heights={cardHeights}
               refreshingId={refreshingEdgeId}
               onRefresh={handleRefreshEdge}
               onDelete={handleDeleteEdge}
@@ -832,6 +873,7 @@ export default function MeshCanvas({
                   busy={!!chatByNode[node.id]?.busy}
                   deleting={deletingIds.has(node.id)}
                   zoom={zoom}
+                  onHeight={handleCardHeight}
                   attachedEnvironments={isAgentNode(node) ? attachedEnvsByAgent.get(node.id) ?? [] : undefined}
                   onSelect={() => setSelectedId(node.id)}
                   onDragMove={(x, y) => handleDragMove(node, x, y)}
