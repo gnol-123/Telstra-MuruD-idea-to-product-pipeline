@@ -7,7 +7,8 @@ const AMBER = "#ffb74d";
 const GREEN = "#7ee787";
 
 export const CARD_W = 240;
-export const PORT_Y = 32;
+// Port center, well below the delete x.
+export const PORT_Y = 48;
 export const LAYER_W = 2400;
 export const LAYER_H = 1600;
 

@@ -1,6 +1,7 @@
 "use client";
 
 import { useState } from "react";
+import { PORT_Y } from "./EdgeLayer";
 import { Edge, ProjectNode, ToolNode, EnvironmentNode, isAgentNode, isEnvironmentNode } from "@/lib/types";
 
 export const AGENT_ICONS: Record<string, string> = {
@@ -207,7 +208,8 @@ export default function NodeCard({
             onPortDown("in");
           }}
           title="Receive context"
-          className={`absolute -left-[7px] top-[26px] w-3.5 h-3.5 rounded-full bg-panel2 cursor-crosshair touch-none border-2 ${
+          style={{ top: PORT_Y - 10 }}
+          className={`absolute -left-[10px] w-5 h-5 rounded-full bg-panel2 cursor-crosshair touch-none border-2 ${
             (inboundCount ?? 0) > 0 ? "border-accent" : "border-white/30"
           }`}
         />
@@ -221,7 +223,8 @@ export default function NodeCard({
           onPortDown("out");
         }}
         title={agent ? "Share context" : env ? "Attach this environment to an agent" : "Attach this tool to an agent"}
-        className="absolute -right-2 top-[24px] w-4 h-4 rounded-full bg-accent border-2 border-panel2 cursor-crosshair touch-none shadow-[0_0_10px_rgba(34,224,240,0.5)]"
+        style={{ top: PORT_Y - 10 }}
+        className="absolute -right-[10px] w-5 h-5 rounded-full bg-accent border-2 border-panel2 cursor-crosshair touch-none shadow-[0_0_10px_rgba(34,224,240,0.5)]"
       />
 
       <div className="flex items-start gap-2.5">
