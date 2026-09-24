@@ -141,6 +141,7 @@ export default function ChatWindow({
   onClose,
   onAfterTurn,
   onRefreshEdge,
+  onOpenWorkspace,
 }: {
   projectId: string;
   node: AgentNode;
@@ -153,6 +154,8 @@ export default function ChatWindow({
   // create/wire nodes mid-turn, so the canvas re-fetches here.
   onAfterTurn: () => void;
   onRefreshEdge: (edge: Edge) => Promise<void>;
+  // Opens the code preview on one of this agent's environments, at its folder.
+  onOpenWorkspace?: (envId: string, path?: string | null) => void;
 }) {
   const { messages, draft, useStream, busy, pendingCalls, approvals, historyLoaded } = chat;
   const icon = AGENT_ICONS[node.agent_slug] ?? "◆";
@@ -434,6 +437,15 @@ export default function ChatWindow({
                 running
               </span>
             )}
+            {envEdges.length > 0 && onOpenWorkspace && (
+              <button
+                onClick={() => onOpenWorkspace(envEdges[0].source_node_id, `/home/user/workspace/${node.id}`)}
+                title={`See the files ${node.name} has written, and preview what it's serving`}
+                className="text-[10.5px] px-2.5 py-[5px] rounded-md border border-green/35 text-green hover:bg-green/10 whitespace-nowrap"
+              >
+                {ENV_ICON} Files &amp; preview
+              </button>
+            )}
             <span className="text-[10.5px] text-white/40 px-2.5 py-[5px] border border-white/[0.12] rounded-md whitespace-nowrap">
               {toolEdges.length} tool{toolEdges.length === 1 ? "" : "s"} · {upstream.length} inherited
               {envEdges.length > 0 ? ` · ${envEdges.length} env` : ""}
@@ -474,13 +486,15 @@ export default function ChatWindow({
             );
           })}
           {envEdges.map((e) => (
-            <span
+            <button
               key={e.id}
-              className="inline-flex items-center gap-[5px] px-[9px] py-1 rounded-full text-[10.5px] bg-green/10 border border-green/[0.35] text-green"
+              onClick={() => onOpenWorkspace?.(e.source_node_id, `/home/user/workspace/${node.id}`)}
+              title="Open this environment's files and preview"
+              className="inline-flex items-center gap-[5px] px-[9px] py-1 rounded-full text-[10.5px] bg-green/10 border border-green/[0.35] text-green hover:bg-green/20"
             >
               <span className="text-[9px] opacity-80">{ENV_ICON}</span>
               {nameOf(e.source_node_id)?.name ?? "Sandbox"}
-            </span>
+            </button>
           ))}
           {toolEdges.map((e) => {
             const t = nameOf(e.source_node_id);

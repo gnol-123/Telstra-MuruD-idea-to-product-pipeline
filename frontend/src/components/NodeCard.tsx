@@ -1,6 +1,7 @@
 "use client";
 
 import { useState } from "react";
+import { WORKSPACE_ROOT } from "@/lib/files";
 import { PORT_Y } from "./EdgeLayer";
 import { Edge, ProjectNode, ToolNode, EnvironmentNode, isAgentNode, isEnvironmentNode } from "@/lib/types";
 
@@ -74,6 +75,7 @@ export default function NodeCard({
   onChipRemove,
   onClearStale,
   onOpenChat,
+  onOpenWorkspace,
 }: {
   node: ProjectNode;
   selected: boolean;
@@ -108,6 +110,8 @@ export default function NodeCard({
   onChipRemove?: (edge: Edge) => void;
   onClearStale?: () => void;
   onOpenChat?: () => void;
+  // Opens the code preview on an environment, optionally at a folder.
+  onOpenWorkspace?: (envId: string, path?: string | null) => void;
 }) {
   const agent = isAgentNode(node);
   const env = isEnvironmentNode(node);
@@ -189,6 +193,7 @@ export default function NodeCard({
       onDoubleClick={(e) => {
         if ((e.target as HTMLElement).closest("[data-port],[data-btn],[data-chip]")) return;
         if (agent) onOpenChat?.();
+        else if (env) onOpenWorkspace?.(node.id);
       }}
       style={{ left: node.position_x ?? 0, top: node.position_y ?? 0, zIndex: selected ? 5 : 2 }}
       className={`absolute w-60 cursor-grab active:cursor-grabbing touch-none backdrop-blur-md border rounded-[13px] px-3.5 pt-[13px] pb-3 select-none transition-[border-color,background-color,opacity] ${borderColor} ${
@@ -309,7 +314,11 @@ export default function NodeCard({
                     e.stopPropagation();
                     onChipClick?.(envNode.id);
                   }}
-                  title={`${envNode.name} — click to inspect`}
+                  onDoubleClick={(e) => {
+                    e.stopPropagation();
+                    onOpenWorkspace?.(envNode.id, `${WORKSPACE_ROOT}/${node.id}`);
+                  }}
+                  title={`${envNode.name} — click to inspect, double-click to open ${node.name}'s files`}
                   className="inline-flex items-center gap-1 pl-[7px] pr-1 py-[3px] rounded-[5px] text-[10px] bg-accent/10 border border-accent/30 text-accent cursor-pointer hover:bg-accent/15"
                 >
                   <span
@@ -411,12 +420,22 @@ export default function NodeCard({
                 : "bg-white/30"
             }`}
           />
-          <span className="text-muted uppercase tracking-wide">{node.status}</span>
-          {node.sandbox_id && (
-            <span className="ml-1 truncate text-muted/80" title={node.sandbox_id}>
-              · {node.sandbox_id.slice(0, 8)}
-            </span>
-          )}
+          <span className="text-muted uppercase tracking-wide" title={node.sandbox_id ?? undefined}>
+            {node.status}
+          </span>
+          <button
+            data-btn
+            onPointerDown={(e) => e.stopPropagation()}
+            onClick={(e) => {
+              e.stopPropagation();
+              onOpenWorkspace?.(node.id);
+            }}
+            className={`ml-auto shrink-0 whitespace-nowrap bg-transparent border rounded-md px-2.5 py-[5px] text-[10.5px] font-medium transition-colors ${
+              selected ? "border-green/45 text-green" : "border-white/[0.16] text-white/60 hover:text-text hover:border-white/30"
+            }`}
+          >
+            Open workspace
+          </button>
         </div>
       ) : (
         <div className="mt-[11px] pt-2.5 border-t border-white/[0.07] flex items-center gap-2 text-[10px]">

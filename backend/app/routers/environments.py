@@ -9,18 +9,27 @@ import asyncio
 import json
 import logging
 import posixpath
-from typing import Any, Literal
+import uuid as uuid_lib
+from collections.abc import AsyncIterator, Awaitable, Callable
+from typing import Any, Literal, TypeVar
 from uuid import UUID
 
 import anyio
 from anyio import to_thread
-from e2b import AsyncSandbox, FileNotFoundException, FileType, PtySize
-from fastapi import APIRouter, HTTPException, Query, WebSocket, status
+from e2b import (
+    AsyncSandbox,
+    CommandExitException,
+    FileNotFoundException,
+    FileType,
+    PtySize,
+)
+from fastapi import APIRouter, HTTPException, Query, Request, WebSocket, status
+from fastapi.responses import StreamingResponse
 from fastapi.security import HTTPAuthorizationCredentials
 from pydantic import BaseModel, Field
 
 from app.config import settings
-from app.environments import e2b, lifecycle
+from app.environments import e2b, lifecycle, workspace
 from app.environments.base import WORKSPACE_ROOT, EnvContext
 from app.repositories.environment_repo import EnvironmentRepository, EnvNode
 from app.routers.auth import get_current_user
@@ -89,11 +98,29 @@ class FileEntry(BaseModel):
     type: str
     path: str
     size: int = 0
+    # ISO 8601. The tree shows it on hover; absent from older E2B envd.
+    modified: str | None = None
+    symlink_target: str | None = None
 
 
 class FileListResponse(BaseModel):
     path: str
     entries: list[FileEntry]
+
+
+class ListManyRequest(BaseModel):
+    paths: list[str] = Field(min_length=1, max_length=20)
+
+
+class DirListing(BaseModel):
+    path: str
+    entries: list[FileEntry] | None = None
+    # Set instead of entries when this one directory could not be read.
+    error: str | None = None
+
+
+class ListManyResponse(BaseModel):
+    listings: list[DirListing]
 
 
 class FileContentResponse(BaseModel):
@@ -102,9 +129,46 @@ class FileContentResponse(BaseModel):
     truncated: bool = False
 
 
+class FileWriteResponse(BaseModel):
+    path: str
+    size: int
+
+
 class PreviewResponse(BaseModel):
     port: int
     url: str
+
+
+class PortInfo(BaseModel):
+    port: int
+    url: str
+    pid: int | None = None
+    # A short label for the tab: 'python3 -m http.server', 'node server.js'.
+    process: str = ""
+    command: str = ""
+    # Listening on loopback only. Usually still previewable through E2B, but
+    # the first thing to check when it is not.
+    local_only: bool = False
+    # Set when this is a static server; the directory it serves.
+    serving: str | None = None
+
+
+class PortsResponse(BaseModel):
+    ports: list[PortInfo]
+
+
+class ServeRequest(BaseModel):
+    # A directory to serve, or a file whose directory to serve. Absolute, or
+    # relative to the workspace root.
+    path: str = Field(default=WORKSPACE_ROOT, min_length=1, max_length=4096)
+
+
+class ServeResponse(PortInfo):
+    # True when a server on this directory was already running and reused.
+    reused: bool = False
+    # Where to point the preview: the port's URL plus the file, if one was
+    # asked for.
+    open_url: str
 
 
 async def _load(project_id: UUID, node_id: UUID, env_repo: EnvRepo) -> EnvNode:
@@ -126,34 +190,70 @@ async def _load_ready(project_id: UUID, node_id: UUID, env_repo: EnvRepo) -> Env
     return node
 
 
-async def _sandbox_or_502(env_repo: EnvRepo, node: EnvNode) -> AsyncSandbox:
-    """Connect, resuming a paused sandbox, or record the failure and 502.
-    Ensure node errors this turn not the next.
-    """
-    ctx = EnvContext(
+T = TypeVar("T")
+
+
+def _ctx(node: EnvNode) -> EnvContext:
+    return EnvContext(
         node_id=node.id,
         project_id=node.project_id,
         name=node.name,
         config=node.config,
         status=node.status,
     )
+
+
+async def _mark_unreachable(env_repo: EnvRepo, node: EnvNode, detail: str) -> HTTPException:
+    """Record the failure so the canvas reflects it now, not on the next turn."""
+    await to_thread.run_sync(lambda: env_repo.set_status(node.id, "error", detail))
+    return HTTPException(
+        status_code=status.HTTP_502_BAD_GATEWAY,
+        detail=f"Environment unreachable: {detail}",
+    )
+
+
+async def _sandbox_or_502(env_repo: EnvRepo, node: EnvNode) -> AsyncSandbox:
+    """Connect (reusing a recent connection), or record the failure and 502."""
     try:
-        return await e2b.connect(ctx)
+        return await workspace.connected(_ctx(node))
+    except workspace.Unreachable as exc:
+        raise await _mark_unreachable(env_repo, node, str(exc)) from exc
+
+
+async def _on_sandbox(
+    env_repo: EnvRepo, node: EnvNode, op: Callable[[AsyncSandbox], Awaitable[T]]
+) -> T:
+    """Run one browsing call on a held connection.
+
+    Semantic errors (a missing file, a binary read as text) reach the route
+    to be mapped. A connect failure marks the node and 502s. Anything else,
+    after the one retry on a fresh connection, is a 502 that leaves the node
+    alone: a slow command is not a broken environment.
+    """
+    try:
+        return await workspace.with_sandbox(_ctx(node), op, passthrough=(HTTPException,))
+    except workspace.Unreachable as exc:
+        raise await _mark_unreachable(env_repo, node, str(exc)) from exc
+    except (HTTPException, FileNotFoundException, UnicodeDecodeError, CommandExitException):
+        raise
     except Exception as exc:
-        detail = f"{type(exc).__name__}: {exc}"[:500]
-        await to_thread.run_sync(lambda: env_repo.set_status(node.id, "error", detail))
+        logger.warning("environment call failed on %s: %s", node.id, exc)
         raise HTTPException(
             status_code=status.HTTP_502_BAD_GATEWAY,
-            detail=f"Environment unreachable: {detail}",
+            detail=f"Environment call failed: {type(exc).__name__}: {exc}"[:500],
         ) from exc
 
 
 def _resolve(path: str) -> str:
     """
-    Normalise a browsing path. Absolute paths are allowed on purpose.
+    Normalise a browsing path. Absolute paths are allowed on purpose: the
+    sandbox is the caller's own machine. A relative path is taken against
+    the workspace root, which is what the tree shows.
     """
     if "\x00" in path:
         raise HTTPException(status_code=status.HTTP_422_UNPROCESSABLE_ENTITY, detail="Invalid path")
+    if not path.startswith("/"):
+        path = posixpath.join(WORKSPACE_ROOT, path)
     return posixpath.normpath(path)
 
 
@@ -211,6 +311,8 @@ async def stop_environment(
             status_code=status.HTTP_409_CONFLICT,
             detail="Environment is provisioning. Try again in a moment.",
         )
+    # A held browsing connection would outlive the sandbox it points at.
+    workspace.forget(node.sandbox_id)
     return EnvironmentNodeResponse.of(await lifecycle.stop(env_repo, node))
 
 
@@ -230,6 +332,18 @@ _ENTRY_TYPES = {
 }
 
 
+def _entry(e: Any) -> FileEntry:
+    modified = getattr(e, "modified_time", None)
+    return FileEntry(
+        name=e.name,
+        type=_ENTRY_TYPES.get(e.type, "file"),
+        path=e.path,
+        size=getattr(e, "size", 0) or 0,
+        modified=modified.isoformat() if modified is not None else None,
+        symlink_target=getattr(e, "symlink_target", None) or None,
+    )
+
+
 @router.get("/{node_id}/files", response_model=FileListResponse)
 async def list_environment_files(
     project_id: UUID,
@@ -240,26 +354,41 @@ async def list_environment_files(
     """One directory, one level deep. The tree view walks it a level at a time."""
     node = await _load_ready(project_id, node_id, env_repo)
     resolved = _resolve(path)
-    sandbox = await _sandbox_or_502(env_repo, node)
     try:
-        entries = await sandbox.files.list(resolved, depth=1)
+        entries = await _on_sandbox(env_repo, node, lambda s: s.files.list(resolved, depth=1))
     except FileNotFoundException as exc:
         raise HTTPException(
             status_code=status.HTTP_404_NOT_FOUND, detail=f"No such directory: {path}"
         ) from exc
 
-    return FileListResponse(
-        path=resolved,
-        entries=[
-            FileEntry(
-                name=e.name,
-                type=_ENTRY_TYPES.get(e.type, "file"),
-                path=e.path,
-                size=getattr(e, "size", 0) or 0,
-            )
-            for e in entries
-        ],
-    )
+    return FileListResponse(path=resolved, entries=[_entry(e) for e in entries])
+
+
+@router.post("/{node_id}/files/list", response_model=ListManyResponse)
+async def list_many_environment_files(
+    project_id: UUID, node_id: UUID, req: ListManyRequest, env_repo: EnvRepo
+) -> ListManyResponse:
+    """Several directories in one request, for the code preview's live refresh.
+
+    The tree re-reads every open folder every few seconds; one request per
+    folder would pay the ownership check and a fresh database client each
+    time. A folder that fails (deleted by an agent since) reports its own
+    error rather than failing the batch.
+    """
+    node = await _load_ready(project_id, node_id, env_repo)
+    resolved = [_resolve(p) for p in req.paths]
+
+    async def one(sandbox: AsyncSandbox, path: str) -> DirListing:
+        try:
+            entries = await sandbox.files.list(path, depth=1)
+        except FileNotFoundException:
+            return DirListing(path=path, error=f"No such directory: {path}")
+        return DirListing(path=path, entries=[_entry(e) for e in entries])
+
+    async def all_of(sandbox: AsyncSandbox) -> list[DirListing]:
+        return list(await asyncio.gather(*(one(sandbox, p) for p in resolved)))
+
+    return ListManyResponse(listings=await _on_sandbox(env_repo, node, all_of))
 
 
 @router.get("/{node_id}/files/content", response_model=FileContentResponse)
@@ -272,9 +401,8 @@ async def read_environment_file(
     """One text file, capped. Binary is refused rather than mangled."""
     node = await _load_ready(project_id, node_id, env_repo)
     resolved = _resolve(path)
-    sandbox = await _sandbox_or_502(env_repo, node)
     try:
-        content = await sandbox.files.read(resolved)
+        content = await _on_sandbox(env_repo, node, lambda s: s.files.read(resolved))
     except FileNotFoundException as exc:
         raise HTTPException(
             status_code=status.HTTP_404_NOT_FOUND, detail=f"No such file: {path}"
@@ -292,6 +420,168 @@ async def read_environment_file(
     )
 
 
+async def _stream(sandbox: AsyncSandbox, path: str, *, remove_after: bool) -> AsyncIterator[bytes]:
+    """Relay a file from the sandbox without holding it in memory here.
+
+    ``remove_after`` is for temp archives: deleted once sent, or once the
+    client gives up, so an abandoned download does not fill /tmp.
+    """
+    try:
+        async with await sandbox.files.read(path, format="stream") as stream:
+            async for chunk in stream:
+                yield bytes(chunk)
+    finally:
+        if remove_after:
+            try:
+                await sandbox.files.remove(path)
+            except Exception:
+                logger.warning("failed to remove temp archive %s", path)
+
+
+@router.get("/{node_id}/files/download")
+async def download_environment_file(
+    project_id: UUID,
+    node_id: UUID,
+    env_repo: EnvRepo,
+    path: str = Query(min_length=1, max_length=4096),
+) -> StreamingResponse:
+    """One file, any type, as a download. The code preview's save button.
+
+    Streamed, not buffered: an agent's build output can be large, and this
+    process should not hold it. A directory is 422 pointing at /archive.
+    """
+    node = await _load_ready(project_id, node_id, env_repo)
+    resolved = _resolve(path)
+    try:
+        info = await _on_sandbox(env_repo, node, lambda s: s.files.get_info(resolved))
+    except FileNotFoundException as exc:
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND, detail=f"No such file: {path}"
+        ) from exc
+    if info.type == FileType.DIR:
+        raise HTTPException(
+            status_code=status.HTTP_422_UNPROCESSABLE_ENTITY,
+            detail="That is a directory. Download it with /files/archive.",
+        )
+
+    sandbox = await _sandbox_or_502(env_repo, node)
+    headers = {"Content-Disposition": workspace.content_disposition(posixpath.basename(resolved))}
+    if getattr(info, "size", None):
+        headers["Content-Length"] = str(info.size)
+    return StreamingResponse(
+        _stream(sandbox, resolved, remove_after=False),
+        media_type=workspace.content_type_for(resolved),
+        headers=headers,
+    )
+
+
+@router.get("/{node_id}/files/archive")
+async def archive_environment_directory(
+    project_id: UUID,
+    node_id: UUID,
+    env_repo: EnvRepo,
+    path: str = Query(default=WORKSPACE_ROOT, min_length=1, max_length=4096),
+    include_dependencies: bool = Query(default=False),
+) -> StreamingResponse:
+    """A directory as a .zip, built inside the sandbox and streamed out.
+
+    Dependency and VCS folders (node_modules, .git, .venv, ...) are left out
+    unless ``include_dependencies``: they are rebuilt from a lockfile and
+    would otherwise be most of every download.
+    """
+    node = await _load_ready(project_id, node_id, env_repo)
+    resolved = _resolve(path)
+    out = workspace.sandbox_temp(f"murud-archive-{uuid_lib.uuid4().hex}.zip")
+    command = workspace.archive_command(resolved, out, skip_heavy=not include_dependencies)
+
+    async def build(sandbox: AsyncSandbox) -> tuple[int, int]:
+        info = await sandbox.files.get_info(resolved)
+        if info.type != FileType.DIR:
+            raise HTTPException(
+                status_code=status.HTTP_422_UNPROCESSABLE_ENTITY,
+                detail="That is a file. Download it with /files/download.",
+            )
+        result = await sandbox.commands.run(command, timeout=120)
+        return workspace.parse_archive_output(result.stdout)
+
+    try:
+        size, _count = await _on_sandbox(env_repo, node, build)
+    except FileNotFoundException as exc:
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND, detail=f"No such directory: {path}"
+        ) from exc
+    except CommandExitException as exc:
+        raise HTTPException(
+            status_code=status.HTTP_502_BAD_GATEWAY,
+            detail=f"Could not build the archive: {(exc.stderr or exc.stdout)[-300:]}",
+        ) from exc
+
+    sandbox = await _sandbox_or_502(env_repo, node)
+    if size > settings.environment_max_archive_bytes:
+        await _remove_quietly(sandbox, out)
+        cap_mb = settings.environment_max_archive_bytes // 1_000_000
+        raise HTTPException(
+            status_code=status.HTTP_413_REQUEST_ENTITY_TOO_LARGE,
+            detail=f"The archive is {size // 1_000_000} MB, over the {cap_mb} MB limit. "
+            "Download a smaller folder.",
+        )
+
+    return StreamingResponse(
+        _stream(sandbox, out, remove_after=True),
+        media_type="application/zip",
+        headers={
+            "Content-Disposition": workspace.content_disposition(workspace.archive_name(resolved)),
+            "Content-Length": str(size),
+        },
+    )
+
+
+async def _remove_quietly(sandbox: AsyncSandbox, path: str) -> None:
+    try:
+        await sandbox.files.remove(path)
+    except Exception:
+        logger.warning("failed to remove %s", path)
+
+
+@router.put("/{node_id}/files", response_model=FileWriteResponse)
+async def write_environment_file(
+    project_id: UUID,
+    node_id: UUID,
+    request: Request,
+    env_repo: EnvRepo,
+    path: str = Query(min_length=1, max_length=4096),
+) -> FileWriteResponse:
+    """Write one file from the raw request body. Upload and save both use it.
+
+    Raw bytes rather than multipart, so any file type round-trips untouched
+    and no form parser is needed. Parent directories are created. Overwrites.
+    """
+    node = await _load_ready(project_id, node_id, env_repo)
+    resolved = _resolve(path)
+    if resolved.endswith("/") or posixpath.basename(resolved) in ("", ".", ".."):
+        raise HTTPException(status_code=status.HTTP_422_UNPROCESSABLE_ENTITY, detail="Invalid path")
+
+    cap = settings.environment_max_upload_bytes
+    declared = request.headers.get("content-length")
+    if declared and declared.isdigit() and int(declared) > cap:
+        raise HTTPException(
+            status_code=status.HTTP_413_REQUEST_ENTITY_TOO_LARGE,
+            detail=f"Files are limited to {cap // 1_000_000} MB.",
+        )
+    body = bytearray()
+    async for chunk in request.stream():
+        body.extend(chunk)
+        if len(body) > cap:
+            raise HTTPException(
+                status_code=status.HTTP_413_REQUEST_ENTITY_TOO_LARGE,
+                detail=f"Files are limited to {cap // 1_000_000} MB.",
+            )
+
+    data = bytes(body)
+    await _on_sandbox(env_repo, node, lambda s: s.files.write(resolved, data))
+    return FileWriteResponse(path=resolved, size=len(data))
+
+
 @router.get("/{node_id}/preview", response_model=PreviewResponse)
 async def preview_environment_port(
     project_id: UUID,
@@ -307,6 +597,97 @@ async def preview_environment_port(
     node = await _load_ready(project_id, node_id, env_repo)
     sandbox = await _sandbox_or_502(env_repo, node)
     return PreviewResponse(port=port, url=f"https://{sandbox.get_host(port)}")
+
+
+@router.get("/{node_id}/ports", response_model=PortsResponse)
+async def list_environment_ports(
+    project_id: UUID, node_id: UUID, env_repo: EnvRepo
+) -> PortsResponse:
+    """Every port something is listening on, each with its preview URL.
+
+    What lets the preview find a running app without anyone typing a port:
+    an agent that started a dev server on 5173 shows up here unprompted.
+    """
+    node = await _load_ready(project_id, node_id, env_repo)
+
+    async def scan(sandbox: AsyncSandbox) -> list[dict[str, Any]]:
+        ports = await workspace.listening_ports(sandbox)
+        return [workspace.port_payload(sandbox, p) for p in ports]
+
+    try:
+        payloads = await _on_sandbox(env_repo, node, scan)
+    except CommandExitException as exc:
+        raise HTTPException(
+            status_code=status.HTTP_502_BAD_GATEWAY,
+            detail=f"Could not list ports: {(exc.stderr or '')[-300:]}",
+        ) from exc
+    return PortsResponse(ports=[PortInfo(**p) for p in payloads])
+
+
+# How long /serve waits for a new server to start listening before answering
+# anyway. python3 -m http.server is up in well under a second.
+_SERVE_WAIT_SECONDS = 5.0
+
+
+@router.post("/{node_id}/serve", response_model=ServeResponse)
+async def serve_environment_directory(
+    project_id: UUID, node_id: UUID, req: ServeRequest, env_repo: EnvRepo
+) -> ServeResponse:
+    """Start a static file server on a directory, or reuse the one running.
+
+    The code preview's "Preview" on an .html file: agents' prototypes are
+    plain files, and this shows one without a turn spent asking the agent to
+    serve it. Given a file, serves its directory and returns a URL to it.
+    """
+    node = await _load_ready(project_id, node_id, env_repo)
+    resolved = _resolve(req.path)
+
+    async def serve(sandbox: AsyncSandbox) -> dict[str, Any]:
+        info = await sandbox.files.get_info(resolved)
+        directory = resolved if info.type == FileType.DIR else posixpath.dirname(resolved)
+        file_part = "" if info.type == FileType.DIR else posixpath.basename(resolved)
+
+        ports = await workspace.listening_ports(sandbox)
+        try:
+            port, reused = workspace.pick_serve_port(ports, directory)
+        except ValueError as exc:
+            raise HTTPException(status_code=status.HTTP_409_CONFLICT, detail=str(exc)) from exc
+
+        if not reused:
+            await sandbox.commands.run(workspace.serve_command(directory, port), timeout=15)
+            deadline = asyncio.get_running_loop().time() + _SERVE_WAIT_SECONDS
+            while asyncio.get_running_loop().time() < deadline:
+                ports = await workspace.listening_ports(sandbox)
+                if any(p.port == port for p in ports):
+                    break
+                await asyncio.sleep(0.4)
+
+        listening = next(
+            (p for p in ports if p.port == port),
+            workspace.ListeningPort(
+                port=port,
+                pid=None,
+                command=f"python3 -m http.server {port} --directory {directory}",
+                local_only=False,
+            ),
+        )
+        payload = workspace.port_payload(sandbox, listening)
+        payload["reused"] = reused
+        payload["open_url"] = payload["url"] + "/" + file_part if file_part else payload["url"]
+        return payload
+
+    try:
+        payload = await _on_sandbox(env_repo, node, serve)
+    except FileNotFoundException as exc:
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND, detail=f"No such path: {req.path}"
+        ) from exc
+    except CommandExitException as exc:
+        raise HTTPException(
+            status_code=status.HTTP_502_BAD_GATEWAY,
+            detail=f"Could not start a server: {(exc.stderr or '')[-300:]}",
+        ) from exc
+    return ServeResponse(**payload)
 
 
 # -- creation, called from the shared node endpoint ---------------------------

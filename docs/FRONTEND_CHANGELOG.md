@@ -1,5 +1,41 @@
 # Frontend Changelog — Agent Mesh Canvas rework
 
+## Code preview (E2B workspace) — 2026-09-25
+
+A full-screen **Workspace** window for any environment: browse what agents built, preview it running,
+download it, and use a terminal. Backend endpoints it relies on are in `docs/API.md` → Environments.
+
+**Where it opens from:** the new `▣ Workspace` button in the top bar (opens the selected agent's folder,
+else a user environment, else the shared scratch space); "Open workspace" on environment cards and in the
+environment inspector; "Files" next to each environment in the agent inspector; "Files & preview" in the
+chat window header (and the environment chips there); double-clicking an environment chip on an agent card.
+
+**What's in it** (`src/components/workspace/`):
+- `WorkspaceWindow.tsx` — the window. Code / Split / Preview views, environment switcher, status bar, a
+  "Start environment" screen for pending/stopped sandboxes, and a live loop (every 4s, one batched request)
+  that flashes files an agent changed, reloads open tabs, and reloads the preview.
+- `FileTree.tsx` — lazy explorer. Agent folders (named by node id) show the agent's name. Filter box,
+  dotfile toggle, hover actions: ▶ preview (HTML files / folders), ⤓ download (file, or folder as .zip).
+  Drag files onto it to upload.
+- `CodeView.tsx` — tabs, syntax highlighting (highlight.js, core + common languages only), line numbers,
+  image viewer, binary notice, and a quick editor (Edit → Save, Ctrl/⌘+S).
+- `PreviewPane.tsx` — iframe of the running app. Ports are detected automatically; address bar for sub-paths,
+  desktop/tablet/phone widths, "Live" auto-reload on file changes, open in new tab. Empty state can serve the
+  current folder as a static site with one click.
+- `TerminalPane.tsx` — a real terminal (xterm.js) on the existing PTY socket, cd'd into the agent's folder.
+  Stays connected while hidden.
+- Download: header `⤓ Download .zip` (code only, or ▾ with dependencies / just the selected folder).
+
+**Other changes:** `EnvironmentInspector` lost its cramped file list, preview-URL box and plain-text terminal
+(all now in the window) and gained a "Running servers" list. New helpers in `src/lib/files.ts` and
+`src/lib/highlight.ts`; new API calls in `src/lib/api.ts` (`fetchEnvironmentFileBlob`, `fetchEnvironmentArchive`,
+`writeEnvironmentFile`, `listManyEnvironmentFiles`, `listEnvironmentPorts`, `serveEnvironmentPath`).
+New dependencies: `highlight.js`, `@xterm/xterm`, `@xterm/addon-fit` — run `npm install`.
+
+---
+
+## Canvas rework — 2026-09-17
+
 Scope of this pass: **frontend only** (`frontend/`). No backend files were edited — backend
 sections below are read-only findings for the backend dev to act on.
 

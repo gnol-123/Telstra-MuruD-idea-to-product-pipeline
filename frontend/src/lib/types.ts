@@ -234,6 +234,9 @@ export interface EnvironmentFileEntry {
   type: "dir" | "file" | "symlink";
   path: string;
   size: number;
+  // ISO 8601. Used by the code preview to spot files an agent just changed.
+  modified?: string | null;
+  symlink_target?: string | null;
 }
 
 export interface EnvironmentFilesResponse {
@@ -250,6 +253,31 @@ export interface EnvironmentFileContent {
 export interface EnvironmentPreview {
   port: number;
   url: string;
+}
+
+// A port something is listening on inside the sandbox — see GET /ports.
+export interface EnvironmentPort {
+  port: number;
+  url: string;
+  pid: number | null;
+  // Short label, e.g. "python3 -m http.server", "node server.js".
+  process: string;
+  command: string;
+  // Bound to 127.0.0.1 only — the first suspect when a preview won't load.
+  local_only: boolean;
+  // For a static server: the directory it serves.
+  serving: string | null;
+}
+
+export interface ServeResult extends EnvironmentPort {
+  reused: boolean;
+  // The port URL plus the file that was asked for, if any.
+  open_url: string;
+}
+
+export interface EnvironmentFileWrite {
+  path: string;
+  size: number;
 }
 
 // -------------------- Usage --------------------

@@ -138,7 +138,10 @@ def environment_note(described: list[tuple[EnvNode, str]], agent_node_id: str) -
         "You can execute code in these environments. Each exposes run_command, "
         "read_file, write_file and list_files under the prefix shown. Relative "
         f"paths resolve against your own directory, {WORKSPACE_ROOT}/{agent_node_id}. "
-        f"Other agents' directories under {WORKSPACE_ROOT} are readable."
+        f"Other agents' directories under {WORKSPACE_ROOT} are readable. "
+        "The user sees these files live in a code preview, and anything you serve "
+        "on a port appears there as a running preview automatically: start servers "
+        "in the background, bound to 0.0.0.0."
     ]
     for node, prefix in described:
         purpose = node.config.get("description") or (

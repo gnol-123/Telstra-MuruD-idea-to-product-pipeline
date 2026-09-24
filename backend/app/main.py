@@ -18,6 +18,9 @@ app.add_middleware(
     allow_credentials=True,
     allow_methods=["*"],
     allow_headers=["*"],
+    # Downloads from the code preview name their file here; without this the
+    # browser hides the header from a cross-origin fetch.
+    expose_headers=["Content-Disposition"],
 )
 
 app.include_router(health.router)

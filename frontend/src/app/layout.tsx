@@ -1,4 +1,5 @@
 import type { Metadata } from "next";
+import "@xterm/xterm/css/xterm.css";
 import "./globals.css";
 
 export const metadata: Metadata = {
