@@ -181,6 +181,21 @@ export interface ChatMessage {
   // rt-stream-checkpoint change.
   status: "complete" | "failed" | "pending" | "running" | "cancelled";
   created_at: string;
+  tool_calls?: ToolEvent[];
+  // Agent node that sent this user row (orchestrator run_agent). Null = the user.
+  sender_node_id?: string | null;
+}
+
+// One `event: tool` payload, also persisted on the row. `offset` is where in
+// `content` it landed; missing on older rows and synthetic denied/cancelled results.
+export interface ToolEvent {
+  type: "call" | "result";
+  tool_call_id?: string;
+  name?: string;
+  args?: Record<string, unknown>;
+  status?: string;
+  result_head?: string;
+  offset?: number;
 }
 
 export interface CancelChatResponse {

@@ -3,10 +3,12 @@
 import { useEffect, useRef, useState } from "react";
 import {
   AgentNode,
+  ChatMessage,
   Edge,
   EnvironmentNode,
   ProjectNode,
   PendingToolCall,
+  ToolEvent,
   isApprovalRequired,
   isEnvironmentNode,
   isToolNode,
@@ -42,6 +44,8 @@ export interface LocalMessage {
   role: "user" | "assistant" | "system";
   content: string;
   pending?: boolean;
+  // User rows only: the agent node that sent it, when it wasn't the user.
+  senderId?: string;
   // Only for role: "system" — picks the row style. "tool" is a live
   // tool/sub-agent checkpoint, "warn" an approval pause, "ok" a context
   // refresh confirmation.
@@ -80,54 +84,88 @@ export function defaultChatState(): ChatState {
 
 type ChatUpdater = (updater: (prev: ChatState) => ChatState) => void;
 
-// Shared by POST /chat/stream, POST /chat/resume and GET /chat/attach —
-// both emit the identical SSE event shape per API.md.
-function makeStreamHandlers(onChatChange: ChatUpdater, onPublish?: (toolName: string) => void): StreamHandlers {
-  const replaceLast = (fn: (m: LocalMessage) => LocalMessage) =>
-    onChatChange((prev) => {
-      if (prev.messages.length === 0) return prev;
-      const copy = [...prev.messages];
-      copy[copy.length - 1] = fn(copy[copy.length - 1]);
-      return { ...prev, messages: copy };
-    });
+function toolLabel(e: ToolEvent): string {
+  return e.type === "result"
+    ? `↳ ${e.name} → ${String(e.result_head ?? "").slice(0, 160)}`
+    : `⚙ calling ${e.name}${e.args ? ` ${JSON.stringify(e.args).slice(0, 160)}` : ""}`;
+}
 
+// Text after the last tool event: the only part a `done` can still add.
+function tailAfterTools(m?: ChatMessage): string {
+  if (!m) return "";
+  const at = Math.max(0, ...(m.tool_calls ?? []).map((e) => e.offset ?? 0));
+  return Array.from(m.content).slice(at).join("");
+}
+
+function stopped(content: string): string {
+  return `${content}${content ? "\n\n" : ""}⏹ Stopped.`;
+}
+
+// One stored assistant row → alternating text bubbles and tool rows, split at
+// each event's offset. Events without one land where the previous one did.
+function expandMessage(m: ChatMessage): LocalMessage[] {
+  // Code points, not UTF-16 units: offsets come from Python's len().
+  const chars = Array.from(m.content);
+  const out: LocalMessage[] = [];
+  let pos = 0;
+  for (const e of m.tool_calls ?? []) {
+    const at = Math.min(Math.max(pos, e.offset ?? pos), chars.length);
+    if (at > pos) out.push({ role: "assistant", content: chars.slice(pos, at).join("") });
+    pos = at;
+    out.push({ role: "system", tone: "tool", content: toolLabel(e) });
+  }
+  const rest = chars.slice(pos).join("");
+  const content =
+    m.status === "failed" ? rest || "⚠ This turn failed." : m.status === "cancelled" ? stopped(rest) : rest;
+  if (content || m.status === "running" || !m.tool_calls?.length)
+    out.push({ role: "assistant", content, pending: m.status === "running" ? true : undefined });
+  return out;
+}
+
+// Shared by POST /chat/stream, POST /chat/resume and GET /chat/attach —
+// both emit the identical SSE event shape per API.md. Each tool event closes
+// the current text bubble; the next chunk opens a new one.
+function makeStreamHandlers(onChatChange: ChatUpdater, onPublish?: (toolName: string) => void): StreamHandlers {
   return {
-    onChunk: (text) => replaceLast((m) => ({ ...m, content: m.content + text })),
-    onTool: (data) => {
-      // event: tool — fired when a tool/sub-agent is called and again with
-      // its result_head when it returns. Rendered as its own checkpoint row,
-      // inserted above the still-growing assistant reply.
-      const label =
-        "result_head" in data
-          ? `↳ ${data.name} → ${String(data.result_head ?? "").slice(0, 160)}`
-          : `⚙ calling ${data.name}${data.args ? ` ${JSON.stringify(data.args).slice(0, 160)}` : ""}`;
+    onChunk: (text) =>
+      onChatChange((prev) => {
+        const copy = [...prev.messages];
+        const last = copy[copy.length - 1];
+        if (last?.role === "assistant") copy[copy.length - 1] = { ...last, content: last.content + text };
+        else copy.push({ role: "assistant", content: text, pending: true });
+        return { ...prev, messages: copy };
+      }),
+    onTool: (data: ToolEvent) => {
       if (
-        "result_head" in data &&
+        data.type === "result" &&
         String(data.name).endsWith("publish_preview") &&
         String(data.result_head ?? "").startsWith("Preview published:")
       )
         onPublish?.(String(data.name));
       onChatChange((prev) => {
         const copy = [...prev.messages];
-        const idx = copy.length - 1;
-        return {
-          ...prev,
-          messages: [...copy.slice(0, idx), { role: "system", tone: "tool", content: label }, ...copy.slice(idx)],
-        };
+        const last = copy[copy.length - 1];
+        if (last?.role === "assistant") {
+          if (last.content) copy[copy.length - 1] = { ...last, pending: false };
+          else copy.pop();
+        }
+        copy.push({ role: "system", tone: "tool", content: toolLabel(data) });
+        return { ...prev, messages: copy };
       });
     },
     onDone: (data) => {
       // `done` carries the final assistant_message; a cancelled turn keeps
       // its partial text and finalises with status "cancelled".
-      const status = data?.assistant_message?.status;
-      replaceLast((m) => ({
-        ...m,
-        pending: false,
-        content:
-          status === "cancelled"
-            ? `${m.content}${m.content ? "\n\n" : ""}⏹ Stopped.`
-            : m.content || data?.assistant_message?.content || m.content,
-      }));
+      const final: ChatMessage | undefined = data?.assistant_message;
+      onChatChange((prev) => {
+        const copy = [...prev.messages];
+        const open = copy[copy.length - 1]?.role === "assistant" ? copy.pop()! : null;
+        // No chunks arrived (non-streamed recovery): fall back to the row.
+        const content = open?.content || tailAfterTools(final);
+        const shown = final?.status === "cancelled" ? stopped(content) : content;
+        if (shown) copy.push({ role: "assistant", content: shown });
+        return { ...prev, messages: copy };
+      });
     },
     onError: (data) => {
       // The backend's SSE payload is {"error": str(exc)} — fall through
@@ -139,7 +177,12 @@ function makeStreamHandlers(onChatChange: ChatUpdater, onPublish?: (toolName: st
         data?.reason ??
         (data && Object.keys(data).length ? JSON.stringify(data) : null) ??
         "the backend closed the stream with no error detail — check its logs for a traceback";
-      replaceLast(() => ({ role: "assistant", content: `⚠ ${detail}` }));
+      onChatChange((prev) => {
+        const copy = [...prev.messages];
+        if (copy[copy.length - 1]?.role === "assistant") copy.pop();
+        copy.push({ role: "assistant", content: `⚠ ${detail}` });
+        return { ...prev, messages: copy };
+      });
     },
     onApprovalRequired: (data) => {
       const initial: Record<string, boolean> = {};
@@ -277,18 +320,9 @@ export default function ChatWindow({
     listNodeMessages(projectId, node.id)
       .then((history) => {
         if (cancelled) return;
-        const fetched: LocalMessage[] = history
-          .filter((m) => m.role === "user" || m.role === "assistant")
-          .map((m) => ({
-            role: m.role,
-            content:
-              m.status === "failed"
-                ? m.content || "⚠ This turn failed."
-                : m.status === "cancelled"
-                ? `${m.content}${m.content ? "\n\n" : ""}⏹ Stopped.`
-                : m.content,
-            pending: m.status === "running" ? true : undefined,
-          }));
+        const fetched: LocalMessage[] = history.flatMap((m) =>
+          m.role === "user" ? [{ role: "user" as const, content: m.content, senderId: m.sender_node_id ?? undefined }] : m.role === "assistant" ? expandMessage(m) : []
+        );
         const last = history[history.length - 1];
         const stillRunning = !!last && last.role === "assistant" && last.status === "running";
 
@@ -313,15 +347,10 @@ export default function ChatWindow({
               .then((tail) => {
                 if (cancelled || tail.length === 0) return;
                 const finalMsg = tail[tail.length - 1];
+                // Everything after the last user message is this turn: redraw it.
                 onChatChange((prev) => {
-                  const copy = [...prev.messages];
-                  if (copy.length > 0) {
-                    copy[copy.length - 1] = {
-                      role: "assistant",
-                      content: finalMsg.status === "failed" ? finalMsg.content || "⚠ This turn failed." : finalMsg.content,
-                    };
-                  }
-                  return { ...prev, messages: copy };
+                  const cut = prev.messages.map((m) => m.role).lastIndexOf("user") + 1;
+                  return { ...prev, messages: [...prev.messages.slice(0, cut), ...expandMessage(finalMsg)] };
                 });
               })
               .catch(() => {});
@@ -401,7 +430,7 @@ export default function ChatWindow({
         } else {
           onChatChange((prev) => ({
             ...prev,
-            messages: [...prev.messages.slice(0, -1), { role: "assistant", content: res.assistant_message.content }],
+            messages: [...prev.messages.slice(0, -1), ...expandMessage(res.assistant_message)],
           }));
         }
       } catch (e: any) {
@@ -656,6 +685,7 @@ export default function ChatWindow({
               );
             }
             const mine = m.role === "user";
+            const sender = m.senderId ? nameOf(m.senderId)?.name ?? "Orchestrator" : null;
             const failed = !mine && m.content.startsWith("⚠");
             return (
               <div key={i} className="flex gap-[11px]">
@@ -666,10 +696,10 @@ export default function ChatWindow({
                       : "border border-accent/[0.55] text-accent text-xs"
                   }`}
                 >
-                  {mine ? "ME" : icon}
+                  {mine ? (sender ? "OR" : "ME") : icon}
                 </div>
                 <div className="min-w-0 flex-1">
-                  <div className="text-[12.5px] font-semibold mb-1.5">{mine ? "You" : node.name}</div>
+                  <div className="text-[12.5px] font-semibold mb-1.5">{mine ? sender ?? "You" : node.name}</div>
                   <div
                     className={`rounded-[10px] px-3.5 py-3 text-[13px] leading-[1.6] whitespace-pre-wrap break-words border ${
                       mine
