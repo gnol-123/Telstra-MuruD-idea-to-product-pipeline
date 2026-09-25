@@ -471,9 +471,8 @@ async def list_node_messages(
 ) -> list[ChatMessage]:
     """An agent node's transcript, oldest first. ``after_seq`` for polling.
 
-    Reads on the pooled service client (TurnRepos), not a fresh per-request
-    user client: get_user_client deliberately builds a brand new httpx.Client
-    (and pays a cold TLS handshake) on every call.
+    Reads on the service client (TurnRepos). Predates user clients sharing a
+    pool (see supabase._user_http); either is warm now.
 
     No separate project lookup: get_agent_node is owner-filtered and
     its project_id is checked below.
