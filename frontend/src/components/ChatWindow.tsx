@@ -339,28 +339,33 @@ export default function ChatWindow({
 
         if (!stillRunning) return;
         attachChat(node.id, makeStreamHandlers(onChatChange, onPublish))
-          .then((attached) => {
-            if (cancelled || attached) return;
-            // 204 — it finished between our GET and the attach; pull the
-            // final text instead of leaving a stale "…" bubble.
-            listNodeMessages(projectId, node.id, Math.max(0, (last.seq ?? 1) - 1))
-              .then((tail) => {
-                if (cancelled || tail.length === 0) return;
-                const finalMsg = tail[tail.length - 1];
-                // Everything after the last user message is this turn: redraw it.
-                onChatChange((prev) => {
-                  const cut = prev.messages.map((m) => m.role).lastIndexOf("user") + 1;
-                  return { ...prev, messages: [...prev.messages.slice(0, cut), ...expandMessage(finalMsg)] };
-                });
-              })
-              .catch(() => {});
+          .then(async (attached) => {
+            if (attached) return;
+            // 204: it finished between our GET and the attach. The backend
+            // unregisters just before its final write, so poll briefly for
+            // the settled row instead of leaving a stale "…" bubble.
+            let finalMsg: ChatMessage | undefined;
+            for (let i = 0; i < 10; i++) {
+              const tail = await listNodeMessages(projectId, node.id, Math.max(0, (last.seq ?? 1) - 1));
+              finalMsg = tail[tail.length - 1];
+              if (!finalMsg || finalMsg.status !== "running") break;
+              await new Promise((r) => setTimeout(r, 500));
+            }
+            if (!finalMsg) return;
+            // Nothing is attached any more, so never draw a spinner.
+            const drawn = expandMessage(finalMsg).map((m) => ({ ...m, pending: undefined }));
+            // Everything after the last user message is this turn: redraw it.
+            onChatChange((prev) => {
+              const cut = prev.messages.map((m) => m.role).lastIndexOf("user") + 1;
+              return { ...prev, messages: [...prev.messages.slice(0, cut), ...drawn] };
+            });
           })
           .catch(() => {})
+          // Unconditional: chat state outlives this window, so a close
+          // mid-attach must still clear busy or the reopened chat is stuck.
           .finally(() => {
-            if (!cancelled) {
-              onChatChange((prev) => ({ ...prev, busy: false }));
-              afterTurn();
-            }
+            onChatChange((prev) => ({ ...prev, busy: false }));
+            afterTurn();
           });
       })
       .catch(() => {
@@ -472,10 +477,17 @@ export default function ChatWindow({
   // turn. The open stream closes itself once the backend finalises the
   // message as "cancelled".
   async function stop() {
-    try {
-      await cancelChat(node.id);
-    } catch {
-      // 409 = nothing left to stop.
+    // 409 = nothing running yet (still registering) or already done. Retry
+    // once, then stop waiting on a stream that may never close.
+    const tryCancel = () => cancelChat(node.id).then(() => true, (e) => !(e instanceof ApiError && e.status === 409));
+    if (!(await tryCancel())) {
+      await new Promise((r) => setTimeout(r, 1000));
+      if (!(await tryCancel()))
+        onChatChange((prev) => ({
+          ...prev,
+          busy: false,
+          messages: prev.messages.map((m) => (m.pending ? { ...m, pending: false } : m)),
+        }));
     }
     if (pendingCalls) {
       onChatChange((prev) => ({
