@@ -8,6 +8,7 @@ from dataclasses import dataclass
 from datetime import UTC, datetime
 from typing import Any
 
+from app.repositories.catalog_cache import cached
 from app.services.supabase import get_service_client
 
 _TOOL_TYPE_COLUMNS = "id, slug, name, description, config_schema, secret_fields, auth_kind"
@@ -104,6 +105,18 @@ class ToolRepository:
     # -- catalog ------------------------------------------------------------
 
     def list_tool_types(self) -> list[ToolType]:
+        return list(cached(("list_tool_types",), self._fetch_tool_types))
+
+    def get_tool_type(self, slug: str) -> ToolType | None:
+        return cached(("get_tool_type", slug), lambda: self._fetch_tool_type(slug))
+
+    def list_presets(self) -> list[ToolPreset]:
+        return list(cached(("list_presets",), self._fetch_presets))
+
+    def get_preset(self, slug: str) -> ToolPreset | None:
+        return cached(("get_preset", slug), lambda: self._fetch_preset(slug))
+
+    def _fetch_tool_types(self) -> list[ToolType]:
         rows = (
             self._db.table("tool_types")
             .select(_TOOL_TYPE_COLUMNS)
@@ -113,7 +126,7 @@ class ToolRepository:
         ).data
         return [_to_tool_type(r) for r in rows]
 
-    def get_tool_type(self, slug: str) -> ToolType | None:
+    def _fetch_tool_type(self, slug: str) -> ToolType | None:
         rows = (
             self._db.table("tool_types")
             .select(_TOOL_TYPE_COLUMNS)
@@ -125,7 +138,7 @@ class ToolRepository:
 
     # -- presets ------------------------------------------------------------
 
-    def list_presets(self) -> list[ToolPreset]:
+    def _fetch_presets(self) -> list[ToolPreset]:
         rows = (
             self._db.table("tool_presets")
             .select(_TOOL_PRESET_COLUMNS)
@@ -135,7 +148,7 @@ class ToolRepository:
         ).data
         return [_to_tool_preset(r) for r in rows]
 
-    def get_preset(self, slug: str) -> ToolPreset | None:
+    def _fetch_preset(self, slug: str) -> ToolPreset | None:
         rows = (
             self._db.table("tool_presets")
             .select(_TOOL_PRESET_COLUMNS)

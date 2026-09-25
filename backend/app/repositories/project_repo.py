@@ -14,6 +14,8 @@ from typing import Any
 from postgrest.exceptions import APIError
 from supabase import Client
 
+from app.repositories.catalog_cache import cached
+
 # Postgres unique_violation, surfaced by PostgREST as `code`.
 _UNIQUE_VIOLATION = "23505"
 
@@ -182,6 +184,12 @@ class ProjectRepository:
     # -- catalog ------------------------------------------------------------
 
     def list_agent_types(self) -> list[AgentType]:
+        return list(cached(("list_agent_types",), self._fetch_agent_types))
+
+    def get_agent_type(self, slug: str) -> AgentType | None:
+        return cached(("get_agent_type", slug), lambda: self._fetch_agent_type(slug))
+
+    def _fetch_agent_types(self) -> list[AgentType]:
         rows = (
             self._db.table("agent_types")
             .select("id, slug, name, description, system_prompt, model, default_presets")
@@ -202,7 +210,7 @@ class ProjectRepository:
             for r in rows
         ]
 
-    def get_agent_type(self, slug: str) -> AgentType | None:
+    def _fetch_agent_type(self, slug: str) -> AgentType | None:
         rows = (
             self._db.table("agent_types")
             .select("id, slug, name, description, system_prompt, model, default_presets")
