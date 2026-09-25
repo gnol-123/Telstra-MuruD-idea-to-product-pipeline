@@ -93,6 +93,9 @@ export default function MeshCanvas({
   // In-flight create/delete calls. Non-zero means the server list is behind
   // the UI, so the poll merges status only and skips add/remove.
   const pendingMutations = useRef(0);
+  // Agents dropped this session. Only these lock while tools verify, so a
+  // backfilled or orphaned 'pending' tool can't lock a card for good.
+  const createdHere = useRef(new Set<string>());
   // Same idea for the tool modal: its create call lives inside the modal.
   const toolModalOpen = useRef(false);
   // Ticks once per completed mutation, so a poll can detect one landed while
@@ -340,6 +343,7 @@ export default function MeshCanvas({
       // reload to pick up whatever else the backend just created. Placeholder
       // goes only after, so the spinner hands straight off to pending tools.
       const agentType = agentTypes.find((t) => t.slug === agentSlug);
+      createdHere.current.add(node.id);
       await reloadCanvas();
       setNodes((n) => {
         const rest = n.filter((x) => x.id !== tempId);
@@ -887,7 +891,8 @@ export default function MeshCanvas({
                   creating={
                     node.id.startsWith(PENDING_PREFIX) ||
                     // Default tools still verifying in the background.
-                    (attachedToolsByAgent.get(node.id) ?? []).some((t) => t.tool.status === "pending")
+                    (createdHere.current.has(node.id) &&
+                      (attachedToolsByAgent.get(node.id) ?? []).some((t) => t.tool.status === "pending"))
                   }
                   zoom={zoom}
                   attachedEnvironments={isAgentNode(node) ? attachedEnvsByAgent.get(node.id) ?? [] : undefined}
