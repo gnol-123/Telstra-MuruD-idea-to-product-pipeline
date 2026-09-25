@@ -460,6 +460,7 @@ def _message_payload(m: Message) -> dict:
         "status": m.status,
         "created_at": m.created_at,
         "tool_calls": m.tool_calls,
+        "sender_node_id": m.sender_node_id,
     }
 
 
@@ -579,7 +580,9 @@ async def _finalise(
             cache_write_tokens=turn.cache_write_tokens,
             requests=turn.requests,
         )
-        if status == "complete":
+        # turn.output is only the text after the last tool call. With tools,
+        # keep the streamed text so tool offsets still index into it.
+        if status == "complete" and not run.events:
             fields["content"] = turn.output
     fields = {k: v for k, v in fields.items() if v is not None}
     try:
@@ -624,6 +627,7 @@ async def start_turn(
     toolsets: list | None = None,
     on_paused: Callable[[DeferredToolRequests, list[ModelMessage]], Awaitable[None]] | None = None,
     resume: ResumeInput | None = None,
+    sender_node_id: str | None = None,
 ) -> RunningTurn:
     """Register and start one turn. Raises ``runs.TurnBusy`` before writing anything.
 
@@ -640,7 +644,13 @@ async def start_turn(
         if resume is None:
             history = await to_thread.run_sync(repo.list_messages, conversation_id)
             run.user_message = await to_thread.run_sync(
-                lambda: repo.add_message(conversation_id, "user", prompt, client_token=client_token)
+                lambda: repo.add_message(
+                    conversation_id,
+                    "user",
+                    prompt,
+                    client_token=client_token,
+                    sender_node_id=sender_node_id,
+                )
             )
             run.message = await to_thread.run_sync(
                 lambda: repo.add_message(conversation_id, "assistant", "", status="running")

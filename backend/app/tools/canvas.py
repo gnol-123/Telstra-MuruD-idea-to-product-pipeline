@@ -326,6 +326,7 @@ class CanvasTools:
                 instructions=instructions,
                 toolsets=prepared.toolsets,
                 parent=parent,
+                sender_node_id=self._orch.id,
             )
         except runs.TurnBusy:
             return f"Refused: {target.name} is already running a turn."

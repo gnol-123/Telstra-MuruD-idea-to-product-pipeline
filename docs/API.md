@@ -942,6 +942,10 @@ The node implies its project and its template, so one identifier is enough.
 }
 ```
 
+**Sender.** `sender_node_id` is set on a `user` row an orchestrator wrote
+through canvas `run_agent` (the orchestrator's node id), and `null` when the
+user typed it.
+
 **Message statuses.** `running` while the turn is in flight, then `complete`,
 `failed` (with `error`), `cancelled` (stopped by the user, partial `content`
 kept), or `awaiting_approval` (paused for a tool decision). Every message
@@ -949,13 +953,17 @@ carries `tool_calls`, an ordered list of the tool events behind that bubble:
 
 ```json
 "tool_calls": [
-  {"type": "call",   "tool_call_id": "c1", "name": "run_agent", "args": {"node_id": "..."}, "at": "..."},
-  {"type": "result", "tool_call_id": "c1", "name": "run_agent", "status": "ok", "result_head": "...", "at": "..."}
+  {"type": "call",   "tool_call_id": "c1", "name": "run_agent", "args": {"node_id": "..."}, "at": "...", "offset": 18},
+  {"type": "result", "tool_call_id": "c1", "name": "run_agent", "status": "ok", "result_head": "...", "at": "...", "offset": 18}
 ]
 ```
 
-Render a bubble by interleaving: the `call`/`result` pairs arrived in that
-order relative to the text, and `content` is the text. `result.status` is one
+Render a bubble by interleaving: `offset` is the character index in `content`
+where the event landed, so split the text there (`content[0:18]`, tool rows,
+then `content[18:]`). The same field rides on the live `event: tool`. A turn
+that used tools keeps the full streamed text as `content`; a tool-free turn
+stores the final output. `offset` is absent on older rows and on synthetic
+results; place those after the previous event. `result.status` is one
 of `ok`, `error` (the tool raised, or the turn died mid-call), `denied`
 (refused at an approval prompt) or `cancelled` (in flight when the turn was
 stopped, or parked when the pause was abandoned). On every terminal status a

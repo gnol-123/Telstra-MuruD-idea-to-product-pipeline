@@ -93,9 +93,11 @@ class Message:
     created_at: str
     # Ordered tool events for the bubble. Empty on user rows.
     tool_calls: list[dict[str, Any]] = field(default_factory=list)
+    # Agent node that wrote this user row (canvas run_agent). None = the user.
+    sender_node_id: str | None = None
 
 
-_MESSAGE_COLUMNS = "id, role, content, seq, status, created_at, tool_calls"
+_MESSAGE_COLUMNS = "id, role, content, seq, status, created_at, tool_calls, sender_node_id"
 
 
 def _to_message(row: dict[str, Any]) -> Message:
@@ -107,6 +109,7 @@ def _to_message(row: dict[str, Any]) -> Message:
         status=row["status"],
         created_at=row["created_at"],
         tool_calls=row.get("tool_calls") or [],
+        sender_node_id=row.get("sender_node_id"),
     )
 
 
@@ -698,6 +701,7 @@ class ProjectRepository:
         requests: int | None = None,
         status: str = "complete",
         error: str | None = None,
+        sender_node_id: str | None = None,
     ) -> Message:
         """
         Insert one message, returning the stored row.
@@ -719,6 +723,7 @@ class ProjectRepository:
             ("cache_write_tokens", cache_write_tokens),
             ("requests", requests),
             ("error", error),
+            ("sender_node_id", sender_node_id),
         ):
             if value is not None:
                 payload[key] = value

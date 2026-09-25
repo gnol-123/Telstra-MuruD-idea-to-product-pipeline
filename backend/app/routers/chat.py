@@ -58,6 +58,8 @@ class ChatMessage(BaseModel):
     status: str
     created_at: datetime
     tool_calls: list[dict[str, Any]] = []
+    # Agent node that wrote this user row (canvas run_agent). None = the user.
+    sender_node_id: UUID | None = None
 
     @classmethod
     def of(cls, m: Message) -> "ChatMessage":
@@ -69,6 +71,7 @@ class ChatMessage(BaseModel):
             status=m.status,
             created_at=m.created_at,
             tool_calls=m.tool_calls,
+            sender_node_id=m.sender_node_id,
         )
 
 
