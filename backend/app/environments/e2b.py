@@ -290,9 +290,7 @@ def build(ctx: EnvContext) -> FunctionToolset:
         while True:
             try:
                 listening = await workspace.listening_ports(sbx)
-                answering = await workspace.web_ports(
-                    sbx, [p for p in listening if p.port == port]
-                )
+                answering = await workspace.web_ports(sbx, [p for p in listening if p.port == port])
             except Exception as exc:
                 return f"Could not check ports: {type(exc).__name__}: {exc}"[:500]
             if answering:
