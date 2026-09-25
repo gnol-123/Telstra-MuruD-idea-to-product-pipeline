@@ -270,7 +270,9 @@ for addr, port, inode in socks:
         except OSError:
             cwd = ""
     local = addr in LOOPBACK
-    e = res.setdefault(port, {"port": port, "pid": None, "command": "", "cwd": "", "local_only": True})
+    e = res.setdefault(
+        port, {"port": port, "pid": None, "command": "", "cwd": "", "local_only": True}
+    )
     if not local:
         e["local_only"] = False
     if pid and e["pid"] is None:

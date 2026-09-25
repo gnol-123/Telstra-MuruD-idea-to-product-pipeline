@@ -275,7 +275,8 @@ def build(ctx: EnvContext) -> FunctionToolset:
             return f"Invalid port: {port}"
         title = " ".join((title or "").split())
         # The user sees the title, not the port. Reject lazy ones.
-        if len(title) < 3 or title.lower().startswith(("port", "http", "localhost")) or title.isdigit():
+        lazy = title.lower().startswith(("port", "http", "localhost")) or title.isdigit()
+        if len(title) < 3 or lazy:
             return (
                 "Give a real title: 2 to 5 words naming what the user will see, "
                 "like 'Todo app' or 'Pricing page prototype'. Not a port or a URL."
