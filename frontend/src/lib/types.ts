@@ -212,20 +212,9 @@ export interface ApprovalRequiredResponse {
 
 export type SendChatResult = ChatResponse | ApprovalRequiredResponse;
 
-export function isApprovalRequired(
-  r: SendChatResult | ResumeResult
-): r is ApprovalRequiredResponse {
+export function isApprovalRequired(r: SendChatResult): r is ApprovalRequiredResponse {
   return (r as ApprovalRequiredResponse).paused === true;
 }
-
-export interface ResumeResponse {
-  node_id: string;
-  conversation_id: string;
-  output: string;
-  assistant_message: ChatMessage;
-}
-
-export type ResumeResult = ResumeResponse | ApprovalRequiredResponse;
 
 // -------------------- Environments: files & preview --------------------
 

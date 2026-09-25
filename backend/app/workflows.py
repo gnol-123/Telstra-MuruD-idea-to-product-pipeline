@@ -322,7 +322,9 @@ async def _stream_agent(
         # The stream closes on any exit, so a failed run cannot hang the reader.
         try:
             if resume is not None:
-                return await _resume_agent_direct(system_prompt, model, resume, toolsets, handler)
+                return await _resume_agent_direct(
+                    system_prompt, model, resume, instructions, toolsets, handler
+                )
             if use_durable:
                 if workflow_id is not None:
                     from dbos import SetWorkflowID
@@ -389,11 +391,15 @@ async def _run_agent_direct(
     return _turn_from_result(result, model)
 
 
-async def _resume_agent_direct(system_prompt, model, resume, toolsets, handler) -> AgentTurn:
+async def _resume_agent_direct(
+    system_prompt, model, resume, instructions, toolsets, handler
+) -> AgentTurn:
     agent = get_agent_for(system_prompt, model)
+    # Instructions are per run, not replayed from history: pass them again.
     result = await agent.run(
         message_history=resume.history,
         deferred_tool_results=resume.deferred,
+        instructions=instructions,
         toolsets=toolsets or None,
         event_stream_handler=handler,
         usage_limits=_limits(),
@@ -914,7 +920,7 @@ async def stream_turn(*args, **kwargs) -> AsyncIterator[tuple[str, dict]]:
 
 
 async def run_turn(*args, parent: RunningTurn | None = None, **kwargs) -> ChatTurn:
-    """Start a turn and wait for it. Shared by /chat, /chat/resume and canvas run_agent.
+    """Start a turn and wait for it. Shared by /chat and canvas run_agent.
 
     With ``parent`` the turn is a child: cancelling the parent cancels it, and
     cancelling only the child returns a cancelled ChatTurn rather than raising.

@@ -97,15 +97,6 @@ class ApprovalRequiredResponse(BaseModel):
     pending_calls: list[PendingCall]
 
 
-class ResumeResponse(BaseModel):
-    """A completed resume. No ``user_message``: the prompt was persisted on the paused turn."""
-
-    node_id: UUID
-    conversation_id: UUID
-    output: str
-    assistant_message: ChatMessage
-
-
 def _pending_calls(pending: DeferredToolRequests) -> list[PendingCall]:
     return [
         PendingCall(
@@ -388,14 +379,15 @@ class ResumeRequest(BaseModel):
     approvals: dict[str, bool] = Field(min_length=1)
 
 
-@router.post("/resume", response_model=None)
+@router.post("/resume")
 async def chat_resume(
     req: ResumeRequest, repo: ProjectRepo, turn_repos: TurnRepos
-) -> ResumeResponse | ApprovalRequiredResponse:
-    """Resume a turn that paused for tool approval.
+) -> StreamingResponse:
+    """Resume a turn that paused for tool approval, streamed as SSE.
 
-    Toolsets are not serialisable, so they are rebuilt from the node. A resume
-    can pause again; same branch handles it.
+    Same events as /chat/stream, so a resume can pause again with
+    ``approval_required``. Toolsets are not serialisable, so they are rebuilt
+    from the node. 404/409/422 are raised before any headers are sent.
     """
     node = await to_thread.run_sync(repo.get_agent_node, str(req.node_id))
     if node is None:
@@ -463,7 +455,7 @@ async def chat_resume(
     )
 
     try:
-        turn = await run_turn(
+        run = await start_turn(
             trepo,
             conversation_id,
             node.system_prompt,
@@ -480,27 +472,21 @@ async def chat_resume(
     except runs.TurnBusy:
         raise _BUSY from None
 
-    # Decisions are settled: denied were answered without a result, approved ran.
+    # Past TurnBusy the denials are final.
     await to_thread.run_sync(
         lambda: _apply_approval_decisions(tool_repo, conversation_id, req.approvals)
     )
 
-    if turn.pending is not None:
-        # Second pause. on_paused already recorded and parked it.
-        return ApprovalRequiredResponse(
-            node_id=UUID(node.id),
-            conversation_id=UUID(conversation_id),
-            pending_calls=_pending_calls(turn.pending),
-        )
+    async def clear_parked_run() -> None:
+        # Detached like the run, so a reader leaving cannot skip it.
+        await run.task
+        if run.result is None or run.result.pending is None:
+            # A second pause re-parked through on_paused; keep that one.
+            await to_thread.run_sync(lambda: tool_repo.set_pending_run(conversation_id, None))
 
-    await to_thread.run_sync(lambda: tool_repo.set_pending_run(conversation_id, None))
+    runs.track_finaliser(asyncio.ensure_future(clear_parked_run()))
 
-    return ResumeResponse(
-        node_id=UUID(node.id),
-        conversation_id=UUID(conversation_id),
-        output=turn.output,
-        assistant_message=ChatMessage.of(turn.assistant_message),
-    )
+    return StreamingResponse(_events(run), media_type="text/event-stream", headers=_SSE_HEADERS)
 
 
 def _apply_approval_decisions(

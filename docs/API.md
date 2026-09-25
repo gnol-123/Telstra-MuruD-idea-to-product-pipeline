@@ -1103,10 +1103,9 @@ the paused shape:
 }
 ```
 
-Note: this JSON body from `POST /chat` and `/chat/resume` has no
-`assistant_message` field; read the paused bubble from `.../messages`. The
-SSE `approval_required` event below (from `/chat/stream` and `/chat/attach`)
-does carry it.
+Note: this JSON body from `POST /chat` has no `assistant_message` field;
+read the paused bubble from `.../messages`. The SSE `approval_required` event
+below (from `/chat/stream`, `/chat/resume` and `/chat/attach`) does carry it.
 
 **`/chat/stream` emits `event: approval_required` and then ends the stream
 with no `done` event.** This is the thing a frontend will break on if it
@@ -1130,16 +1129,18 @@ the pending calls:
 }
 ```
 
-→ `200`, `ResumeResponse` (**no `user_message` field**: the prompt was already
-persisted on the turn that paused):
-```json
-{
-  "node_id": "uuid",
-  "conversation_id": "uuid",
-  "output": "...",
-  "assistant_message": { "id": "uuid", "role": "assistant", "content": "...",
-    "seq": 2, "status": "complete", "created_at": "...", "tool_calls": [...] }
-}
+→ `200`, `text/event-stream`, same events as `/chat/stream`. `start` has **no
+`user_message`** (the prompt was already persisted on the turn that paused)
+and its `assistant_message` snapshot already holds the pre-pause text and
+calls; `chunk` and `tool` carry only what follows. Detached like
+`/chat/stream`: a disconnect stops the events, not the run, and
+`/chat/attach` re-joins it.
+
+```
+event: start   data: {"conversation_id": "...", "assistant_message": {...}}
+event: tool    data: {"type": "result", "tool_call_id": "call_abc123", ...}
+event: chunk   data: {"text": "Done, issue 4"}
+event: done    data: {"assistant_message": {...}}
 ```
 
 **The resume reuses the paused bubble.** `assistant_message.id` and `.seq`
@@ -1151,10 +1152,10 @@ Denied calls are marked `status: "denied"` in the tool-calls log rather than
 run, and their `call` event on the bubble gets a matching `result` with the
 same status. `409` if there is nothing parked for that node, or the pause is more than
 an hour old. `422` if an `approvals` key isn't a pending `tool_call_id` for
-that conversation.
+that conversation. All errors are plain JSON, sent before the stream starts.
 
 **A resumed run can pause again** (another `tool_policy: "ask"` call further
-in the same turn): the response is then `ApprovalRequiredResponse`, same shape
+in the same turn): the stream then ends with `approval_required`, same shape
 as above, and resume again.
 
 ### Live status: agents and tool calls
