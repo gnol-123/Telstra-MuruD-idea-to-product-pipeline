@@ -17,6 +17,7 @@ import {
   EnvironmentFileContent,
   EnvironmentPreview,
   EnvironmentPort,
+  EnvironmentPreviewEntry,
   ServeResult,
   EnvironmentFileWrite,
   UsageTotals,
@@ -508,6 +509,11 @@ export async function listManyEnvironmentFiles(projectId: string, nodeId: string
 
 export async function listEnvironmentPorts(projectId: string, nodeId: string) {
   return request<{ ports: EnvironmentPort[] }>(envPath(projectId, nodeId, "/ports"), { auth: true });
+}
+
+// Published previews plus any other listening port.
+export async function listEnvironmentPreviews(projectId: string, nodeId: string) {
+  return request<{ previews: EnvironmentPreviewEntry[] }>(envPath(projectId, nodeId, "/previews"), { auth: true });
 }
 
 // Start (or reuse) a static server on a directory — or on a file's

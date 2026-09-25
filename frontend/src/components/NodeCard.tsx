@@ -1,7 +1,6 @@
 "use client";
 
 import { useState } from "react";
-import { WORKSPACE_ROOT } from "@/lib/files";
 import { PORT_Y } from "./EdgeLayer";
 import { Edge, ProjectNode, ToolNode, EnvironmentNode, isAgentNode, isEnvironmentNode } from "@/lib/types";
 
@@ -112,7 +111,8 @@ export default function NodeCard({
   onChipClick?: (toolNodeId: string) => void;
   onChipRemove?: (edge: Edge) => void;
   onClearStale?: () => void;
-  onOpenChat?: () => void;
+  // envId: open with that environment's workspace panel expanded.
+  onOpenChat?: (envId?: string) => void;
   // Opens the code preview on an environment, optionally at a folder.
   onOpenWorkspace?: (envId: string, path?: string | null) => void;
 }) {
@@ -320,7 +320,7 @@ export default function NodeCard({
                   }}
                   onDoubleClick={(e) => {
                     e.stopPropagation();
-                    onOpenWorkspace?.(envNode.id, `${WORKSPACE_ROOT}/${node.id}`);
+                    onOpenChat?.(envNode.id);
                   }}
                   title={`${envNode.name} — click to inspect, double-click to open ${node.name}'s files`}
                   className="inline-flex items-center gap-1 pl-[7px] pr-1 py-[3px] rounded-[5px] text-[10px] bg-accent/10 border border-accent/30 text-accent cursor-pointer hover:bg-accent/15"

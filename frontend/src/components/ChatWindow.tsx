@@ -1,7 +1,17 @@
 "use client";
 
 import { useEffect, useRef, useState } from "react";
-import { AgentNode, Edge, ProjectNode, PendingToolCall, isApprovalRequired, isToolNode } from "@/lib/types";
+import {
+  AgentNode,
+  Edge,
+  EnvironmentNode,
+  ProjectNode,
+  PendingToolCall,
+  isApprovalRequired,
+  isEnvironmentNode,
+  isToolNode,
+} from "@/lib/types";
+import EnvPanel from "./workspace/EnvPanel";
 import {
   sendChat,
   streamChat,
@@ -49,6 +59,9 @@ export interface ChatState {
   // that fetch failed and isn't worth retrying). Without this a reopened
   // project has no idea the conversation already has a transcript.
   historyLoaded: boolean;
+  // Workspace panel: expanded or not, and which env (null = default).
+  panelOpen: boolean;
+  panelEnvId: string | null;
 }
 
 export function defaultChatState(): ChatState {
@@ -60,6 +73,8 @@ export function defaultChatState(): ChatState {
     pendingCalls: null,
     approvals: {},
     historyLoaded: false,
+    panelOpen: false,
+    panelEnvId: null,
   };
 }
 
@@ -67,7 +82,7 @@ type ChatUpdater = (updater: (prev: ChatState) => ChatState) => void;
 
 // Shared between POST /chat/stream (send) and GET /chat/attach (re-join) —
 // both emit the identical SSE event shape per API.md.
-function makeStreamHandlers(onChatChange: ChatUpdater): StreamHandlers {
+function makeStreamHandlers(onChatChange: ChatUpdater, onPublish?: (toolName: string) => void): StreamHandlers {
   const replaceLast = (fn: (m: LocalMessage) => LocalMessage) =>
     onChatChange((prev) => {
       if (prev.messages.length === 0) return prev;
@@ -86,6 +101,12 @@ function makeStreamHandlers(onChatChange: ChatUpdater): StreamHandlers {
         "result_head" in data
           ? `↳ ${data.name} → ${String(data.result_head ?? "").slice(0, 160)}`
           : `⚙ calling ${data.name}${data.args ? ` ${JSON.stringify(data.args).slice(0, 160)}` : ""}`;
+      if (
+        "result_head" in data &&
+        String(data.name).endsWith("publish_preview") &&
+        String(data.result_head ?? "").startsWith("Preview published:")
+      )
+        onPublish?.(String(data.name));
       onChatChange((prev) => {
         const copy = [...prev.messages];
         const idx = copy.length - 1;
@@ -181,6 +202,28 @@ export default function ChatWindow({
   const envEdges = edges.filter((e) => e.kind === "environment" && e.target_node_id === node.id);
   const stale = upstream.filter((e) => e.is_stale);
 
+  // Workspace panel: defaults to a non-scratch env.
+  const agentEnvs = envEdges
+    .map((e) => nameOf(e.source_node_id))
+    .filter((n): n is EnvironmentNode => !!n && isEnvironmentNode(n));
+  const panelEnv =
+    agentEnvs.find((e) => e.id === chat.panelEnvId) ?? agentEnvs.find((e) => e.role !== "scratch") ?? agentEnvs[0];
+  const panelOpen = chat.panelOpen && !!panelEnv;
+  const setPanel = (patch: Partial<ChatState>) => onChatChange((prev) => ({ ...prev, ...patch }));
+  const [turnKey, setTurnKey] = useState(0);
+  const [publishKey, setPublishKey] = useState(0);
+  const afterTurn = () => {
+    setTurnKey((k) => k + 1);
+    onAfterTurn();
+  };
+  // Tool names are `<env>_<id8>_publish_preview`; the id8 picks the env.
+  const onPublish = (tool: string) => {
+    const id8 = tool.match(/_([0-9a-f]{8})_publish_preview$/)?.[1];
+    const target = id8 ? agentEnvs.find((e) => e.id.startsWith(id8)) : undefined;
+    onChatChange((prev) => ({ ...prev, panelOpen: true, panelEnvId: target?.id ?? prev.panelEnvId }));
+    setPublishKey((k) => k + 1);
+  };
+
   const [staleAsk, setStaleAsk] = useState<string | null>(null);
   const [clearing, setClearing] = useState(false);
   const [models, setModels] = useState<string[] | null>(null);
@@ -261,7 +304,7 @@ export default function ChatWindow({
         );
 
         if (!stillRunning) return;
-        attachChat(node.id, makeStreamHandlers(onChatChange))
+        attachChat(node.id, makeStreamHandlers(onChatChange, onPublish))
           .then((attached) => {
             if (cancelled || attached) return;
             // 204 — it finished between our GET and the attach; pull the
@@ -287,7 +330,7 @@ export default function ChatWindow({
           .finally(() => {
             if (!cancelled) {
               onChatChange((prev) => ({ ...prev, busy: false }));
-              onAfterTurn();
+              afterTurn();
             }
           });
       })
@@ -368,7 +411,7 @@ export default function ChatWindow({
         }));
       } finally {
         onChatChange((prev) => ({ ...prev, busy: false }));
-        onAfterTurn();
+        afterTurn();
       }
       return;
     }
@@ -378,7 +421,7 @@ export default function ChatWindow({
       messages: [...prev.messages, { role: "assistant", content: "", pending: true }],
     }));
     try {
-      await streamChat(node.id, text, clientToken, makeStreamHandlers(onChatChange));
+      await streamChat(node.id, text, clientToken, makeStreamHandlers(onChatChange, onPublish));
     } catch (e: any) {
       onChatChange((prev) => {
         const copy = [...prev.messages];
@@ -392,7 +435,7 @@ export default function ChatWindow({
         busy: false,
         messages: prev.messages.map((m) => (m.pending ? { ...m, pending: false } : m)),
       }));
-      onAfterTurn();
+      afterTurn();
     }
   }
 
@@ -446,7 +489,7 @@ export default function ChatWindow({
       }));
     } finally {
       onChatChange((prev) => ({ ...prev, busy: false }));
-      onAfterTurn();
+      afterTurn();
     }
   }
 
@@ -455,13 +498,22 @@ export default function ChatWindow({
 
   return (
     <div
-      className="fixed inset-0 z-[60] bg-black/[0.66] backdrop-blur-[3px] grid place-items-center p-9 anim-fadein"
+      className={`fixed inset-0 z-[60] bg-black/[0.66] backdrop-blur-[3px] grid place-items-center anim-fadein ${
+        panelOpen ? "p-4" : "p-9"
+      }`}
       onClick={onClose}
     >
       <div
-        className="w-[min(880px,100%)] h-[min(660px,100%)] bg-modal border border-accent/[0.34] rounded-2xl shadow-[0_40px_120px_rgba(0,0,0,.8),0_0_70px_rgba(34,224,240,.09)] flex flex-col overflow-hidden anim-pop"
+        className={`${
+          panelOpen ? "w-full max-w-[1600px] h-full" : "w-[min(880px,100%)] h-[min(660px,100%)]"
+        } relative bg-modal border border-accent/[0.34] rounded-2xl shadow-[0_40px_120px_rgba(0,0,0,.8),0_0_70px_rgba(34,224,240,.09)] flex overflow-hidden anim-pop`}
         onClick={(e) => e.stopPropagation()}
       >
+        <div
+          className={`${
+            panelOpen ? "flex-none w-[440px] max-[900px]:w-full border-r border-white/[0.09]" : "flex-1"
+          } min-w-0 flex flex-col`}
+        >
         {/* header */}
         <div className="flex-none flex items-center gap-3 px-[18px] py-[15px] border-b border-white/[0.09]">
           <div className="w-8 h-8 rounded-lg border border-accent/[0.55] grid place-items-center text-accent text-sm">{icon}</div>
@@ -476,19 +528,23 @@ export default function ChatWindow({
                 running
               </span>
             )}
-            {envEdges.length > 0 && onOpenWorkspace && (
+            {panelEnv && (
               <button
-                onClick={() => onOpenWorkspace(envEdges[0].source_node_id, `/home/user/workspace/${node.id}`)}
+                onClick={() => setPanel({ panelOpen: !panelOpen })}
                 title={`See the files ${node.name} has written, and preview what it's serving`}
-                className="text-[10.5px] px-2.5 py-[5px] rounded-md border border-green/35 text-green hover:bg-green/10 whitespace-nowrap"
+                className={`text-[10.5px] px-2.5 py-[5px] rounded-md border border-green/35 text-green hover:bg-green/10 whitespace-nowrap ${
+                  panelOpen ? "bg-green/10" : ""
+                }`}
               >
                 {ENV_ICON} Files &amp; preview
               </button>
             )}
-            <span className="text-[10.5px] text-white/40 px-2.5 py-[5px] border border-white/[0.12] rounded-md whitespace-nowrap">
-              {toolEdges.length} tool{toolEdges.length === 1 ? "" : "s"} · {upstream.length} inherited
-              {envEdges.length > 0 ? ` · ${envEdges.length} env` : ""}
-            </span>
+            {!panelOpen && (
+              <span className="text-[10.5px] text-white/40 px-2.5 py-[5px] border border-white/[0.12] rounded-md whitespace-nowrap">
+                {toolEdges.length} tool{toolEdges.length === 1 ? "" : "s"} · {upstream.length} inherited
+                {envEdges.length > 0 ? ` · ${envEdges.length} env` : ""}
+              </span>
+            )}
             <button
               onClick={onClose}
               title="Close (Esc)"
@@ -527,7 +583,7 @@ export default function ChatWindow({
           {envEdges.map((e) => (
             <button
               key={e.id}
-              onClick={() => onOpenWorkspace?.(e.source_node_id, `/home/user/workspace/${node.id}`)}
+              onClick={() => setPanel({ panelOpen: true, panelEnvId: e.source_node_id })}
               title="Open this environment's files and preview"
               className="inline-flex items-center gap-[5px] px-[9px] py-1 rounded-full text-[10.5px] bg-green/10 border border-green/[0.35] text-green hover:bg-green/20"
             >
@@ -857,6 +913,25 @@ export default function ChatWindow({
             </div>
           </div>
         </div>
+        </div>
+
+        {panelEnv && (
+          <EnvPanel
+            key={panelEnv.id}
+            projectId={projectId}
+            agentId={node.id}
+            env={panelEnv}
+            envs={agentEnvs}
+            nodes={nodes}
+            open={panelOpen}
+            turnKey={turnKey}
+            publishKey={publishKey}
+            onOpen={() => setPanel({ panelOpen: true })}
+            onCollapse={() => setPanel({ panelOpen: false })}
+            onSwitchEnv={(id) => setPanel({ panelEnvId: id })}
+            onOpenFull={(envId, path) => onOpenWorkspace?.(envId, path)}
+          />
+        )}
       </div>
     </div>
   );

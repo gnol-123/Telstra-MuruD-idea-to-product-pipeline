@@ -275,6 +275,20 @@ export interface ServeResult extends EnvironmentPort {
   open_url: string;
 }
 
+// GET /previews: published entries first (newest first), then other
+// listening ports as published: false. id is the port as a string.
+export interface EnvironmentPreviewEntry {
+  id: string;
+  title: string | null;
+  port: number;
+  path: string;
+  url: string;
+  live: boolean;
+  published: boolean;
+  agent_node_id: string | null;
+  created_at: string | null;
+}
+
 export interface EnvironmentFileWrite {
   path: string;
   size: number;

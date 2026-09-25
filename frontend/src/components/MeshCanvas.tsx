@@ -676,7 +676,8 @@ export default function MeshCanvas({
   const contextLinkCount = edges.filter((e) => e.kind === "context").length;
 
   const chatNode = nodes.find((n) => n.id === chatNodeId);
-  const openChat = (id: string) => {
+  const openChat = (id: string, envId?: string) => {
+    if (envId) handleChatChange(id, (p) => ({ ...p, panelOpen: true, panelEnvId: envId }));
     setSelectedId(id);
     setChatNodeId(id);
   };
@@ -878,7 +879,7 @@ export default function MeshCanvas({
                   onChipClick={(toolNodeId) => setSelectedId(toolNodeId)}
                   onChipRemove={(edge) => handleUnequipTool(edge)}
                   onClearStale={() => clearStaleFor(node.id)}
-                  onOpenChat={isAgentNode(node) ? () => openChat(node.id) : undefined}
+                  onOpenChat={isAgentNode(node) ? (envId) => openChat(node.id, envId) : undefined}
                   onOpenWorkspace={openWorkspace}
                 />
               );
