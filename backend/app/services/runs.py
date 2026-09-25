@@ -112,6 +112,8 @@ async def emit(run: RunningTurn, event: str, payload: dict) -> None:
         if event == "chunk":
             run.text.append(payload["text"])
         elif event == "tool":
+            # Where in the text it landed, so a reader can split the bubble there.
+            payload = {**payload, "offset": sum(map(len, run.text))}
             run.events.append(payload)
         _fan_out(run, (event, payload))
 
