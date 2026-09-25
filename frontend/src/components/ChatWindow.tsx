@@ -9,8 +9,21 @@ import {
   cancelChat,
   resumeChat,
   listNodeMessages,
+  listModels,
+  updateNode,
+  ApiError,
   StreamHandlers,
 } from "@/lib/api";
+
+// Fetched once per page load; a failed fetch is retried on next open.
+let modelsCache: Promise<string[]> | null = null;
+function cachedModels() {
+  modelsCache ??= listModels().catch((e) => {
+    modelsCache = null;
+    throw e;
+  });
+  return modelsCache;
+}
 import { AGENT_ICONS, ENV_ICON, TOOL_ICONS, agentRole } from "./NodeCard";
 
 // -------------------- chat state (lifted to MeshCanvas, keyed by node) --------------------
@@ -142,6 +155,7 @@ export default function ChatWindow({
   onAfterTurn,
   onRefreshEdge,
   onOpenWorkspace,
+  onNodeUpdated,
 }: {
   projectId: string;
   node: AgentNode;
@@ -156,6 +170,7 @@ export default function ChatWindow({
   onRefreshEdge: (edge: Edge) => Promise<void>;
   // Opens the code preview on one of this agent's environments, at its folder.
   onOpenWorkspace?: (envId: string, path?: string | null) => void;
+  onNodeUpdated: (node: ProjectNode) => void;
 }) {
   const { messages, draft, useStream, busy, pendingCalls, approvals, historyLoaded } = chat;
   const icon = AGENT_ICONS[node.agent_slug] ?? "◆";
@@ -168,6 +183,12 @@ export default function ChatWindow({
 
   const [staleAsk, setStaleAsk] = useState<string | null>(null);
   const [clearing, setClearing] = useState(false);
+  const [models, setModels] = useState<string[] | null>(null);
+  const [modelErr, setModelErr] = useState<string | null>(null);
+  const [savingModel, setSavingModel] = useState(false);
+  const [modelOpen, setModelOpen] = useState(false);
+  const [modelQuery, setModelQuery] = useState("");
+  const filteredModels = (models ?? []).filter((m) => m.toLowerCase().includes(modelQuery.trim().toLowerCase()));
   const scrollRef = useRef<HTMLDivElement | null>(null);
   const inputRef = useRef<HTMLTextAreaElement | null>(null);
 
@@ -179,6 +200,24 @@ export default function ChatWindow({
     return () => window.removeEventListener("keydown", onKey);
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, []);
+
+  useEffect(() => {
+    cachedModels()
+      .then(setModels)
+      .catch(() => setModelErr("Model list unavailable"));
+  }, []);
+
+  async function pickModel(model: string) {
+    setSavingModel(true);
+    setModelErr(null);
+    try {
+      onNodeUpdated(await updateNode(projectId, node.id, { model }));
+    } catch (e) {
+      setModelErr(e instanceof ApiError ? e.message : "Could not set model");
+    } finally {
+      setSavingModel(false);
+    }
+  }
 
   // Keep the newest message in view as history loads / chunks stream in.
   useEffect(() => {
@@ -728,10 +767,68 @@ export default function ChatWindow({
               <span className="text-[11px] text-white/[0.34] truncate">
                 {upstream.length ? `Replies use ${scopeCount} merged context sources` : "Replies use this thread only"}
               </span>
+              <div className="relative ml-auto shrink-0">
+                <button
+                  disabled={busy || savingModel || !models}
+                  onClick={() => {
+                    setModelQuery("");
+                    setModelOpen((o) => !o);
+                  }}
+                  title={modelErr ?? "Model this agent runs on"}
+                  className={`max-w-[160px] truncate border rounded-md px-2 py-1 text-[10.5px] disabled:opacity-50 ${
+                    modelErr ? "border-red-400/50 text-red-300" : "border-white/[0.12] text-white/60 hover:text-white/80"
+                  }`}
+                >
+                  {savingModel ? "saving…" : node.model ?? "default"} ▾
+                </button>
+                {modelOpen && models && (
+                  <>
+                    {/* click-away */}
+                    <div className="fixed inset-0 z-10" onClick={() => setModelOpen(false)} />
+                    <div className="absolute bottom-full right-0 mb-1.5 z-20 w-52 rounded-lg border border-accent/[0.34] bg-panel2 shadow-[0_14px_34px_rgba(0,0,0,.5),0_0_24px_rgba(34,224,240,.08)]">
+                      <input
+                        autoFocus
+                        value={modelQuery}
+                        onChange={(e) => setModelQuery(e.target.value)}
+                        onKeyDown={(e) => {
+                          if (e.key === "Escape") {
+                            e.stopPropagation(); // don't close the chat
+                            setModelOpen(false);
+                          } else if (e.key === "Enter" && filteredModels[0]) {
+                            setModelOpen(false);
+                            pickModel(filteredModels[0]);
+                          }
+                        }}
+                        placeholder="Search models…"
+                        className="w-full bg-transparent border-b border-accent/20 px-2.5 py-1.5 text-[11px] text-text outline-none placeholder:text-white/30"
+                      />
+                      <div className="max-h-[118px] overflow-y-auto py-0.5">
+                        {filteredModels.length === 0 && (
+                          <div className="px-2.5 py-1.5 text-[11px] text-white/30">No matches</div>
+                        )}
+                        {filteredModels.map((m) => (
+                          <button
+                            key={m}
+                            onClick={() => {
+                              setModelOpen(false);
+                              if (m !== node.model) pickModel(m);
+                            }}
+                            className={`block w-full text-left truncate px-2.5 py-1 text-[10.5px] leading-[14px] hover:bg-accent/10 ${
+                              m === node.model ? "text-accent" : "text-white/70"
+                            }`}
+                          >
+                            {m}
+                          </button>
+                        ))}
+                      </div>
+                    </div>
+                  </>
+                )}
+              </div>
               <button
                 onClick={() => onChatChange((prev) => ({ ...prev, useStream: !prev.useStream }))}
                 title="Stream the reply token-by-token (POST /chat/stream) and show tool checkpoints live"
-                className={`ml-auto shrink-0 flex items-center gap-1.5 text-[10.5px] rounded-md px-2 py-1 border transition-colors ${
+                className={`shrink-0 flex items-center gap-1.5 text-[10.5px] rounded-md px-2 py-1 border transition-colors ${
                   useStream ? "border-accent/30 text-accent/80" : "border-white/[0.12] text-white/40 hover:text-white/60"
                 }`}
               >
