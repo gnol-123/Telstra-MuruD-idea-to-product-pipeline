@@ -194,6 +194,11 @@ export async function getToolPresets() {
   return request<ToolPreset[]>("/tool-presets", { auth: true });
 }
 
+// Model names the provider serves, for the chat's model picker.
+export async function listModels() {
+  return request<string[]>("/models", { auth: true });
+}
+
 // Projects
 
 export async function listProjects() {
