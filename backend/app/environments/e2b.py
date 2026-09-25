@@ -11,6 +11,7 @@ teardown and in the provision rollback.
 import asyncio
 import logging
 import posixpath
+from datetime import UTC, datetime
 
 from e2b import (
     AsyncSandbox,
@@ -124,6 +125,9 @@ def build(ctx: EnvContext) -> FunctionToolset:
     RecordingToolset recording 'ok' and lets the turn continue past a shell
     command that failed, a missing file, or a dead sandbox.
     """
+    # Lazy: workspace imports this module.
+    from app.environments import workspace
+
     state: dict = {"sbx": None, "dir_ready": False}
     lock = asyncio.Lock()
     max_out = settings.environment_max_output_chars
@@ -251,6 +255,73 @@ def build(ctx: EnvContext) -> FunctionToolset:
         lines = [f"{p}/"] + [f"  {d}/" for d in dirs] + [f"  {n}  {s} B" for n, s in files]
         return _clip("\n".join(lines), max_out)
 
+    async def next_free_port() -> str:
+        try:
+            sbx = await _sandbox()
+        except Exception as exc:
+            return await _unavailable(exc)
+        try:
+            listening = await workspace.listening_ports(sbx)
+        except Exception as exc:
+            return f"Could not check ports: {type(exc).__name__}: {exc}"[:500]
+        taken = {p.port for p in listening}
+        port = workspace.next_free(workspace.AGENT_PORTS, taken)
+        if port is None:
+            return "No free port between 3000 and 3099."
+        return str(port)
+
+    async def publish_preview(title: str, port: int, path: str = "/") -> str:
+        if not 1 <= port <= 65535 or port == workspace.ENVD_PORT:
+            return f"Invalid port: {port}"
+        title = " ".join((title or "").split())
+        # The user sees the title, not the port. Reject lazy ones.
+        if len(title) < 3 or title.lower().startswith(("port", "http", "localhost")) or title.isdigit():
+            return (
+                "Give a real title: 2 to 5 words naming what the user will see, "
+                "like 'Todo app' or 'Pricing page prototype'. Not a port or a URL."
+            )
+        try:
+            sbx = await _sandbox()
+        except Exception as exc:
+            return await _unavailable(exc)
+
+        deadline = asyncio.get_running_loop().time() + 30.0
+        while True:
+            try:
+                listening = await workspace.listening_ports(sbx)
+                answering = await workspace.web_ports(
+                    sbx, [p for p in listening if p.port == port]
+                )
+            except Exception as exc:
+                return f"Could not check ports: {type(exc).__name__}: {exc}"[:500]
+            if answering:
+                break
+            if asyncio.get_running_loop().time() >= deadline:
+                return (
+                    f"Port {port} is not answering HTTP after 30s. Start it in the "
+                    f"background bound to 0.0.0.0, e.g. nohup ... --host 0.0.0.0 "
+                    f"--port {port} > {workspace.sandbox_temp(f'murud-{port}.log')} 2>&1 & "
+                    "then call publish_preview again."
+                )
+            await asyncio.sleep(1.5)
+
+        entry = {
+            "title": title,
+            "port": port,
+            "path": path or "/",
+            "agent_node_id": ctx.agent_node_id,
+            "created_at": datetime.now(UTC).isoformat(),
+        }
+        try:
+            await workspace.upsert_preview(sbx, entry)
+        except Exception as exc:
+            return f"Could not record preview: {type(exc).__name__}: {exc}"[:500]
+
+        url = f"https://{sbx.get_host(port)}"
+        if path and path != "/":
+            url = url.rstrip("/") + "/" + path.lstrip("/")
+        return f"Preview published: {url}"
+
     ts = FunctionToolset()
     ts.add_function(
         run_command,
@@ -258,8 +329,27 @@ def build(ctx: EnvContext) -> FunctionToolset:
         description=(
             "Run a shell command in this environment. The working directory is your "
             "own directory inside it. Returns exit_code, stdout and stderr. Start "
-            "servers in the background with nohup ... & and tell the user which port "
-            "to preview."
+            "servers in the background with nohup ... & bound to 0.0.0.0, then use "
+            "next_free_port and publish_preview to show it to the user."
+        ),
+    )
+    ts.add_function(
+        next_free_port,
+        name="next_free_port",
+        description=(
+            "Get a free port for a server you are about to start, in the range "
+            "3000-3099. Call this before starting a dev server."
+        ),
+    )
+    ts.add_function(
+        publish_preview,
+        name="publish_preview",
+        description=(
+            "Publish a running server so the user sees it as a live preview beside "
+            "the chat. title is what the user sees in the preview list: 2 to 5 "
+            "words naming the thing, like 'Todo app' or 'Pricing page prototype', "
+            "never a port or URL. Waits up to 30s for the port to answer HTTP. Call "
+            "this after starting a server in the background, not before."
         ),
     )
     ts.add_function(
