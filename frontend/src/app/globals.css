@@ -80,3 +80,105 @@ a:hover {
 .anim-softpulse {
   animation: softpulse 1.6s infinite;
 }
+
+/* Code preview: syntax tokens (highlight.js), in the app's palette —
+   cyan for structure, green for strings, amber for literals. */
+.code-view {
+  font-family: "JetBrains Mono", ui-monospace, monospace;
+  font-size: 12px;
+  line-height: 19px;
+  tab-size: 2;
+}
+.hljs-comment,
+.hljs-quote {
+  color: rgba(255, 255, 255, 0.34);
+  font-style: italic;
+}
+.hljs-keyword,
+.hljs-selector-tag,
+.hljs-built_in,
+.hljs-meta .hljs-keyword,
+.hljs-doctag {
+  color: #22e0f0;
+}
+.hljs-string,
+.hljs-regexp,
+.hljs-addition,
+.hljs-meta .hljs-string {
+  color: #7ee787;
+}
+.hljs-number,
+.hljs-literal,
+.hljs-symbol,
+.hljs-bullet,
+.hljs-attr,
+.hljs-attribute,
+.hljs-variable.constant_ {
+  color: #ffb74d;
+}
+.hljs-title,
+.hljs-title.function_,
+.hljs-title.class_,
+.hljs-section,
+.hljs-selector-id,
+.hljs-selector-class {
+  color: #8ab4ff;
+}
+.hljs-name,
+.hljs-tag {
+  color: #5eeaf6;
+}
+.hljs-type,
+.hljs-params,
+.hljs-property,
+.hljs-variable,
+.hljs-template-variable {
+  color: #e8ecee;
+}
+.hljs-meta,
+.hljs-link,
+.hljs-subst {
+  color: rgba(255, 255, 255, 0.6);
+}
+.hljs-deletion {
+  color: #f87171;
+}
+.hljs-emphasis {
+  font-style: italic;
+}
+.hljs-strong {
+  font-weight: 600;
+}
+
+/* A file an agent just changed flashes once in the tree. */
+@keyframes changed {
+  from {
+    background-color: rgba(126, 231, 135, 0.22);
+  }
+  to {
+    background-color: transparent;
+  }
+}
+.anim-changed {
+  animation: changed 2.4s ease-out;
+}
+
+/* Transparent-image backdrop in the image viewer. */
+.checker {
+  background-color: #0b0f13;
+  background-image: linear-gradient(45deg, #11171d 25%, transparent 25%),
+    linear-gradient(-45deg, #11171d 25%, transparent 25%),
+    linear-gradient(45deg, transparent 75%, #11171d 75%),
+    linear-gradient(-45deg, transparent 75%, #11171d 75%);
+  background-size: 16px 16px;
+  background-position: 0 0, 0 8px, 8px -8px, -8px 0;
+}
+
+/* xterm fills its pane; its own stylesheet is imported in layout.tsx. */
+.terminal-host .xterm {
+  height: 100%;
+  padding: 6px 8px;
+}
+.terminal-host .xterm-viewport {
+  background-color: transparent !important;
+}

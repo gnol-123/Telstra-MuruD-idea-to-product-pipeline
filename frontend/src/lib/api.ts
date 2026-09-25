@@ -16,6 +16,9 @@ import {
   EnvironmentFilesResponse,
   EnvironmentFileContent,
   EnvironmentPreview,
+  EnvironmentPort,
+  ServeResult,
+  EnvironmentFileWrite,
   UsageTotals,
   ChatMessage,
   CancelChatResponse,
@@ -189,6 +192,11 @@ export async function getToolTypes() {
 
 export async function getToolPresets() {
   return request<ToolPreset[]>("/tool-presets", { auth: true });
+}
+
+// Model names the provider serves, for the chat's model picker.
+export async function listModels() {
+  return request<string[]>("/models", { auth: true });
 }
 
 // Projects
@@ -427,6 +435,89 @@ export async function getEnvironmentPreview(
     `/projects/${projectId}/environments/${nodeId}/preview?port=${port}`,
     { auth: true }
   );
+}
+
+// -------------------- Code preview: raw bytes, ports, serving --------------------
+
+// fetch() with the same bearer-token + one-refresh-and-retry contract as
+// request(), for the endpoints that return or take raw bytes rather than
+// JSON. Throws ApiError with the backend's `detail` on a non-2xx.
+async function authedFetch(path: string, init: RequestInit = {}): Promise<Response> {
+  const send = async (token: string) =>
+    fetch(`${API_URL}${path}`, {
+      ...init,
+      headers: { ...(init.headers ?? {}), Authorization: `Bearer ${token}` },
+    });
+  let res = await send(await authToken());
+  if (res.status === 401) res = await send(await refreshAccessToken());
+  if (!res.ok) {
+    const data = await res.json().catch(() => ({}));
+    throw new ApiError(res.status, data?.detail ?? res.statusText);
+  }
+  return res;
+}
+
+function envPath(projectId: string, nodeId: string, rest: string) {
+  return `/projects/${projectId}/environments/${nodeId}${rest}`;
+}
+
+// One file's raw bytes — images in the viewer, and downloads.
+export async function fetchEnvironmentFileBlob(projectId: string, nodeId: string, path: string) {
+  const res = await authedFetch(
+    envPath(projectId, nodeId, `/files/download?path=${encodeURIComponent(path)}`)
+  );
+  return res.blob();
+}
+
+// A directory as a .zip, built inside the sandbox. Dependency folders
+// (node_modules, .git, .venv...) are left out unless asked for.
+export async function fetchEnvironmentArchive(
+  projectId: string,
+  nodeId: string,
+  path: string,
+  includeDependencies = false
+) {
+  const qs = `?path=${encodeURIComponent(path)}${includeDependencies ? "&include_dependencies=true" : ""}`;
+  const res = await authedFetch(envPath(projectId, nodeId, `/files/archive${qs}`));
+  return res.blob();
+}
+
+// Upload, or save an edited file. Raw body, so any file type round-trips.
+export async function writeEnvironmentFile(
+  projectId: string,
+  nodeId: string,
+  path: string,
+  body: Blob | string
+) {
+  const res = await authedFetch(envPath(projectId, nodeId, `/files?path=${encodeURIComponent(path)}`), {
+    method: "PUT",
+    headers: { "Content-Type": "application/octet-stream" },
+    body,
+  });
+  return (await res.json()) as EnvironmentFileWrite;
+}
+
+// Several folders in one request — the code preview's live refresh. A
+// folder that's gone reports `error` instead of failing the batch.
+export async function listManyEnvironmentFiles(projectId: string, nodeId: string, paths: string[]) {
+  return request<{ listings: { path: string; entries: EnvironmentFilesResponse["entries"] | null; error: string | null }[] }>(
+    envPath(projectId, nodeId, "/files/list"),
+    { method: "POST", auth: true, body: { paths } }
+  );
+}
+
+export async function listEnvironmentPorts(projectId: string, nodeId: string) {
+  return request<{ ports: EnvironmentPort[] }>(envPath(projectId, nodeId, "/ports"), { auth: true });
+}
+
+// Start (or reuse) a static server on a directory — or on a file's
+// directory, in which case open_url points straight at the file.
+export async function serveEnvironmentPath(projectId: string, nodeId: string, path: string) {
+  return request<ServeResult>(envPath(projectId, nodeId, "/serve"), {
+    method: "POST",
+    auth: true,
+    body: { path },
+  });
 }
 
 // The terminal is a raw WebSocket, not a JSON endpoint — browsers can't set

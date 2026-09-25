@@ -49,6 +49,10 @@ class Settings(BaseSettings):
     environment_command_timeout_s: int = 120
     environment_max_output_chars: int = 20_000
     environment_max_file_chars: int = 200_000
+    # Code preview downloads. A zip is built inside the sandbox, then streamed.
+    environment_max_archive_bytes: int = 200_000_000
+    # One file uploaded or saved from the code preview.
+    environment_max_upload_bytes: int = 25_000_000
     # Model requests one turn may make. Bounds a tool loop that never converges.
     turn_request_limit: int = 100
     # Shutdown grace period to let detached turns (see workflows._DETACHED) finish.

@@ -38,6 +38,7 @@ import EdgeLayer, { LinkDraft, LAYER_W, LAYER_H, portOf } from "./EdgeLayer";
 import Inspector from "./Inspector";
 import ChatWindow, { ChatState, defaultChatState } from "./ChatWindow";
 import ToolConfigModal from "./ToolConfigModal";
+import WorkspaceWindow from "./workspace/WorkspaceWindow";
 import { BrandMark } from "./Brand";
 
 // Defensive: if the backend ever returns the same row twice (e.g. a join
@@ -80,6 +81,8 @@ export default function MeshCanvas({
   const [chatByNode, setChatByNode] = useState<Record<string, ChatState>>({});
   // Which agent's chat window is open, if any.
   const [chatNodeId, setChatNodeId] = useState<string | null>(null);
+  // The code preview: which environment, and which folder to reveal.
+  const [workspace, setWorkspace] = useState<{ envId: string; path: string | null } | null>(null);
   const canvasRef = useRef<HTMLDivElement | null>(null);
   const pinchDist = useRef<number | null>(null);
   const [zoom, setZoom] = useState(1);
@@ -480,6 +483,7 @@ export default function MeshCanvas({
       setEdges((prev) => prev.filter((e) => !gone.has(e.source_node_id) && !gone.has(e.target_node_id)));
       setSelectedId((sel) => (sel && gone.has(sel) ? null : sel));
       setChatNodeId((c) => (c && gone.has(c) ? null : c));
+      setWorkspace((w) => (w && gone.has(w.envId) ? null : w));
     } catch (e) {
       setError(e instanceof ApiError ? e.message : "Could not delete node");
     } finally {
@@ -677,6 +681,21 @@ export default function MeshCanvas({
     setChatNodeId(id);
   };
 
+  const envNodes = nodes.filter(isEnvironmentNode);
+  // The environment the header's Workspace button opens: the selected one,
+  // else the first one the selected agent uses, else a user environment,
+  // else the shared scratch space every agent writes to.
+  function defaultWorkspace(): { envId: string; path: string | null } | null {
+    if (selectedNode && isEnvironmentNode(selectedNode)) return { envId: selectedNode.id, path: null };
+    if (selectedNode && isAgentNode(selectedNode)) {
+      const e = edges.find((x) => x.kind === "environment" && x.target_node_id === selectedNode.id);
+      if (e) return { envId: e.source_node_id, path: `/home/user/workspace/${selectedNode.id}` };
+    }
+    const env = envNodes.find((n) => n.role !== "scratch") ?? envNodes[0];
+    return env ? { envId: env.id, path: null } : null;
+  }
+  const openWorkspace = (envId: string, path?: string | null) => setWorkspace({ envId, path: path ?? null });
+
   return (
     <div className="h-screen flex flex-col bg-bg text-text select-none">
       <header className="flex-none flex items-center gap-[22px] px-5 h-[60px] border-b border-white/[0.09] z-[5]">
@@ -709,6 +728,21 @@ export default function MeshCanvas({
             {contextLinkCount === 1 ? "" : "s"} · {equippedToolCount} tool{equippedToolCount === 1 ? "" : "s"} ·{" "}
             {environmentNodeCount} env{environmentNodeCount === 1 ? "" : "s"}
           </div>
+          <button
+            onClick={() => {
+              const w = defaultWorkspace();
+              if (w) setWorkspace(w);
+            }}
+            disabled={envNodes.length === 0}
+            title={
+              envNodes.length === 0
+                ? "No environment yet — add an agent or an environment first"
+                : "Browse what agents have built, download it, and preview it running"
+            }
+            className="border border-green/35 text-green hover:bg-green/10 rounded-lg px-3 py-2 text-xs transition-colors disabled:opacity-40 disabled:hover:bg-transparent"
+          >
+            ▣ Workspace
+          </button>
           <button
             onClick={handleTidy}
             className="bg-transparent border border-white/[0.14] text-white/60 hover:text-text hover:border-white/30 rounded-lg px-3 py-2 text-xs transition-colors"
@@ -845,6 +879,7 @@ export default function MeshCanvas({
                   onChipRemove={(edge) => handleUnequipTool(edge)}
                   onClearStale={() => clearStaleFor(node.id)}
                   onOpenChat={isAgentNode(node) ? () => openChat(node.id) : undefined}
+                  onOpenWorkspace={openWorkspace}
                 />
               );
             })}
@@ -879,6 +914,7 @@ export default function MeshCanvas({
           onDeleteEdge={handleDeleteEdge}
           onUnequipTool={handleUnequipTool}
           onNodeUpdated={handleNodeUpdated}
+          onOpenWorkspace={openWorkspace}
         />
       </div>
 
@@ -894,6 +930,20 @@ export default function MeshCanvas({
           onClose={() => setChatNodeId(null)}
           onAfterTurn={reloadCanvas}
           onRefreshEdge={handleRefreshEdge}
+          onOpenWorkspace={openWorkspace}
+          onNodeUpdated={handleNodeUpdated}
+        />
+      )}
+
+      {workspace && envNodes.some((n) => n.id === workspace.envId) && (
+        <WorkspaceWindow
+          projectId={project.id}
+          envs={envNodes}
+          initialEnvId={workspace.envId}
+          initialPath={workspace.path}
+          nodes={nodes}
+          onNodeUpdated={handleNodeUpdated}
+          onClose={() => setWorkspace(null)}
         />
       )}
 

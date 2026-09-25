@@ -661,7 +661,13 @@ what this section covers.
 | `POST` | `/projects/{project_id}/environments/{node_id}/verify` | **yes** | Re-check that the sandbox is reachable |
 | `GET` | `/projects/{project_id}/environments/{node_id}/files` | **yes** | List a directory, one level deep |
 | `GET` | `/projects/{project_id}/environments/{node_id}/files/content` | **yes** | Read one text file |
+| `POST` | `/projects/{project_id}/environments/{node_id}/files/list` | **yes** | Several directories in one request |
+| `GET` | `/projects/{project_id}/environments/{node_id}/files/download` | **yes** | One file, any type, as a download |
+| `GET` | `/projects/{project_id}/environments/{node_id}/files/archive` | **yes** | A directory as a `.zip` |
+| `PUT` | `/projects/{project_id}/environments/{node_id}/files` | **yes** | Write one file from the raw body (upload, save) |
 | `GET` | `/projects/{project_id}/environments/{node_id}/preview` | **yes** | A public URL for a port the sandbox is serving |
+| `GET` | `/projects/{project_id}/environments/{node_id}/ports` | **yes** | Every port something is listening on, with its URL |
+| `POST` | `/projects/{project_id}/environments/{node_id}/serve` | **yes** | Start (or reuse) a static server on a folder |
 | `WS` | `/projects/{project_id}/environments/{node_id}/terminal` | **yes**, via `?token=` | A real shell, streamed both ways |
 
 ### `POST /projects/{project_id}/nodes` (`kind: "environment"`)
@@ -755,12 +761,13 @@ verify.
   "path": "/home/user/workspace",
   "entries": [
     { "name": "app", "type": "dir", "path": "/home/user/workspace/app", "size": 0 },
-    { "name": "notes.md", "type": "file", "path": "/home/user/workspace/notes.md", "size": 42 }
+    { "name": "notes.md", "type": "file", "path": "/home/user/workspace/notes.md", "size": 42,
+      "modified": "2026-09-25T00:40:00+00:00", "symlink_target": null }
   ]
 }
 ```
 
-`type` is `dir`, `file`, or `symlink`. `409` if the environment is not
+A relative `path` resolves against `/home/user/workspace`. `type` is `dir`, `file`, or `symlink`. `409` if the environment is not
 `ready`, naming the actual status. `502` if the sandbox cannot be reached,
 which also marks the node `error` so the canvas reflects it immediately. `404`
 for a path that does not exist.
@@ -776,6 +783,48 @@ for a path that does not exist.
 Capped at `environment_max_file_chars`; `truncated` says whether it was cut.
 `404` if the file does not exist. `415` if it is not valid text.
 
+### `POST /projects/{project_id}/environments/{node_id}/files/list`
+```json
+{ "paths": ["/home/user/workspace", "/home/user/workspace/<agent-id>"] }
+```
+
+Up to 20 directories, read in parallel on one sandbox connection. Built for
+the code preview's live refresh, which re-reads every open folder every few
+seconds. A folder that fails reports its own `error` instead of failing the
+batch:
+
+→ `200`
+```json
+{ "listings": [
+  { "path": "/home/user/workspace", "entries": [ ... ], "error": null },
+  { "path": "/home/user/workspace/gone", "entries": null, "error": "No such directory: ..." }
+] }
+```
+
+### `GET /projects/{project_id}/environments/{node_id}/files/download`
+`?path=` (required)
+
+The file's raw bytes, streamed, with `Content-Disposition: attachment` and a
+`Content-Type` guessed from the name. Any file type, unlike `/files/content`.
+`404` if missing. `422` for a directory (use `/files/archive`).
+
+### `GET /projects/{project_id}/environments/{node_id}/files/archive`
+`?path=` (default the workspace root), `?include_dependencies=` (default `false`)
+
+The directory as a `.zip`, built inside the sandbox and streamed out, then
+deleted. `node_modules`, `.git`, `__pycache__`, `.venv`, `venv`, `.next` and
+`.cache` are left out unless `include_dependencies=true`. Symlinks are
+skipped. `413` over `environment_max_archive_bytes` (200 MB). `422` for a file.
+
+### `PUT /projects/{project_id}/environments/{node_id}/files`
+`?path=` (required). Body: the file's raw bytes (`application/octet-stream`).
+
+Creates parent directories and overwrites. The code preview uses it for both
+uploads and "save" in its editor. `413` over `environment_max_upload_bytes`
+(25 MB).
+
+→ `200` `{ "path": "/home/user/workspace/notes.md", "size": 42 }`
+
 ### `GET /projects/{project_id}/environments/{node_id}/preview`
 `?port=` (required, 1-65535)
 
@@ -786,6 +835,43 @@ Capped at `environment_max_file_chars`; `truncated` says whether it was cut.
 
 Connecting first resumes a paused sandbox, so the link works even if nothing
 has touched the environment in a while.
+
+### `GET /projects/{project_id}/environments/{node_id}/ports`
+
+Every TCP port something is listening on, found from `/proc` inside the
+sandbox, each with its preview URL. E2B's own daemon (49983) is left out. This
+is how the code preview finds a dev server an agent started without anyone
+typing a port.
+
+→ `200`
+```json
+{ "ports": [
+  { "port": 8080, "url": "https://8080-<sandbox-id>.e2b.app", "pid": 311,
+    "process": "python3 -m http.server",
+    "command": "python3 -m http.server 8080 --bind 0.0.0.0 --directory /home/user/workspace/<agent-id>",
+    "local_only": false, "serving": "/home/user/workspace/<agent-id>" }
+] }
+```
+
+`local_only` means it is bound to `127.0.0.1`; the first thing to check if its
+preview won't load. `serving` is set for static servers.
+
+### `POST /projects/{project_id}/environments/{node_id}/serve`
+```json
+{ "path": "/home/user/workspace/<agent-id>/index.html" }
+```
+
+Starts `python3 -m http.server` on the folder (or a file's folder) on the first
+free port from 8080-8099, or reuses one already serving that folder. Waits up
+to 5s for it to listen.
+
+→ `200`: a `ports` entry plus `reused` and `open_url` (the port's URL plus the
+file, if one was asked for). `404` for a missing path. `409` if 8080-8099 are
+all taken.
+
+The browsing endpoints above reuse one sandbox connection for ~40s instead of
+reconnecting per request, and retry once on a fresh connection if it went
+stale.
 
 ### `WS /projects/{project_id}/environments/{node_id}/terminal`
 `?token=<access_token>&cols=&rows=`
