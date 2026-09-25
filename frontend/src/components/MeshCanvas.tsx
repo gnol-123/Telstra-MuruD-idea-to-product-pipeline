@@ -50,6 +50,9 @@ function dedupeById<T extends { id: string }>(items: T[]): T[] {
   return [...map.values()];
 }
 
+// Id prefix for a dropped card the backend hasn't confirmed yet.
+const PENDING_PREFIX = "pending-";
+
 export default function MeshCanvas({
   project,
   onBack,
@@ -312,15 +315,25 @@ export default function MeshCanvas({
   }
 
   async function handleAddAgent(agentSlug: string, pos?: { x: number; y: number }) {
+    const offset = nodes.length * 40;
+    const position_x = pos?.x ?? 120 + offset;
+    const position_y = pos?.y ?? 100 + offset;
+    // Card lands now with a spinner; swapped for the real row on confirm.
+    const tempId = `${PENDING_PREFIX}${crypto.randomUUID()}`;
+    const placeholder: ProjectNode = {
+      kind: "agent",
+      id: tempId,
+      project_id: project.id,
+      name: agentTypes.find((t) => t.slug === agentSlug)?.name ?? agentSlug,
+      agent_slug: agentSlug,
+      tool_policy: "auto",
+      position_x,
+      position_y,
+    };
+    setNodes((n) => [...n, placeholder]);
     try {
-      const offset = nodes.length * 40;
-      const node = await mutating(() =>
-        createAgentNode(project.id, agentSlug, {
-          position_x: pos?.x ?? 120 + offset,
-          position_y: pos?.y ?? 100 + offset,
-        })
-      );
-      setNodes((n) => dedupeById([...n, node]));
+      const node = await mutating(() => createAgentNode(project.id, agentSlug, { position_x, position_y }));
+      setNodes((n) => dedupeById(n.map((x) => (x.id === tempId ? node : x))));
       setSelectedId(node.id);
 
       // "kind='agent' now provisions the agent type's default_presets": one
@@ -337,6 +350,7 @@ export default function MeshCanvas({
         );
       }
     } catch (e) {
+      setNodes((n) => n.filter((x) => x.id !== tempId));
       setError(e instanceof ApiError ? e.message : "Could not add agent");
     }
   }
@@ -866,6 +880,7 @@ export default function MeshCanvas({
                   staleCount={inbound.filter((e) => e.is_stale).length}
                   busy={!!chatByNode[node.id]?.busy}
                   deleting={deletingIds.has(node.id)}
+                  creating={node.id.startsWith(PENDING_PREFIX)}
                   zoom={zoom}
                   attachedEnvironments={isAgentNode(node) ? attachedEnvsByAgent.get(node.id) ?? [] : undefined}
                   onSelect={() => setSelectedId(node.id)}

@@ -63,7 +63,8 @@ export default function NodeCard({
   inboundCount,
   staleCount,
   busy,
-  deleting,
+  deleting: deletingProp,
+  creating,
   zoom,
   onSelect,
   onDragMove,
@@ -94,6 +95,8 @@ export default function NodeCard({
   busy?: boolean;
   // Delete is in flight: card dims, x becomes a spinner.
   deleting?: boolean;
+  // Create is in flight: same look as deleting until the backend confirms.
+  creating?: boolean;
   // Canvas scale; pointer deltas are divided by it.
   zoom: number;
   onSelect: () => void;
@@ -116,6 +119,7 @@ export default function NodeCard({
   // Opens the code preview on an environment, optionally at a folder.
   onOpenWorkspace?: (envId: string, path?: string | null) => void;
 }) {
+  const deleting = deletingProp || creating;
   const agent = isAgentNode(node);
   const env = isEnvironmentNode(node);
   // Native HTML5 drag-over state (a tool/preset card being dragged from the
@@ -263,7 +267,7 @@ export default function NodeCard({
             onDelete();
           }}
           title={
-            deleting ? "Deleting..." : agent ? "Delete agent" : env ? "Delete environment" : "Delete tool"
+            creating ? "Creating..." : deleting ? "Deleting..." : agent ? "Delete agent" : env ? "Delete environment" : "Delete tool"
           }
           className="shrink-0 text-white/[0.28] hover:text-white/70 text-[13px] px-0.5 leading-none disabled:hover:text-white/[0.28]"
         >
