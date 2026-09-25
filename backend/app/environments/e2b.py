@@ -304,6 +304,14 @@ def build(ctx: EnvContext) -> FunctionToolset:
                 )
             await asyncio.sleep(1.5)
 
+        if answering[0].local_only:
+            return (
+                f"Not published: port {port} is bound to localhost only, so the "
+                "preview can't reach it. Restart the server bound to 0.0.0.0 (e.g. "
+                "--host 0.0.0.0) and allow any Host header, then call "
+                "publish_preview again."
+            )
+
         entry = {
             "title": title,
             "port": port,
