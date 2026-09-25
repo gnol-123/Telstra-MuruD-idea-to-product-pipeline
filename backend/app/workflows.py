@@ -443,6 +443,15 @@ def _turn_from_result(result, model: str) -> AgentTurn:
 
 
 @dataclass(frozen=True)
+class TurnSetup:
+    """What a turn's ``setup`` hands back: built inside the task, so it is cancellable."""
+
+    instructions: str | None
+    toolsets: list
+    on_paused: Callable[[DeferredToolRequests, list[ModelMessage]], Awaitable[None]] | None
+
+
+@dataclass(frozen=True)
 class ResumeInput:
     """A parked run to continue, and the bubble it keeps appending to."""
 
@@ -628,11 +637,15 @@ async def start_turn(
     on_paused: Callable[[DeferredToolRequests, list[ModelMessage]], Awaitable[None]] | None = None,
     resume: ResumeInput | None = None,
     sender_node_id: str | None = None,
+    setup: Callable[[], Awaitable[TurnSetup]] | None = None,
 ) -> RunningTurn:
     """Register and start one turn. Raises ``runs.TurnBusy`` before writing anything.
 
     Detached: the model run and every write live in ``run.task``, which outlives
     any reader. Readers attach through ``attach_events``.
+
+    ``setup``, when given, replaces instructions/toolsets/on_paused and runs
+    inside the task: the rows exist and cancel works while tools are built.
     """
     from anyio import to_thread
 
@@ -667,11 +680,11 @@ async def start_turn(
         runs.unregister(conversation_id)
         raise
 
-    workflow_id = str(uuid4()) if durable and not toolsets and resume is None else None
-    run.dbos_workflow_id = workflow_id
     flusher = _Flusher(repo, run)
 
     async def drive() -> None:
+        nonlocal instructions, toolsets, on_paused
+
         async def settle(
             *,
             status: str,
@@ -696,6 +709,15 @@ async def start_turn(
 
         turn: AgentTurn | None = None
         try:
+            if setup is not None:
+                built = await setup()
+                instructions, toolsets, on_paused = (
+                    built.instructions,
+                    built.toolsets,
+                    built.on_paused,
+                )
+            workflow_id = str(uuid4()) if durable and not toolsets and resume is None else None
+            run.dbos_workflow_id = workflow_id
             async for event, payload in _stream_agent(
                 system_prompt,
                 model,

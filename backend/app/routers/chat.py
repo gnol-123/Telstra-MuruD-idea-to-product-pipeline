@@ -22,6 +22,7 @@ from app.services import runs
 from app.services.turns import prepare_turn
 from app.workflows import (
     ResumeInput,
+    TurnSetup,
     attach_events,
     cancel_paused,
     cancel_turn,
@@ -179,6 +180,23 @@ def _make_on_paused(
     return on_paused
 
 
+def _setup(turn_repos, node, conversation_id: str):
+    """Build tools inside the turn's task: slow, and must not delay the rows or block cancel."""
+
+    async def setup() -> TurnSetup:
+        prepared = await prepare_turn(turn_repos, node, conversation_id)
+        on_paused = _make_on_paused(
+            turn_repos.tool,
+            project_id=node.project_id,
+            conversation_id=conversation_id,
+            agent_node_id=node.id,
+            owner_by_tool=prepared.tools.owner_by_tool,
+        )
+        return TurnSetup(prepared.instructions, prepared.toolsets, on_paused)
+
+    return setup
+
+
 def _sse(event: str, payload: dict) -> str:
     return f"event: {event}\ndata: {json.dumps(payload, default=str)}\n\n"
 
@@ -214,14 +232,6 @@ async def chat(
     conversation_id = await to_thread.run_sync(
         lambda: trepo.get_or_create_conversation(node.id, node.project_id)
     )
-    prepared = await prepare_turn(turn_repos, node, conversation_id)
-    on_paused = _make_on_paused(
-        tool_repo,
-        project_id=node.project_id,
-        conversation_id=conversation_id,
-        agent_node_id=node.id,
-        owner_by_tool=prepared.tools.owner_by_tool,
-    )
 
     try:
         turn = await run_turn(
@@ -236,9 +246,7 @@ async def chat(
             client_token=req.client_token,
             # Only the LLM call becomes durable; persistence is identical either way.
             durable=bool(settings.dbos_database_url),
-            instructions=prepared.instructions,
-            toolsets=prepared.toolsets,
-            on_paused=on_paused,
+            setup=_setup(turn_repos, node, conversation_id),
         )
     except runs.TurnBusy:
         raise _BUSY from None
@@ -283,14 +291,6 @@ async def chat_stream(
     conversation_id = await to_thread.run_sync(
         lambda: trepo.get_or_create_conversation(node.id, node.project_id)
     )
-    prepared = await prepare_turn(turn_repos, node, conversation_id)
-    on_paused = _make_on_paused(
-        tool_repo,
-        project_id=node.project_id,
-        conversation_id=conversation_id,
-        agent_node_id=node.id,
-        owner_by_tool=prepared.tools.owner_by_tool,
-    )
 
     try:
         run = await start_turn(
@@ -304,9 +304,7 @@ async def chat_stream(
             tool_repo=tool_repo,
             client_token=req.client_token,
             durable=bool(settings.dbos_database_url),
-            instructions=prepared.instructions,
-            toolsets=prepared.toolsets,
-            on_paused=on_paused,
+            setup=_setup(turn_repos, node, conversation_id),
         )
     except runs.TurnBusy:
         raise _BUSY from None
@@ -448,15 +446,6 @@ async def chat_resume(
         events = close_dangling_calls(awaiting.tool_calls, status="denied", only=denied)
         awaiting = dataclasses.replace(awaiting, tool_calls=events)
 
-    prepared = await prepare_turn(turn_repos, node, conversation_id)
-    on_paused = _make_on_paused(
-        tool_repo,
-        project_id=node.project_id,
-        conversation_id=conversation_id,
-        agent_node_id=node.id,
-        owner_by_tool=prepared.tools.owner_by_tool,
-    )
-
     try:
         run = await start_turn(
             trepo,
@@ -467,9 +456,7 @@ async def chat_resume(
             node_id=node.id,
             project_id=node.project_id,
             tool_repo=tool_repo,
-            instructions=prepared.instructions,
-            toolsets=prepared.toolsets,
-            on_paused=on_paused,
+            setup=_setup(turn_repos, node, conversation_id),
             resume=ResumeInput(history=history, deferred=deferred_results, message=awaiting),
         )
     except runs.TurnBusy:
