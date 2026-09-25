@@ -789,6 +789,13 @@ async def _verify_all(tool_ids: list[str], tool_repo: ToolRepo) -> None:
             await _verify_tool_node(tool_id, tool_repo)
         except Exception:
             log.exception("background verify failed for tool node %s", tool_id)
+            # Never leave it 'pending': the canvas spins its agent until it isn't.
+            try:
+                await to_thread.run_sync(
+                    lambda: tool_repo.set_node_status(tool_id, "error", "Verification failed.")
+                )
+            except Exception:
+                log.exception("could not mark tool node %s as error", tool_id)
 
     async with anyio.create_task_group() as tg:
         for tool_id in tool_ids:

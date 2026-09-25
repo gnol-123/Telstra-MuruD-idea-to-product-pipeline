@@ -333,15 +333,19 @@ export default function MeshCanvas({
     setNodes((n) => [...n, placeholder]);
     try {
       const node = await mutating(() => createAgentNode(project.id, agentSlug, { position_x, position_y }));
-      setNodes((n) => dedupeById(n.map((x) => (x.id === tempId ? node : x))));
-      setSelectedId(node.id);
 
       // "kind='agent' now provisions the agent type's default_presets": one
       // tool node + tool edge per preset, created server-side alongside the
       // agent. The response above is still just the agent's own node, so
-      // reload to pick up whatever else the backend just created.
+      // reload to pick up whatever else the backend just created. Placeholder
+      // goes only after, so the spinner hands straight off to pending tools.
       const agentType = agentTypes.find((t) => t.slug === agentSlug);
       await reloadCanvas();
+      setNodes((n) => {
+        const rest = n.filter((x) => x.id !== tempId);
+        return rest.some((x) => x.id === node.id) ? rest : [...rest, node];
+      });
+      setSelectedId(node.id);
       if (agentType?.default_presets && agentType.default_presets.length > 0) {
         setNotice(
           `${agentType.name} came equipped with ${agentType.default_presets.length} default tool${
@@ -880,7 +884,11 @@ export default function MeshCanvas({
                   staleCount={inbound.filter((e) => e.is_stale).length}
                   busy={!!chatByNode[node.id]?.busy}
                   deleting={deletingIds.has(node.id)}
-                  creating={node.id.startsWith(PENDING_PREFIX)}
+                  creating={
+                    node.id.startsWith(PENDING_PREFIX) ||
+                    // Default tools still verifying in the background.
+                    (attachedToolsByAgent.get(node.id) ?? []).some((t) => t.tool.status === "pending")
+                  }
                   zoom={zoom}
                   attachedEnvironments={isAgentNode(node) ? attachedEnvsByAgent.get(node.id) ?? [] : undefined}
                   onSelect={() => setSelectedId(node.id)}
