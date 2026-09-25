@@ -16,9 +16,16 @@ from app.environments.registry import get_spec
 from app.repositories.environment_repo import EnvNode
 from app.tools.assembly import AssembledTools
 
-# The four tools every environment exposes. Named here so the approval
-# backfill can register their prefixed forms without building a toolset.
-ENV_TOOL_NAMES = ("run_command", "read_file", "write_file", "list_files")
+# The tools every environment exposes. Named here so the approval backfill
+# can register their prefixed forms without building a toolset.
+ENV_TOOL_NAMES = (
+    "run_command",
+    "read_file",
+    "write_file",
+    "list_files",
+    "next_free_port",
+    "publish_preview",
+)
 
 _SAFE = re.compile(r"[^a-z0-9_]+")
 
@@ -136,12 +143,14 @@ def environment_note(described: list[tuple[EnvNode, str]], agent_node_id: str) -
 
     lines = [
         "You can execute code in these environments. Each exposes run_command, "
-        "read_file, write_file and list_files under the prefix shown. Relative "
-        f"paths resolve against your own directory, {WORKSPACE_ROOT}/{agent_node_id}. "
-        f"Other agents' directories under {WORKSPACE_ROOT} are readable. "
-        "The user sees these files live in a code preview, and anything you serve "
-        "on a port appears there as a running preview automatically: start servers "
-        "in the background, bound to 0.0.0.0."
+        "read_file, write_file, list_files, next_free_port and publish_preview "
+        f"under the prefix shown. Relative paths resolve against your own "
+        f"directory, {WORKSPACE_ROOT}/{agent_node_id}. Other agents' directories "
+        f"under {WORKSPACE_ROOT} are readable. "
+        "The user sees these files live in a code preview. To show a running "
+        "server, get a port with next_free_port, start it in the background bound "
+        "to 0.0.0.0, then call publish_preview with a short title naming what it "
+        "shows ('Todo app', not 'port 3000') so it appears beside the chat."
     ]
     for node, prefix in described:
         purpose = node.config.get("description") or (
