@@ -1,142 +1,102 @@
-# Agent Mesh
+<p align="center">
+  <img src="docs/readme/hero.svg" alt="Agent Mesh: a team of AI agents on a canvas, joined by arrows" width="100%">
+</p>
 
-**Telstra Muru-D, Team 2.** An idea-to-product pipeline where you build your team of AI agents on a canvas, draw arrows between them, and watch a vague idea turn into research, a scoped brief, a design, and running code in a sandbox you can open in your browser.
+<p align="center">
+  <img src="https://img.shields.io/badge/Next.js-16-000000?style=flat-square&logo=nextdotjs" alt="Next.js 16">
+  <img src="https://img.shields.io/badge/React-19-20232a?style=flat-square&logo=react" alt="React 19">
+  <img src="https://img.shields.io/badge/FastAPI-Python_3.12-009688?style=flat-square&logo=fastapi&logoColor=white" alt="FastAPI">
+  <img src="https://img.shields.io/badge/Pydantic_AI-agents-e92063?style=flat-square&logo=pydantic&logoColor=white" alt="Pydantic AI">
+  <img src="https://img.shields.io/badge/Supabase-auth_%2B_postgres-3ecf8e?style=flat-square&logo=supabase&logoColor=white" alt="Supabase">
+  <img src="https://img.shields.io/badge/E2B-sandboxes-ff8800?style=flat-square" alt="E2B">
+  <img src="https://img.shields.io/badge/Railway-deployed-0b0d0e?style=flat-square&logo=railway" alt="Railway">
+</p>
 
-![The canvas: a pipeline of agents joined by context arrows](docs/screenshots/canvas.png)
-
-Most agent tools give you one chat box. This one gives you a whiteboard. Every card is an agent with its own job, its own tools and its own memory. Every arrow says "this agent should know what that one learned." You can talk to any of them directly, or hand the whole thing to the Orchestrator and let it staff the board for you.
-
----
-
-## A five-minute tour
-
-If you only read one section, read this one. It walks through what you actually see, in the order you'll see it.
-
-### 1. The canvas
-
-After logging in you pick a project, and each project is its own canvas. Along the top is the **agent library**: Orchestrator, Market Research, Project Scoping, Coding and UX/UI Design. Drag one onto the board (or just click it) and it spins up with a sensible set of default tools already attached.
-
-The little cyan dots on either side of a card are **ports**. Drag from the right-hand port of one card to the left-hand port of another and you've made a context arrow. That's the whole wiring model.
-
-### 2. The inspector
-
-![Agent inspector showing tools, tool policy and environments](docs/screenshots/inspector.png)
-
-Click a card and the right-hand panel shows what that agent is made of. Three things are worth knowing about here:
-
-- **Tool policy.** "Run tools automatically" lets the agent act on its own. Switch it to "Ask before every tool call" and each one pauses and waits for you to approve or deny it.
-- **Tools.** Skills (instruction packs like *Test Driven Development* or *Plain Writing*), web tools (Brave Search, Web Fetch), and MCP connections (GitHub, Gmail, Context7, or any MCP server URL you give it). Drag a tool onto a card to equip it.
-- **Environments.** An E2B cloud sandbox the agent can read, write and run code in.
-
-### 3. The chat
-
-![Chat window with context sources in scope](docs/screenshots/chat.png)
-
-Double-click an agent, or hit **Open chat**. The strip of chips at the top is everything this agent can "see" right now: which other agents feed it context, which sandboxes it has, which tools it holds.
-
-See the orange **STALE** chip on Project Scoping? That means Project Scoping has said more since its summary was last taken. The agent still uses the old summary (an old summary beats none), but you get a button to refresh it. Nothing re-summarises behind your back, because a chatty agent quietly running up model costs on every neighbour is not a fun surprise.
-
-Replies stream live. You can stop a turn mid-answer, close the tab, come back later, and the turn is still there, because it runs on the server independently of your browser.
-
-### 4. The workspace
-
-![Files and live preview next to the chat](docs/screenshots/workspace.png)
-
-When an agent has a sandbox, **Files & preview** opens a side panel. Files the agent writes show up as it writes them. If it built something with an HTML page, you get a live preview right there. In this shot the Coding agent was asked to "build me a calculator," and that's the running result.
-
-![Full workspace with code, live preview and terminal](docs/screenshots/full-workspace.png)
-
-**Open full workspace** gives you the full IDE-ish view: file explorer, code viewer, preview pane on whatever port the agent is serving, a real terminal into the sandbox, and a **Download .zip** button when you want to take the code home.
+<p align="center">
+  <b>You bring the idea. A team of AI agents does the research, writes the brief, sketches the design and builds the thing.</b><br>
+  <sub>And you watch it all happen on one canvas.</sub>
+</p>
 
 ---
 
-## How it works, without the jargon
+## What is this?
 
-Here's the mental model. Hold on to these three ideas and the rest of the codebase will make sense.
+Most AI tools give you a single chat box. Agent Mesh gives you a whiteboard instead.
 
-**Boxes are rows.** Every card on the canvas is one row in a `nodes` table. Every arrow is one row in `edges`. The canvas is just a picture of the database.
+Each card on the board is an AI agent with one job. One researches the market, one turns that into a project brief, one designs the screens, one writes the code. You connect them with arrows, and an arrow simply means *"you should know what that agent found out."*
 
-**Arrows are pulled, not pushed.** Drawing an arrow doesn't send anything anywhere. When an agent starts a turn, it asks "what points at me?" and reads the summaries stored on those arrows. Nothing is copied between conversations.
+You can chat with any agent on its own. You can also hand the whole idea to the **Orchestrator**, and it will add the agents it thinks you need, wire them up and get them going.
 
-**The model only sees function names.** When an agent gets a tool, the model is handed a name, a description and typed arguments. It never sees a URL, an API key or a node id. Secrets live in Supabase Vault and only get decrypted by the backend, in memory, for the one call that needs them.
+When the Coding agent builds something, it builds it for real, inside a cloud sandbox. You can open its files, watch a live preview, use a terminal, and download the whole thing as a zip.
 
-```mermaid
-flowchart LR
-    A[Browser<br/>Next.js canvas] -->|JSON + bearer token| B[routers/<br/>HTTP in, JSON out]
-    B --> C[tools/ + workflows<br/>assemble tools, run a turn]
-    C --> D[repositories/<br/>every SQL query lives here]
-    D --> E[(Postgres + RLS<br/>Supabase + Vault)]
-    C -->|prompt, history, tool schemas| F[LLM<br/>via pydantic-ai]
-    C -->|a tool runs here| G[Outside world<br/>Brave, MCP, E2B]
-```
+## A quick look around
 
-Each layer only talks to its neighbour. A router never touches the database, and a repository has no idea HTTP exists. The model and the outside world never get a database connection.
+### The canvas
 
-### A few design choices that might surprise you
+![The canvas](docs/screenshots/canvas.png)
 
-- **You can't read your own API keys back.** You can set a tool's key, but only the backend's service role can decrypt it. A database dump yields nothing useful.
-- **There is no 403.** Anything you don't own returns 404, so the API never confirms that someone else's project exists. Row Level Security in Postgres does the filtering, and the repositories filter again by owner as a second lock.
-- **A broken tool doesn't break the conversation.** If a tool fails to build, the agent is told that capability is unavailable and carries on. If a tool fails mid-call, the error is handed to the model as text so it can try something else.
-- **Approvals survive a restart.** When a tool call is waiting for your approval, the half-finished run is serialised into Postgres. You can redeploy the backend, click Approve ten minutes later, and the run picks up where it stopped.
+Each project gets its own canvas. The ready-made agents sit along the top: drag one onto the board and it arrives with a sensible set of tools already attached. To connect two agents, drag from the dot on the right of one card to the dot on the left of another.
 
-For the long version with diagrams, open [docs/SYSTEM_GUIDE.html](docs/SYSTEM_GUIDE.html) in a browser.
+### The inspector
 
----
+<img src="docs/screenshots/inspector.png" alt="Agent inspector" width="100%">
 
-## Check your understanding
+Click a card to see what it's made of. You'll find its **tools** (web search, page fetching, GitHub, Gmail, and "skills" like *Test Driven Development* or *Plain Writing*), its **sandboxes**, and its **tool policy**. Set the policy to *Ask before every tool call* if you'd like to approve each action yourself.
 
-A quick self-test. Have a guess, then click to reveal. If you get all five, you understand this system better than most people who've only read the code.
+### The chat
 
-<details>
-<summary><b>1.</b> You draw an arrow from Market Research to Project Scoping. What gets sent to Project Scoping at that moment?</summary>
+![Chat window](docs/screenshots/chat.png)
 
-<br>
+Double-click an agent to talk to it. The chips along the top show everything the agent can see right now: the agents feeding it, its sandboxes and its tools. Replies stream in as they're written, and you can stop one halfway through.
 
-**Nothing.** Arrows are pulled, not pushed. The next time Project Scoping takes a turn, it looks up every arrow pointing at it and reads the summary stored on each one. The summary is passed as per-turn instructions, not stitched into its own transcript.
+An orange **STALE** chip means one of the agents feeding this one has said more since it was last summarised. You decide when to refresh it.
 
-</details>
+### Files and live preview
 
-<details>
-<summary><b>2.</b> Market Research keeps chatting after the summary was taken. Does Project Scoping get the new stuff automatically?</summary>
+![Files and preview](docs/screenshots/workspace.png)
 
-<br>
+Once an agent has a sandbox, **Files & preview** opens right next to the chat. Files appear as the agent writes them, and anything with a web page shows up as a live preview. That calculator? We asked the Coding agent to *"build me a calculator"*.
 
-**No.** The arrow goes **stale** (the orange chip). Staleness is calculated, not stored: the backend compares the message number the summary was taken at against the source conversation's latest one. The old summary is still used until someone hits refresh. That's deliberate, so model costs never climb silently.
+### The full workspace
 
-</details>
+![Full workspace](docs/screenshots/full-workspace.png)
 
-<details>
-<summary><b>3.</b> An agent is set to "Ask before every tool call". It requests a web search, then the backend redeploys before you click Approve. What happens?</summary>
-
-<br>
-
-**The search still runs when you approve.** The paused run, including the model's pending tool call, was saved to Postgres before the first request even returned. Resume rebuilds the tools and carries on. (Pauses older than an hour are cleared, and you'll get a 409.)
-
-</details>
-
-<details>
-<summary><b>4.</b> You try to open a project id that belongs to another user. What status code do you get?</summary>
-
-<br>
-
-**404, not 403.** A 403 would confirm the project exists. Postgres Row Level Security simply returns no rows, and the router reports "not found".
-
-</details>
-
-<details>
-<summary><b>5.</b> Your Brave Search API key is wrong. When do you find out?</summary>
-
-<br>
-
-**When you save the tool config, not halfway through a conversation.** Each tool kind has a cheap `build()` that runs every turn and a `verify()` that is allowed to hit the network. Verify runs on save, so a bad key shows up as a red card straight away.
-
-</details>
+**Open full workspace** gives you a proper editor view: file explorer, code, live preview, and a real terminal inside the sandbox. Hit **Download .zip** when you want to take the project with you.
 
 ---
 
-## Running it locally
+## How it works
 
-You'll need Python 3.12+, Node 20+, and accounts for Supabase and E2B. For the LLM, the default provider is Ollama's hosted API; Gemini also works.
+### Arrows share what an agent knows
+
+<img src="docs/readme/context.svg" alt="How context moves along an arrow" width="100%">
+
+Drawing an arrow doesn't copy anything straight away. The arrow keeps a short **summary** of the source agent's conversation. Whenever the agent on the other end replies, it reads that summary first, so it answers as if it had been in the room.
+
+If the source agent keeps talking, the summary falls behind and the arrow turns orange. It never refreshes on its own, because that would quietly spend money on every message. You click refresh when you want the new version.
+
+### What happens when you hit Send
+
+<img src="docs/readme/turn.svg" alt="The path of one message" width="100%">
+
+The agent reads what its arrows tell it and then starts answering. Partway through it might decide it needs a tool: a web search, a page fetch, a file in its sandbox. The tool runs, the result goes back to the agent, and it keeps writing. This can happen several times in one reply.
+
+If you've set an agent to *ask first*, it stops at the tool and waits for your OK. That wait is saved in the database, not in memory, so you can approve it minutes later, even after the server has restarted, and it picks up exactly where it left off.
+
+### A few things you get for free
+
+- **Your keys stay secret.** API keys go into Supabase Vault, encrypted. The agent never sees them, you can't read them back, and a database dump doesn't reveal them.
+- **You only see your own stuff.** Postgres itself filters every row by owner. Someone else's project doesn't return "forbidden", it returns "not found", as if it doesn't exist.
+- **One broken tool doesn't break the chat.** If a tool is misconfigured, the agent is told it's unavailable and carries on without it. If a tool fails mid-call, the agent sees the error and can try something else.
+- **Bad keys show up early.** Tools are checked when you save them, so a typo'd API key turns the card red right away instead of failing halfway through a conversation.
+
+For the deep dive with every diagram, open [docs/SYSTEM_GUIDE.html](docs/SYSTEM_GUIDE.html) in a browser. The full HTTP API is in [docs/API.md](docs/API.md).
+
+---
+
+## Run it yourself
+
+You'll need **Python 3.12+**, **Node 20+**, a **Supabase** project and an **E2B** account. The LLM runs through Ollama's hosted API by default, and Gemini works too.
 
 **1. Backend**
 
@@ -145,10 +105,10 @@ cd backend
 python -m venv .venv
 source .venv/bin/activate        # Windows: .venv\Scripts\activate
 pip install -r requirements.txt
-cp .env.example .env             # then fill it in, see below
+cp .env.example .env             # fill in your keys (table below)
 ```
 
-**2. Database.** Point `DBOS_DATABASE_URL` at your Supabase Postgres, then apply the migrations. The dry run applies everything and rolls it back, so you can check first.
+**2. Database.** Set `DBOS_DATABASE_URL` to your Supabase Postgres, then apply the migrations. `--dry-run` applies everything, shows you the result and rolls it back.
 
 ```bash
 python migrations/apply.py --dry-run
@@ -163,56 +123,50 @@ npm install
 cp .env.example .env.local       # NEXT_PUBLIC_API_URL=http://localhost:8000
 ```
 
-**4. Run both** from the repo root:
+**4. Start both** from the repo root:
 
 ```bash
 npm install
 npm run dev
 ```
 
-Open http://localhost:3000. Keep the frontend on port 3000: it's the redirect URL Supabase auth is set up to allow.
+Then open **http://localhost:3000**. Keep it on port 3000, because that's the address Supabase sign-in redirects back to.
 
-### Environment variables
-
-The ones you'll actually need to fill in:
+### Keys you'll need
 
 | Variable | What it's for |
 |---|---|
 | `SUPABASE_URL`, `SUPABASE_KEY` | Your Supabase project and its publishable key |
-| `SUPABASE_SERVICE_KEY` | Decrypting tool secrets from Vault. Backend only, never the frontend |
-| `DBOS_DATABASE_URL` | Postgres connection for migrations and durable runs |
-| `LLM_PROVIDER`, `OLLAMA_API_KEY` | The default model provider (`ollama`) |
-| `GEMINI_API_KEY` | If you switch the provider to Gemini |
-| `E2B_API_KEY` | Sandboxes for the Coding agent and friends |
-| `BRAVE_API_KEY` | Web search tool |
-| `GOOGLE_OAUTH_CLIENT_ID`, `GOOGLE_OAUTH_CLIENT_SECRET`, `OAUTH_STATE_SECRET` | Google sign-in and the Gmail tool connect flow |
+| `SUPABASE_SERVICE_KEY` | Unlocks tool secrets from Vault. Backend only, never the frontend |
+| `DBOS_DATABASE_URL` | Postgres connection for migrations and saved runs |
+| `LLM_PROVIDER`, `OLLAMA_API_KEY` | The model provider (default `ollama`) |
+| `GEMINI_API_KEY` | Only if you switch the provider to Gemini |
+| `E2B_API_KEY` | Cloud sandboxes for the agents |
+| `BRAVE_API_KEY` | Web search |
+| `GOOGLE_OAUTH_CLIENT_ID`, `GOOGLE_OAUTH_CLIENT_SECRET`, `OAUTH_STATE_SECRET` | Google sign-in and connecting Gmail |
 
-The full list, with defaults, lives in [backend/app/config.py](backend/app/config.py). Everything boots without an LLM key: only chat fails, `/health` stays green.
-
-Interactive API docs are at http://localhost:8000/docs once the backend is running.
+Every setting and its default lives in [backend/app/config.py](backend/app/config.py). The server starts fine without a model key: only chat fails, and `/health` stays green. The interactive API docs are at http://localhost:8000/docs.
 
 ---
 
 ## Where things live
 
 ```
-backend/
-  app/
-    routers/        HTTP endpoints: auth, projects, chat, environments, oauth
-    services/       agent construction, turn runner, Supabase clients
-    tools/          skills, API tools (Brave, Web Fetch), MCP, the canvas tool
-    environments/   E2B sandbox lifecycle, file access, previews
-    repositories/   every database query
-  migrations/       plain SQL, applied in order by apply.py
-frontend/
-  src/components/   canvas, node cards, chat window, inspector
-  src/components/workspace/   file tree, code view, preview, terminal
-  src/lib/api.ts    one function per backend endpoint
-docs/
-  API.md            the full HTTP API
-  SYSTEM_GUIDE.html the deep dive, with diagrams
+backend/app/
+  routers/        the HTTP endpoints: auth, projects, chat, environments, oauth
+  services/       builds agents and runs each turn
+  tools/          skills, web tools, MCP connections, and the Orchestrator's canvas tool
+  environments/   E2B sandboxes: files, terminal, previews
+  repositories/   every database query, and nothing else
+backend/migrations/   plain SQL, applied in order by apply.py
+frontend/src/
+  components/             canvas, cards, chat, inspector
+  components/workspace/   file tree, code view, preview, terminal
+  lib/api.ts              one function per backend endpoint
 ```
 
-## Built with
+---
 
-FastAPI and [Pydantic AI](https://ai.pydantic.dev/) on the backend, Next.js 16 and React 19 on the front, Supabase for auth, Postgres and secret storage, E2B for sandboxes, and DBOS for durable turns. Deployed on Railway. CI runs ruff, pytest, bandit and pip-audit on every push.
+<p align="center">
+  <sub>Built by Team 2 for the Telstra Muru-D program. CI runs ruff, pytest, bandit and pip-audit on every push.</sub>
+</p>
