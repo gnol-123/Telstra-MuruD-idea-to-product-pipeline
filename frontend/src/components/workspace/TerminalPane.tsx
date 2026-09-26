@@ -56,13 +56,13 @@ export default function TerminalPane({
         convertEol: false,
         scrollback: 5000,
         theme: {
-          background: "#05080a",
-          foreground: "#e8ecee",
-          cursor: "#22e0f0",
-          selectionBackground: "rgba(34,224,240,0.25)",
-          cyan: "#22e0f0",
+          background: "#080C1C",
+          foreground: "#F5EDE2",
+          cursor: "#5C8DFF",
+          selectionBackground: "rgba(92,141,255,0.25)",
+          cyan: "#5C8DFF",
           green: "#7ee787",
-          yellow: "#ffb74d",
+          yellow: "#F44E1A",
           brightBlack: "#5b6770",
         },
       });
@@ -153,7 +153,7 @@ export default function TerminalPane({
   }, [visible]);
 
   return (
-    <div className="relative h-full flex flex-col bg-[#05080a]">
+    <div className="relative h-full flex flex-col bg-[#080C1C]">
       <div ref={hostRef} className="terminal-host flex-1 min-h-0" />
       {state !== "open" && (
         <div className="absolute top-2 right-3 flex items-center gap-2 text-[10.5px]">

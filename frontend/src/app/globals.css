@@ -12,18 +12,18 @@ body {
 }
 
 body {
-  background: #000;
-  color: #e8ecee;
+  background: #0A0F24;
+  color: #F5EDE2;
   font-family: Poppins, system-ui, -apple-system, sans-serif;
   -webkit-font-smoothing: antialiased;
 }
 
 a {
-  color: #22e0f0;
+  color: #5C8DFF;
   text-decoration: none;
 }
 a:hover {
-  color: #7cf0fa;
+  color: #8FB1FF;
 }
 
 ::-webkit-scrollbar {
@@ -82,7 +82,7 @@ a:hover {
 }
 
 /* Code preview: syntax tokens (highlight.js), in the app's palette —
-   cyan for structure, green for strings, amber for literals. */
+   blue for structure, green for strings, coral for literals. */
 .code-view {
   font-family: "JetBrains Mono", ui-monospace, monospace;
   font-size: 12px;
@@ -99,7 +99,7 @@ a:hover {
 .hljs-built_in,
 .hljs-meta .hljs-keyword,
 .hljs-doctag {
-  color: #22e0f0;
+  color: #5C8DFF;
 }
 .hljs-string,
 .hljs-regexp,
@@ -114,7 +114,7 @@ a:hover {
 .hljs-attr,
 .hljs-attribute,
 .hljs-variable.constant_ {
-  color: #ffb74d;
+  color: #FF7A50;
 }
 .hljs-title,
 .hljs-title.function_,
@@ -122,18 +122,18 @@ a:hover {
 .hljs-section,
 .hljs-selector-id,
 .hljs-selector-class {
-  color: #8ab4ff;
+  color: #5C8DFF;
 }
 .hljs-name,
 .hljs-tag {
-  color: #5eeaf6;
+  color: #8FB1FF;
 }
 .hljs-type,
 .hljs-params,
 .hljs-property,
 .hljs-variable,
 .hljs-template-variable {
-  color: #e8ecee;
+  color: #F5EDE2;
 }
 .hljs-meta,
 .hljs-link,
@@ -165,11 +165,11 @@ a:hover {
 
 /* Transparent-image backdrop in the image viewer. */
 .checker {
-  background-color: #0b0f13;
-  background-image: linear-gradient(45deg, #11171d 25%, transparent 25%),
-    linear-gradient(-45deg, #11171d 25%, transparent 25%),
-    linear-gradient(45deg, transparent 75%, #11171d 75%),
-    linear-gradient(-45deg, transparent 75%, #11171d 75%);
+  background-color: #131A35;
+  background-image: linear-gradient(45deg, #1B2350 25%, transparent 25%),
+    linear-gradient(-45deg, #1B2350 25%, transparent 25%),
+    linear-gradient(45deg, transparent 75%, #1B2350 75%),
+    linear-gradient(-45deg, transparent 75%, #1B2350 75%);
   background-size: 16px 16px;
   background-position: 0 0, 0 8px, 8px -8px, -8px 0;
 }

@@ -53,7 +53,7 @@ export default function LoginScreen({ onLoggedIn }: { onLoggedIn: () => void }) 
     >
       <form
         onSubmit={handleSubmit}
-        className="w-[340px] bg-modal border border-accent/[0.3] rounded-2xl p-7 space-y-4 shadow-[0_40px_120px_rgba(0,0,0,.8),0_0_70px_rgba(34,224,240,.07)] anim-pop"
+        className="w-[340px] bg-modal border border-accent/[0.3] rounded-2xl p-7 space-y-4 shadow-[0_40px_120px_rgba(0,0,0,.8),0_0_70px_rgba(92,141,255,.07)] anim-pop"
       >
         <div className="flex items-center gap-3 pb-1">
           <BrandMark />
@@ -89,7 +89,7 @@ export default function LoginScreen({ onLoggedIn }: { onLoggedIn: () => void }) 
         <button
           type="submit"
           disabled={busy}
-          className="w-full bg-accent hover:bg-[#5eeaf6] text-[#00191d] font-semibold rounded-lg py-2.5 text-sm disabled:opacity-50"
+          className="w-full bg-primary hover:bg-[#5C8DFF] text-white font-semibold rounded-lg py-2.5 text-sm disabled:opacity-50"
         >
           {busy ? "Please wait…" : mode === "login" ? "Log in" : "Sign up"}
         </button>

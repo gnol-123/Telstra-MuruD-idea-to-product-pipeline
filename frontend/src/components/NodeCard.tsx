@@ -1,6 +1,7 @@
 "use client";
 
 import { useState } from "react";
+import { WORKSPACE_ROOT } from "@/lib/files";
 import { PORT_Y } from "./EdgeLayer";
 import { Edge, ProjectNode, ToolNode, EnvironmentNode, isAgentNode, isEnvironmentNode } from "@/lib/types";
 
@@ -10,8 +11,6 @@ export const AGENT_ICONS: Record<string, string> = {
   coding: "⌗",
   ux_ui: "✦",
   orchestrator: "❖",
-  scrutinizer: "⚖",
-  evaluator: "✓",
 };
 
 export const TOOL_ICONS: Record<string, string> = {
@@ -27,9 +26,6 @@ export const TOOL_ICONS: Record<string, string> = {
 
 export const ENV_ICON = "▣";
 
-// Chips shown on an agent card before collapsing into "N+".
-const MAX_CHIPS = 2;
-
 // One-line role descriptions shown under an agent's name, matching the UX
 // mockup. The catalog (/agent-types) only returns a name + slug, so these
 // live client-side; unknown slugs just fall back to the slug itself.
@@ -39,8 +35,6 @@ export const AGENT_ROLES: Record<string, string> = {
   coding: "Scaffolds, tests and ships code",
   ux_ui: "Turns briefs into UI and mockups",
   orchestrator: "Plans the work and provisions other agents",
-  scrutinizer: "Pitches the product and argues its limits",
-  evaluator: "Checks a stage against its brief",
 };
 
 export function agentRole(slug: string | undefined) {
@@ -67,8 +61,7 @@ export default function NodeCard({
   inboundCount,
   staleCount,
   busy,
-  deleting: deletingProp,
-  creating,
+  deleting,
   zoom,
   onSelect,
   onDragMove,
@@ -99,8 +92,6 @@ export default function NodeCard({
   busy?: boolean;
   // Delete is in flight: card dims, x becomes a spinner.
   deleting?: boolean;
-  // Create is in flight: same look as deleting until the backend confirms.
-  creating?: boolean;
   // Canvas scale; pointer deltas are divided by it.
   zoom: number;
   onSelect: () => void;
@@ -118,19 +109,16 @@ export default function NodeCard({
   onChipClick?: (toolNodeId: string) => void;
   onChipRemove?: (edge: Edge) => void;
   onClearStale?: () => void;
-  // envId: open with that environment's workspace panel expanded.
-  onOpenChat?: (envId?: string) => void;
+  onOpenChat?: () => void;
   // Opens the code preview on an environment, optionally at a folder.
   onOpenWorkspace?: (envId: string, path?: string | null) => void;
 }) {
-  const deleting = deletingProp || creating;
   const agent = isAgentNode(node);
   const env = isEnvironmentNode(node);
   // Native HTML5 drag-over state (a tool/preset card being dragged from the
   // palette), tracked separately from `linkHover` — that one is for the
   // pointer-based port-to-port linking gesture, a different drag system.
   const [nativeDragOver, setNativeDragOver] = useState(false);
-  const [chipsOpen, setChipsOpen] = useState(false);
   const icon = agent
     ? AGENT_ICONS[node.agent_slug] ?? "◆"
     : env
@@ -210,8 +198,8 @@ export default function NodeCard({
       style={{ left: node.position_x ?? 0, top: node.position_y ?? 0, zIndex: selected ? 5 : 2 }}
       className={`absolute w-60 cursor-grab active:cursor-grabbing touch-none backdrop-blur-md border rounded-[13px] px-3.5 pt-[13px] pb-3 select-none transition-[border-color,background-color,opacity] ${borderColor} ${
         selected
-          ? "bg-accent/[0.045] shadow-[0_18px_44px_rgba(0,0,0,.6),0_0_34px_rgba(34,224,240,.1)]"
-          : "bg-white/[0.022] shadow-[0_14px_34px_rgba(0,0,0,.5)]"
+          ? "bg-accent/[0.045] shadow-[0_8px_20px_rgba(0,0,0,.45),0_0_16px_rgba(92,141,255,.08)]"
+          : "bg-white/[0.022] shadow-[0_6px_16px_rgba(0,0,0,.35)]"
       } ${deleting ? "opacity-45 pointer-events-none" : ""}`}
     >
       {/* in port: agents and environments-as-sources don't receive; only agents can be an edge target */}
@@ -241,7 +229,7 @@ export default function NodeCard({
         }}
         title={agent ? "Share context" : env ? "Attach this environment to an agent" : "Attach this tool to an agent"}
         style={{ top: PORT_Y - 10 }}
-        className="absolute -right-[10px] w-5 h-5 rounded-full bg-accent border-2 border-panel2 cursor-crosshair touch-none shadow-[0_0_10px_rgba(34,224,240,0.5)]"
+        className="absolute -right-[10px] w-5 h-5 rounded-full bg-accent border-2 border-panel2 cursor-crosshair touch-none shadow-[0_0_10px_rgba(92,141,255,0.5)]"
       />
 
       <div className="flex items-start gap-2.5">
@@ -271,7 +259,7 @@ export default function NodeCard({
             onDelete();
           }}
           title={
-            creating ? "Creating..." : deleting ? "Deleting..." : agent ? "Delete agent" : env ? "Delete environment" : "Delete tool"
+            deleting ? "Deleting..." : agent ? "Delete agent" : env ? "Delete environment" : "Delete tool"
           }
           className="shrink-0 text-white/[0.28] hover:text-white/70 text-[13px] px-0.5 leading-none disabled:hover:text-white/[0.28]"
         >
@@ -289,9 +277,9 @@ export default function NodeCard({
             <span className="text-[10px] text-white/25 border border-dashed border-white/[0.13] rounded-[5px] px-2 py-[3px]">
               no tools or environments — drop one here
             </span>
-          ) : (() => {
-            const chips = [
-              ...(attachedTools ?? []).map(({ edge, tool }) => (
+          ) : (
+            <>
+              {attachedTools?.map(({ edge, tool }) => (
                 <span
                   key={edge.id}
                   data-chip
@@ -316,8 +304,8 @@ export default function NodeCard({
                     ×
                   </span>
                 </span>
-              )),
-              ...(attachedEnvironments ?? []).map(({ edge, env: envNode }) => (
+              ))}
+              {attachedEnvironments?.map(({ edge, env: envNode }) => (
                 <span
                   key={edge.id}
                   data-chip
@@ -328,7 +316,7 @@ export default function NodeCard({
                   }}
                   onDoubleClick={(e) => {
                     e.stopPropagation();
-                    onOpenChat?.(envNode.id);
+                    onOpenWorkspace?.(envNode.id, `${WORKSPACE_ROOT}/${node.id}`);
                   }}
                   title={`${envNode.name} — click to inspect, double-click to open ${node.name}'s files`}
                   className="inline-flex items-center gap-1 pl-[7px] pr-1 py-[3px] rounded-[5px] text-[10px] bg-accent/10 border border-accent/30 text-accent cursor-pointer hover:bg-accent/15"
@@ -357,28 +345,9 @@ export default function NodeCard({
                     ×
                   </span>
                 </span>
-              )),
-            ];
-            const hidden = chips.length - MAX_CHIPS;
-            if (hidden <= 0) return chips;
-            return (
-              <>
-                {chipsOpen ? chips : chips.slice(0, MAX_CHIPS)}
-                <span
-                  data-chip
-                  onPointerDown={(e) => e.stopPropagation()}
-                  onClick={(e) => {
-                    e.stopPropagation();
-                    setChipsOpen((o) => !o);
-                  }}
-                  title={chipsOpen ? "Show less" : `${hidden} more`}
-                  className="inline-flex items-center px-[7px] py-[3px] rounded-[5px] text-[10px] border border-white/[0.16] text-white/50 cursor-pointer hover:text-white/80"
-                >
-                  {chipsOpen ? "less" : `${hidden}+`}
-                </span>
-              </>
-            );
-          })()}
+              ))}
+            </>
+          )}
         </div>
       )}
 

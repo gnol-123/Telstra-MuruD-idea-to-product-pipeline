@@ -50,9 +50,6 @@ function dedupeById<T extends { id: string }>(items: T[]): T[] {
   return [...map.values()];
 }
 
-// Id prefix for a dropped card the backend hasn't confirmed yet.
-const PENDING_PREFIX = "pending-";
-
 export default function MeshCanvas({
   project,
   onBack,
@@ -65,6 +62,12 @@ export default function MeshCanvas({
   const [toolPresets, setToolPresets] = useState<ToolPreset[]>([]);
   const [nodes, setNodes] = useState<ProjectNode[]>([]);
   const [edges, setEdges] = useState<Edge[]>([]);
+  // True until the first load has everything the canvas needs. Nodes and
+  // edges used to be set from two independent requests, so whichever one
+  // resolved first painted its cards with no lines to connect them for a
+  // beat — the "every node opens disconnected" bug. Gating the first paint
+  // on all of it landing together fixes that at the source.
+  const [initialLoading, setInitialLoading] = useState(true);
   const [selectedId, setSelectedId] = useState<string | null>(null);
   const [error, setError] = useState<string | null>(null);
   const [notice, setNotice] = useState<string | null>(null);
@@ -93,9 +96,6 @@ export default function MeshCanvas({
   // In-flight create/delete calls. Non-zero means the server list is behind
   // the UI, so the poll merges status only and skips add/remove.
   const pendingMutations = useRef(0);
-  // Agents dropped this session. Only these lock while tools verify, so a
-  // backfilled or orphaned 'pending' tool can't lock a card for good.
-  const createdHere = useRef(new Set<string>());
   // Same idea for the tool modal: its create call lives inside the modal.
   const toolModalOpen = useRef(false);
   // Ticks once per completed mutation, so a poll can detect one landed while
@@ -142,15 +142,28 @@ export default function MeshCanvas({
   }
 
   useEffect(() => {
-    getAgentTypes().then(setAgentTypes).catch((e: ApiError) => setError(e.message));
-    getToolTypes().then(setToolTypes).catch((e: ApiError) => setError(e.message));
-    getToolPresets().then(setToolPresets).catch((e: ApiError) => setError(e.message));
-    listNodes(project.id)
-      .then((ns) => setNodes(dedupeById(ns)))
-      .catch((e: ApiError) => setError(e.message));
-    listEdges(project.id)
-      .then((es) => setEdges(dedupeById(es)))
-      .catch((e: ApiError) => setError(e.message));
+    let cancelled = false;
+    setInitialLoading(true);
+    Promise.all([getAgentTypes(), getToolTypes(), getToolPresets(), listNodes(project.id), listEdges(project.id)])
+      .then(([ats, tts, presets, ns, es]) => {
+        if (cancelled) return;
+        setAgentTypes(ats);
+        setToolTypes(tts);
+        setToolPresets(presets);
+        // Nodes and edges are applied in the same tick, so the canvas never
+        // paints a card before the line that connects it.
+        setNodes(dedupeById(ns));
+        setEdges(dedupeById(es));
+      })
+      .catch((e) => {
+        if (!cancelled) setError(e instanceof ApiError ? e.message : "Could not load this project");
+      })
+      .finally(() => {
+        if (!cancelled) setInitialLoading(false);
+      });
+    return () => {
+      cancelled = true;
+    };
   }, [project.id]);
 
   // Per the teammate's node-status addition: every node row (agent, tool,
@@ -318,38 +331,23 @@ export default function MeshCanvas({
   }
 
   async function handleAddAgent(agentSlug: string, pos?: { x: number; y: number }) {
-    const offset = nodes.length * 40;
-    const position_x = pos?.x ?? 120 + offset;
-    const position_y = pos?.y ?? 100 + offset;
-    // Card lands now with a spinner; swapped for the real row on confirm.
-    const tempId = `${PENDING_PREFIX}${crypto.randomUUID()}`;
-    const placeholder: ProjectNode = {
-      kind: "agent",
-      id: tempId,
-      project_id: project.id,
-      name: agentTypes.find((t) => t.slug === agentSlug)?.name ?? agentSlug,
-      agent_slug: agentSlug,
-      tool_policy: "auto",
-      position_x,
-      position_y,
-    };
-    setNodes((n) => [...n, placeholder]);
     try {
-      const node = await mutating(() => createAgentNode(project.id, agentSlug, { position_x, position_y }));
+      const offset = nodes.length * 40;
+      const node = await mutating(() =>
+        createAgentNode(project.id, agentSlug, {
+          position_x: pos?.x ?? 120 + offset,
+          position_y: pos?.y ?? 100 + offset,
+        })
+      );
+      setNodes((n) => dedupeById([...n, node]));
+      setSelectedId(node.id);
 
       // "kind='agent' now provisions the agent type's default_presets": one
       // tool node + tool edge per preset, created server-side alongside the
       // agent. The response above is still just the agent's own node, so
-      // reload to pick up whatever else the backend just created. Placeholder
-      // goes only after, so the spinner hands straight off to pending tools.
+      // reload to pick up whatever else the backend just created.
       const agentType = agentTypes.find((t) => t.slug === agentSlug);
-      createdHere.current.add(node.id);
       await reloadCanvas();
-      setNodes((n) => {
-        const rest = n.filter((x) => x.id !== tempId);
-        return rest.some((x) => x.id === node.id) ? rest : [...rest, node];
-      });
-      setSelectedId(node.id);
       if (agentType?.default_presets && agentType.default_presets.length > 0) {
         setNotice(
           `${agentType.name} came equipped with ${agentType.default_presets.length} default tool${
@@ -358,7 +356,6 @@ export default function MeshCanvas({
         );
       }
     } catch (e) {
-      setNodes((n) => n.filter((x) => x.id !== tempId));
       setError(e instanceof ApiError ? e.message : "Could not add agent");
     }
   }
@@ -698,8 +695,7 @@ export default function MeshCanvas({
   const contextLinkCount = edges.filter((e) => e.kind === "context").length;
 
   const chatNode = nodes.find((n) => n.id === chatNodeId);
-  const openChat = (id: string, envId?: string) => {
-    if (envId) handleChatChange(id, (p) => ({ ...p, panelOpen: true, panelEnvId: envId }));
+  const openChat = (id: string) => {
     setSelectedId(id);
     setChatNodeId(id);
   };
@@ -718,6 +714,22 @@ export default function MeshCanvas({
     return env ? { envId: env.id, path: null } : null;
   }
   const openWorkspace = (envId: string, path?: string | null) => setWorkspace({ envId, path: path ?? null });
+
+  // Nothing paints — not even an empty canvas — until nodes, edges and the
+  // library lists have all landed together (see the mount effect above).
+  if (initialLoading) {
+    return (
+      <div className="h-screen flex flex-col items-center justify-center gap-5 bg-bg text-text">
+        <div className="relative w-14 h-14 grid place-items-center">
+          <div className="opacity-90">
+            <BrandMark size={34} />
+          </div>
+          <div className="absolute inset-0 rounded-full border-2 border-white/10 border-t-accent animate-spin" />
+        </div>
+        <div className="text-[13px] text-white/50">Loading {project.name}…</div>
+      </div>
+    );
+  }
 
   return (
     <div className="h-screen flex flex-col bg-bg text-text select-none">
@@ -805,7 +817,7 @@ export default function MeshCanvas({
               </div>
             )}
             {notice && (
-              <div className="pointer-events-auto max-w-2xl flex items-start gap-3 px-3.5 py-2.5 rounded-[9px] border border-accent/30 bg-[#041517]/95 backdrop-blur text-xs text-accent shadow-[0_14px_34px_rgba(0,0,0,.5)] anim-pop">
+              <div className="pointer-events-auto max-w-2xl flex items-start gap-3 px-3.5 py-2.5 rounded-[9px] border border-accent/30 bg-[#0E1B3A]/95 backdrop-blur text-xs text-accent shadow-[0_14px_34px_rgba(0,0,0,.5)] anim-pop">
                 <span>◗</span>
                 <span className="flex-1 leading-relaxed">{notice}</span>
                 <button onClick={() => setNotice(null)} className="text-accent/60 hover:text-accent">
@@ -816,14 +828,14 @@ export default function MeshCanvas({
           </div>
         )}
 
-        <div className="absolute left-0 right-[300px] bottom-0 z-[4] flex flex-wrap gap-[18px] px-5 py-2 bg-black border-t border-white/[0.08] text-[10.5px] text-white/[0.34] pointer-events-none">
+        <div className="absolute left-0 right-[300px] bottom-0 z-[4] flex flex-wrap gap-[18px] px-5 py-2 bg-panel border-t border-white/[0.08] text-[10.5px] text-white/[0.34] pointer-events-none">
           <span>Drag a card to move it</span>
           <span>Drag from ◗ port to port to share context</span>
           <span>Drop a tool onto a card to equip it</span>
           <span>Double-click an agent to chat</span>
         </div>
 
-        <div className="absolute right-[316px] bottom-12 z-[4] flex items-center border border-white/[0.13] rounded-md bg-black/80 text-[11px] text-white/60">
+        <div className="absolute right-[316px] bottom-12 z-[4] flex items-center border border-white/[0.13] rounded-md bg-panel/80 text-[11px] text-white/60">
           <button onClick={() => zoomCenter(zoom / 1.2)} className="px-2 py-1 hover:text-white" title="Zoom out">−</button>
           <button onClick={() => zoomCenter(1)} className="px-1.5 py-1 w-12 hover:text-white" title="Reset zoom">{Math.round(zoom * 100)}%</button>
           <button onClick={() => zoomCenter(zoom * 1.2)} className="px-2 py-1 hover:text-white" title="Zoom in">+</button>
@@ -833,7 +845,7 @@ export default function MeshCanvas({
           ref={canvasRef}
           className="flex-1 min-w-0 relative overflow-auto touch-none pb-9"
           style={{
-            backgroundColor: "#000",
+            backgroundColor: "#0A0F24",
             backgroundImage: "radial-gradient(rgba(255,255,255,.075) 1px, transparent 1px)",
             backgroundSize: "26px 26px",
             cursor: link ? "crosshair" : "default",
@@ -888,12 +900,6 @@ export default function MeshCanvas({
                   staleCount={inbound.filter((e) => e.is_stale).length}
                   busy={!!chatByNode[node.id]?.busy}
                   deleting={deletingIds.has(node.id)}
-                  creating={
-                    node.id.startsWith(PENDING_PREFIX) ||
-                    // Default tools still verifying in the background.
-                    (createdHere.current.has(node.id) &&
-                      (attachedToolsByAgent.get(node.id) ?? []).some((t) => t.tool.status === "pending"))
-                  }
                   zoom={zoom}
                   attachedEnvironments={isAgentNode(node) ? attachedEnvsByAgent.get(node.id) ?? [] : undefined}
                   onSelect={() => setSelectedId(node.id)}
@@ -907,7 +913,7 @@ export default function MeshCanvas({
                   onChipClick={(toolNodeId) => setSelectedId(toolNodeId)}
                   onChipRemove={(edge) => handleUnequipTool(edge)}
                   onClearStale={() => clearStaleFor(node.id)}
-                  onOpenChat={isAgentNode(node) ? (envId) => openChat(node.id, envId) : undefined}
+                  onOpenChat={isAgentNode(node) ? () => openChat(node.id) : undefined}
                   onOpenWorkspace={openWorkspace}
                 />
               );
@@ -960,7 +966,6 @@ export default function MeshCanvas({
           onAfterTurn={reloadCanvas}
           onRefreshEdge={handleRefreshEdge}
           onOpenWorkspace={openWorkspace}
-          onNodeUpdated={handleNodeUpdated}
         />
       )}
 

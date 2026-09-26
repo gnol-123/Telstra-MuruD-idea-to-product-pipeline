@@ -69,7 +69,7 @@ export default function PreviewPane({
   const src = port ? `${port.url}${path.startsWith("/") ? path : `/${path}`}` : null;
 
   return (
-    <div className="flex-1 min-w-0 min-h-0 flex flex-col bg-[#05080a]">
+    <div className="flex-1 min-w-0 min-h-0 flex flex-col bg-[#080C1C]">
       {/* toolbar */}
       <div className="flex-none flex items-center gap-2 px-2.5 h-[38px] border-b border-white/[0.07]">
         <div className="flex items-center gap-1 min-w-0 overflow-x-auto">
@@ -186,7 +186,7 @@ export default function PreviewPane({
               <button
                 onClick={onServe}
                 disabled={serving}
-                className="mt-4 w-full bg-accent hover:bg-[#5eeaf6] text-[#00191d] rounded-lg px-3 py-2 text-xs font-semibold disabled:opacity-60"
+                className="mt-4 w-full bg-primary hover:bg-[#5C8DFF] text-white rounded-lg px-3 py-2 text-xs font-semibold disabled:opacity-60"
               >
                 {serving ? "Starting server…" : `▶ Serve ${serveLabel}`}
               </button>
