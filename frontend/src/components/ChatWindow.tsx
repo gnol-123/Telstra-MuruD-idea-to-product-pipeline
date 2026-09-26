@@ -222,7 +222,7 @@ export default function ChatWindow({
   onNodeUpdated,
 }: {
   projectId: string;
-  node: AgentNode;
+  node: AgentNode; // carries a polled `status`, refreshed every 2s by the canvas
   nodes: ProjectNode[];
   edges: Edge[];
   chat: ChatState;
@@ -277,6 +277,10 @@ export default function ChatWindow({
   const filteredModels = (models ?? []).filter((m) => m.toLowerCase().includes(modelQuery.trim().toLowerCase()));
   const scrollRef = useRef<HTMLDivElement | null>(null);
   const inputRef = useRef<HTMLTextAreaElement | null>(null);
+  // Last message seq seen from the backend, so a re-attach only fetches the
+  // tail. Also doubles as the "are we attached/attaching" guard.
+  const lastSeqRef = useRef(0);
+  const attachingRef = useRef(false);
 
   // Esc closes, like the mockup.
   useEffect(() => {
@@ -311,9 +315,54 @@ export default function ChatWindow({
     if (el) el.scrollTop = el.scrollHeight;
   }, [messages, pendingCalls, staleAsk]);
 
+  // Try GET /chat/attach. If it attaches, stream into the open bubble same
+  // as send/resume. If it 204s (nothing live), poll briefly for the settled
+  // row and redraw whatever's after the last user message, but only if
+  // `expectRunning` — the caller already has a reason to believe a turn is
+  // (or was just) live, so this never fires an idle poll on every open chat.
+  async function attachLive(expectRunning: boolean) {
+    if (attachingRef.current) return;
+    attachingRef.current = true;
+    onChatChange((prev) => ({ ...prev, busy: true }));
+    try {
+      const attached = await attachChat(node.id, makeStreamHandlers(onChatChange, onPublish));
+      if (attached) return;
+      if (!expectRunning) return;
+      // 204: it finished between our GET and the attach. The backend
+      // unregisters just before its final write, so poll briefly for
+      // the settled row instead of leaving a stale "…" bubble.
+      let finalMsg: ChatMessage | undefined;
+      for (let i = 0; i < 10; i++) {
+        const tail = await listNodeMessages(projectId, node.id, Math.max(0, lastSeqRef.current - 1));
+        finalMsg = tail[tail.length - 1];
+        if (finalMsg) lastSeqRef.current = finalMsg.seq ?? lastSeqRef.current;
+        if (!finalMsg || finalMsg.status !== "running") break;
+        await new Promise((r) => setTimeout(r, 500));
+      }
+      if (!finalMsg) return;
+      // Nothing is attached any more, so never draw a spinner.
+      const drawn = expandMessage(finalMsg).map((m) => ({ ...m, pending: undefined }));
+      // Everything after the last user message is this turn: redraw it.
+      onChatChange((prev) => {
+        const cut = prev.messages.map((m) => m.role).lastIndexOf("user") + 1;
+        return { ...prev, messages: [...prev.messages.slice(0, cut), ...drawn] };
+      });
+    } catch {
+      // ignore: leave whatever partial state streaming produced
+    } finally {
+      attachingRef.current = false;
+      // Unconditional: chat state outlives this window, so a close
+      // mid-attach must still clear busy or the reopened chat is stuck.
+      onChatChange((prev) => ({ ...prev, busy: false }));
+      afterTurn();
+    }
+  }
+
   // Hydrate the transcript from the backend the first time this agent's
-  // chat is opened, and re-join a turn that's still running (reload, or a
-  // second tab) via GET /chat/attach.
+  // chat is opened. Always try GET /chat/attach after: the DB row can say
+  // "failed" while the backend's in-process registry still has the turn
+  // live (a bad DB write on the backend side), so the registry is checked
+  // regardless of what the last row says.
   useEffect(() => {
     if (historyLoaded) return;
     let cancelled = false;
@@ -324,49 +373,16 @@ export default function ChatWindow({
           m.role === "user" ? [{ role: "user" as const, content: m.content, senderId: m.sender_node_id ?? undefined }] : m.role === "assistant" ? expandMessage(m) : []
         );
         const last = history[history.length - 1];
-        const stillRunning = !!last && last.role === "assistant" && last.status === "running";
+        lastSeqRef.current = last?.seq ?? 0;
+        const lastSaidRunning = !!last && last.role === "assistant" && last.status === "running";
 
         onChatChange((prev) =>
           prev.historyLoaded
             ? prev
-            : {
-                ...prev,
-                historyLoaded: true,
-                messages: [...fetched, ...prev.messages],
-                busy: stillRunning ? true : prev.busy,
-              }
+            : { ...prev, historyLoaded: true, messages: [...fetched, ...prev.messages] }
         );
 
-        if (!stillRunning) return;
-        attachChat(node.id, makeStreamHandlers(onChatChange, onPublish))
-          .then(async (attached) => {
-            if (attached) return;
-            // 204: it finished between our GET and the attach. The backend
-            // unregisters just before its final write, so poll briefly for
-            // the settled row instead of leaving a stale "…" bubble.
-            let finalMsg: ChatMessage | undefined;
-            for (let i = 0; i < 10; i++) {
-              const tail = await listNodeMessages(projectId, node.id, Math.max(0, (last.seq ?? 1) - 1));
-              finalMsg = tail[tail.length - 1];
-              if (!finalMsg || finalMsg.status !== "running") break;
-              await new Promise((r) => setTimeout(r, 500));
-            }
-            if (!finalMsg) return;
-            // Nothing is attached any more, so never draw a spinner.
-            const drawn = expandMessage(finalMsg).map((m) => ({ ...m, pending: undefined }));
-            // Everything after the last user message is this turn: redraw it.
-            onChatChange((prev) => {
-              const cut = prev.messages.map((m) => m.role).lastIndexOf("user") + 1;
-              return { ...prev, messages: [...prev.messages.slice(0, cut), ...drawn] };
-            });
-          })
-          .catch(() => {})
-          // Unconditional: chat state outlives this window, so a close
-          // mid-attach must still clear busy or the reopened chat is stuck.
-          .finally(() => {
-            onChatChange((prev) => ({ ...prev, busy: false }));
-            afterTurn();
-          });
+        attachLive(lastSaidRunning);
       })
       .catch(() => {
         if (!cancelled) onChatChange((prev) => ({ ...prev, historyLoaded: true }));
@@ -376,6 +392,32 @@ export default function ChatWindow({
     };
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [node.id]);
+
+  // After hydration: the canvas poll (every 2s) flips node.status to
+  // "running" when the orchestrator starts a turn on this agent behind our
+  // back. If we're not busy and not already attaching, fetch the tail
+  // (the orchestrator's user message plus whatever's streamed so far) and
+  // attach.
+  const prevStatusRef = useRef(node.status);
+  useEffect(() => {
+    const prevStatus = prevStatusRef.current;
+    prevStatusRef.current = node.status;
+    if (!historyLoaded) return;
+    if (prevStatus === node.status || node.status !== "running") return;
+    if (busy || attachingRef.current) return;
+    listNodeMessages(projectId, node.id, lastSeqRef.current)
+      .then((tail) => {
+        if (!tail.length) return attachLive(true);
+        lastSeqRef.current = tail[tail.length - 1].seq ?? lastSeqRef.current;
+        const fetched: LocalMessage[] = tail.flatMap((m) =>
+          m.role === "user" ? [{ role: "user" as const, content: m.content, senderId: m.sender_node_id ?? undefined }] : m.role === "assistant" ? expandMessage(m) : []
+        );
+        onChatChange((prev) => ({ ...prev, messages: [...prev.messages, ...fetched] }));
+        attachLive(true);
+      })
+      .catch(() => {});
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [node.status, historyLoaded, busy]);
 
   async function clearStale() {
     if (stale.length === 0) return;
@@ -439,6 +481,13 @@ export default function ChatWindow({
           }));
         }
       } catch (e: any) {
+        // 409: a turn is already running (the orchestrator beat us to it).
+        // Drop the placeholder and re-join it instead of showing a failure.
+        if (e instanceof ApiError && e.status === 409) {
+          onChatChange((prev) => ({ ...prev, messages: prev.messages.slice(0, -1) }));
+          await attachLive(true);
+          return;
+        }
         onChatChange((prev) => ({
           ...prev,
           messages: [...prev.messages.slice(0, -1), { role: "assistant", content: `⚠ ${e.message}` }],
@@ -457,6 +506,11 @@ export default function ChatWindow({
     try {
       await streamChat(node.id, text, clientToken, makeStreamHandlers(onChatChange, onPublish));
     } catch (e: any) {
+      if (e instanceof ApiError && e.status === 409) {
+        onChatChange((prev) => ({ ...prev, messages: prev.messages.slice(0, -1) }));
+        await attachLive(true);
+        return;
+      }
       onChatChange((prev) => {
         const copy = [...prev.messages];
         copy[copy.length - 1] = { role: "assistant", content: `⚠ ${e?.message ?? "stream failed"}` };
