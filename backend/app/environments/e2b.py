@@ -21,7 +21,7 @@ from e2b import (
     NotFoundException,
     TimeoutException,
 )
-from pydantic_ai.toolsets import FunctionToolset
+from pydantic_ai.toolsets import AbstractToolset, CombinedToolset, FunctionToolset
 
 from app.config import settings
 from app.environments.base import WORKSPACE_ROOT, EnvContext
@@ -62,10 +62,12 @@ async def provision(ctx: EnvContext) -> str:
         # Lets the sweep find sandboxes whose node row is gone.
         metadata={"app": "murud", "node_id": ctx.node_id, "project_id": ctx.project_id},
         lifecycle=lifecycle,
+        # mcp needs the mcp-gateway template, set by the config.
+        mcp=ctx.config.get("mcp"),
         **_api(),
     )
     try:
-        await sbx.files.make_dir(WORKSPACE_ROOT)
+        await sbx.files.make_dir(WORKSPACE_ROOT, user="user")
     except Exception:
         # Do not leak a sandbox we could not finish setting up. A failure
         # here means it is orphaned, so say so: the sweep is the backstop.
@@ -118,7 +120,7 @@ async def teardown(sandbox_id: str) -> None:
         pass
 
 
-def build(ctx: EnvContext) -> FunctionToolset:
+def build(ctx: EnvContext) -> AbstractToolset:
     """The agent facing toolset: one sandbox connection, shared and lazy.
 
     Every closure below returns a string and never raises. That is what keeps
@@ -166,7 +168,7 @@ def build(ctx: EnvContext) -> FunctionToolset:
                     # Reachable again after a failure. Say so.
                     await ctx.set_status("ready", "Sandbox running")
             if not state["dir_ready"]:
-                await state["sbx"].files.make_dir(ctx.agent_dir)
+                await state["sbx"].files.make_dir(ctx.agent_dir, user="user")
                 state["dir_ready"] = True
             return state["sbx"]
 
@@ -184,7 +186,7 @@ def build(ctx: EnvContext) -> FunctionToolset:
         # fractional value from truncating to 0, which E2B reads as unlimited.
         t = max(1, min(int(timeout_seconds or settings.environment_command_timeout_s), 600))
         try:
-            r = await sbx.commands.run(command, cwd=ctx.agent_dir, timeout=t)
+            r = await sbx.commands.run(command, cwd=ctx.agent_dir, timeout=t, user="user")
             out = _format(r.exit_code, r.stdout, r.stderr)
         except CommandExitException as exc:
             # A non-zero exit is a result the model reads, not a failure.
@@ -211,7 +213,7 @@ def build(ctx: EnvContext) -> FunctionToolset:
             return await _unavailable(exc)
         try:
             p = _resolve(path)
-            return _clip(await sbx.files.read(p), max_file)
+            return _clip(await sbx.files.read(p, user="user"), max_file)
         except FileNotFoundException:
             return f"No such file: {path}"
         except UnicodeDecodeError:
@@ -228,7 +230,7 @@ def build(ctx: EnvContext) -> FunctionToolset:
             return await _unavailable(exc)
         try:
             p = _resolve(path)
-            await sbx.files.write(p, content)
+            await sbx.files.write(p, content, user="user")
             return f"Wrote {len(content.encode('utf-8'))} bytes to {p}"
         except ValueError:
             return "Invalid path"
@@ -242,7 +244,7 @@ def build(ctx: EnvContext) -> FunctionToolset:
             return await _unavailable(exc)
         try:
             p = _resolve(path)
-            entries = await sbx.files.list(p, depth=1)
+            entries = await sbx.files.list(p, depth=1, user="user")
         except FileNotFoundException:
             return f"No such directory: {path}"
         except ValueError:
@@ -380,4 +382,9 @@ def build(ctx: EnvContext) -> FunctionToolset:
         name="list_files",
         description="List a directory (default: your directory). Directories end with /.",
     )
+    if ctx.config.get("mcp"):
+        from app.environments import browser
+
+        # Same connection, so the browser tools share one connect per turn.
+        return CombinedToolset([ts, browser.build(ctx, _sandbox)])
     return ts
