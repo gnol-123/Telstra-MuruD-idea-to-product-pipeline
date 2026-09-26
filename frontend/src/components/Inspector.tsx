@@ -71,7 +71,7 @@ export default function Inspector({
     : "Tool inspector";
 
   return (
-    <aside className="flex-none w-[300px] border-l border-white/[0.09] flex flex-col min-h-0 bg-black">
+    <aside className="flex-none w-[300px] border-l border-white/[0.09] flex flex-col min-h-0 bg-panel">
       <div className="flex-none px-[18px] pt-4 pb-3 border-b border-white/[0.09]">
         <div className="text-[12.5px] font-semibold">{title}</div>
         <div className="mt-1 text-[10.5px] text-white/[0.36] truncate">{node ? `Editing ${node.name}` : "Nothing selected"}</div>
@@ -352,7 +352,7 @@ function AgentInspector({
 
       <button
         onClick={onOpenChat}
-        className="mt-0.5 bg-accent hover:bg-[#5eeaf6] text-[#00191d] rounded-lg px-3.5 py-2.5 text-xs font-semibold transition-colors"
+        className="mt-0.5 bg-primary hover:bg-[#5C8DFF] text-white rounded-lg px-3.5 py-2.5 text-xs font-semibold transition-colors"
       >
         {chatBusy ? "● Reply in progress — open chat" : `Open chat with ${node.name}`}
       </button>

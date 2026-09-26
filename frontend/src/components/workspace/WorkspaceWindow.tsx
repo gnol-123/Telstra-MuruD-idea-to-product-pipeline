@@ -679,14 +679,14 @@ function Workspace({
                 <button
                   onClick={() => download({ path: WORKSPACE_ROOT, name: "workspace", type: "dir" })}
                   disabled={busyPaths.has(WORKSPACE_ROOT)}
-                  className="text-[11px] pl-3 pr-2.5 py-[7px] rounded-l-lg bg-accent hover:bg-[#5eeaf6] text-[#00191d] font-semibold disabled:opacity-60"
+                  className="text-[11px] pl-3 pr-2.5 py-[7px] rounded-l-lg bg-primary hover:bg-[#5C8DFF] text-white font-semibold disabled:opacity-60"
                 >
                   {busyPaths.has(WORKSPACE_ROOT) ? "Zipping…" : "⤓ Download .zip"}
                 </button>
                 <button
                   onClick={() => setZipMenu((m) => !m)}
                   aria-label="More download options"
-                  className="text-[11px] px-2 py-[7px] rounded-r-lg bg-accent/85 hover:bg-[#5eeaf6] text-[#00191d] border-l border-[#00191d]/20"
+                  className="text-[11px] px-2 py-[7px] rounded-r-lg bg-primary/85 hover:bg-[#5C8DFF] text-white border-l border-white/20"
                 >
                   ▾
                 </button>
@@ -854,7 +854,7 @@ function Workspace({
                             onAuxClick={(e) => e.button === 1 && closeTab(t.path)}
                             title={t.path}
                             className={`group flex-none flex items-center gap-2 pl-3 pr-1.5 text-[11.5px] cursor-pointer border-r border-white/[0.06] ${
-                              on ? "bg-modal text-text shadow-[inset_0_2px_0_#22e0f0]" : "text-white/50 hover:text-white/80"
+                              on ? "bg-modal text-text shadow-[inset_0_2px_0_#5C8DFF]" : "text-white/50 hover:text-white/80"
                             }`}
                           >
                             <span className="max-w-[160px] truncate">{t.name}</span>
@@ -974,7 +974,7 @@ function Workspace({
   );
 }
 
-export function StatusPill({ status }: { status: string }) {
+function StatusPill({ status }: { status: string }) {
   const color =
     status === "ready" ? "bg-green" : status === "error" ? "bg-red-400" : status === "provisioning" ? "bg-amber animate-pulse" : "bg-white/30";
   return (
@@ -1021,7 +1021,7 @@ function MenuItem({ title, sub, onClick }: { title: string; sub: string; onClick
 
 function EmptyEditor({ hasFiles, loading, onUpload }: { hasFiles: boolean; loading: boolean; onUpload: () => void }) {
   return (
-    <div className="flex-1 grid place-items-center p-8 bg-[#05080a]">
+    <div className="flex-1 grid place-items-center p-8 bg-[#080C1C]">
       <div className="max-w-[320px] text-center">
         <div className="mx-auto w-11 h-11 rounded-xl border border-white/[0.14] grid place-items-center text-white/40">‹›</div>
         <div className="mt-3 text-[13px] text-white/80">

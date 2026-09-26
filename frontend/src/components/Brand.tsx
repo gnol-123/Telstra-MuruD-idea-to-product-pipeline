@@ -1,5 +1,5 @@
 // The Agent Mesh mark from the UX mockup: a rotated square inside a rounded
-// square, both in the accent cyan.
+// square, both in the accent blue.
 export function BrandMark({ size = 32 }: { size?: number }) {
   return (
     <div

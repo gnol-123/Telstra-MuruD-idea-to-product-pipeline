@@ -37,8 +37,7 @@ export default function CodeView({
 }: {
   file: OpenFile;
   agentNames: Record<string, string>;
-  // Omit for a read-only view.
-  onEdit?: () => void;
+  onEdit: () => void;
   onDraftChange: (draft: string) => void;
   onSave: () => void;
   onCancelEdit: () => void;
@@ -119,7 +118,7 @@ export default function CodeView({
                   ▶ Preview
                 </ToolbarBtn>
               )}
-              {onEdit && file.kind === "text" && !file.truncated && !file.loading && !file.error && (
+              {file.kind === "text" && !file.truncated && !file.loading && !file.error && (
                 <ToolbarBtn onClick={onEdit} title="Make a quick edit">
                   ✎ Edit
                 </ToolbarBtn>
@@ -135,7 +134,7 @@ export default function CodeView({
         </div>
       </div>
 
-      <div className="flex-1 min-h-0 overflow-auto bg-[#05080a]">
+      <div className="flex-1 min-h-0 overflow-auto bg-[#080C1C]">
         {file.loading && !file.content && !file.imageUrl ? (
           <div className="p-5 space-y-2">
             {[70, 52, 84, 40, 66].map((w, i) => (
@@ -176,7 +175,7 @@ export default function CodeView({
           <div className="flex min-w-max">
             <div
               aria-hidden
-              className="code-view flex-none select-none text-right text-white/20 pl-3 pr-3 py-3 border-r border-white/[0.05] sticky left-0 bg-[#05080a]"
+              className="code-view flex-none select-none text-right text-white/20 pl-3 pr-3 py-3 border-r border-white/[0.05] sticky left-0 bg-[#080C1C]"
             >
               {Array.from({ length: lineCount }, (_, i) => (
                 <div key={i}>{i + 1}</div>
@@ -226,7 +225,7 @@ export function ToolbarBtn({
       title={title}
       className={`whitespace-nowrap text-[10.5px] px-2 py-[3px] rounded-[5px] border transition-colors disabled:opacity-40 ${
         primary
-          ? "bg-accent border-accent text-[#00191d] font-semibold hover:bg-[#5eeaf6]"
+          ? "bg-primary border-primary text-white font-semibold hover:bg-[#5C8DFF]"
           : active
           ? "border-accent/45 text-accent bg-accent/10"
           : "border-white/[0.12] text-white/60 hover:text-text hover:border-white/30"

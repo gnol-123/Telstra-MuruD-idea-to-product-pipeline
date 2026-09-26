@@ -143,7 +143,7 @@ export default function ToolConfigModal({
           <button
             type="submit"
             disabled={busy}
-            className="flex-1 bg-accent text-black font-medium rounded-md py-2 text-xs disabled:opacity-50"
+            className="flex-1 bg-primary text-white font-medium rounded-md py-2 text-xs disabled:opacity-50"
           >
             {busy ? "Adding…" : attachToAgentId ? "Add & equip" : "Add tool"}
           </button>

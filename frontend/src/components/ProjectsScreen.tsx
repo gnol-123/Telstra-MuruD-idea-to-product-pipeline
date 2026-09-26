@@ -85,7 +85,7 @@ export default function ProjectsScreen({
           placeholder="New project name…"
           className="flex-1 bg-white/[0.03] border border-white/[0.13] rounded-lg px-3.5 py-2.5 text-sm outline-none focus:border-accent/50 placeholder:text-white/30"
         />
-        <button className="bg-accent hover:bg-[#5eeaf6] text-[#00191d] text-sm font-semibold rounded-lg px-5">
+        <button className="bg-primary hover:bg-[#5C8DFF] text-white text-sm font-semibold rounded-lg px-5">
           Create
         </button>
       </form>

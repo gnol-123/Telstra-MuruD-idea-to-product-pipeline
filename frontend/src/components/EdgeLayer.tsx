@@ -2,8 +2,11 @@
 
 import { Edge, ProjectNode } from "@/lib/types";
 
-const CY = "#22e0f0";
-const AMBER = "#ffb74d";
+// Line edges are green regardless of kind — context and environment links
+// used to split cyan/green; now both read the same, distinguished only by
+// the stale (amber) state.
+const CY = "#7ee787";
+const AMBER = "#F44E1A";
 const GREEN = "#7ee787";
 
 export const CARD_W = 240;
@@ -81,19 +84,19 @@ export default function EdgeLayer({
           const stale = e.kind === "context" && e.is_stale;
           const isEnv = e.kind === "environment";
           const baseCol = isEnv ? GREEN : CY;
-          const col = stale ? "rgba(255,183,77,.55)" : hot ? baseCol : isEnv ? "rgba(126,231,135,.32)" : "rgba(34,224,240,.32)";
+          const col = stale ? "rgba(244,78,26,.55)" : hot ? baseCol : "rgba(126,231,135,.32)";
           return (
             <g key={e.id}>
               <path d={d} fill="none" stroke={col} strokeWidth={hot ? 2 : 1.5} />
               <path
                 d={d}
                 fill="none"
-                stroke={stale ? AMBER : hot ? "rgba(255,255,255,.85)" : isEnv ? "rgba(126,231,135,.5)" : "rgba(34,224,240,.5)"}
+                stroke={stale ? AMBER : hot ? "rgba(255,255,255,.85)" : "rgba(126,231,135,.5)"}
                 strokeWidth={1.5}
                 strokeDasharray="3 9"
                 style={{ animation: stale ? "none" : "dash 1.1s linear infinite" }}
               />
-              <circle cx={p2.x} cy={p2.y} r={3.5} fill={stale ? AMBER : hot ? baseCol : isEnv ? "rgba(126,231,135,.5)" : "rgba(34,224,240,.5)"} />
+              <circle cx={p2.x} cy={p2.y} r={3.5} fill={stale ? AMBER : hot ? baseCol : "rgba(126,231,135,.5)"} />
             </g>
           );
         })}
@@ -173,10 +176,10 @@ export default function EdgeLayer({
                 className="inline-flex items-center gap-1.5 whitespace-nowrap rounded-full px-2.5 py-1 text-[9.5px] tracking-wide"
                 style={{
                   fontWeight: stale ? 600 : 400,
-                  background: stale ? AMBER : "#05080a",
+                  background: stale ? AMBER : "#080C1C",
                   color: stale ? "#2b1a00" : hot ? accentCol : "rgba(255,255,255,.5)",
                   border: `1px solid ${stale ? AMBER : hot ? `${accentCol}80` : "rgba(255,255,255,.16)"}`,
-                  boxShadow: stale ? "0 0 16px rgba(255,183,77,.35)" : "none",
+                  boxShadow: stale ? "0 0 16px rgba(244,78,26,.35)" : "none",
                   cursor: "pointer",
                 }}
               >
@@ -190,7 +193,7 @@ export default function EdgeLayer({
                   onDelete(e);
                 }}
                 title="Cut this link"
-                className="w-[19px] h-[19px] rounded-full grid place-items-center leading-none bg-[#05080a] border border-white/15 text-white/40 hover:text-white/80 hover:border-white/40 text-[11px]"
+                className="w-[19px] h-[19px] rounded-full grid place-items-center leading-none bg-[#080C1C] border border-white/15 text-white/40 hover:text-white/80 hover:border-white/40 text-[11px]"
               >
                 ×
               </button>
