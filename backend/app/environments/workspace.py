@@ -363,11 +363,11 @@ def previewable(ports: list[ListeningPort]) -> list[ListeningPort]:
 async def listening_ports(sandbox: AsyncSandbox) -> list[ListeningPort]:
     """Every previewable listening port. Never raises on a sandbox without python3."""
     try:
-        r = await sandbox.commands.run(PORTS_COMMAND, timeout=15)
+        r = await sandbox.commands.run(PORTS_COMMAND, timeout=15, user="user")
         return previewable(parse_ports_json(r.stdout))
     except (CommandExitException, ValueError, KeyError, TypeError):
         logger.info("port script failed, falling back to /proc/net/tcp")
-    r = await sandbox.commands.run(PROC_NET_COMMAND, timeout=15)
+    r = await sandbox.commands.run(PROC_NET_COMMAND, timeout=15, user="user")
     return previewable(parse_proc_net_tcp(r.stdout))
 
 
@@ -398,7 +398,7 @@ async def web_ports(sandbox: AsyncSandbox, ports: list[ListeningPort]) -> list[L
         ["python3", "-c", shlex.quote(_HTTP_PROBE_SCRIPT), *(str(p.port) for p in ports)]
     )
     try:
-        r = await sandbox.commands.run(cmd, timeout=15)
+        r = await sandbox.commands.run(cmd, timeout=15, user="user")
         answering = set(json.loads(r.stdout.strip().splitlines()[-1]))
     except (CommandExitException, ValueError, IndexError):
         return []
@@ -479,7 +479,7 @@ def next_free(candidates: range, taken: set[int]) -> int | None:
 async def read_registry(sandbox: AsyncSandbox) -> list[dict[str, Any]]:
     """Published previews, oldest to newest. Missing or corrupt file reads as empty."""
     try:
-        raw = await sandbox.files.read(sandbox_temp(PREVIEW_REGISTRY_FILE))
+        raw = await sandbox.files.read(sandbox_temp(PREVIEW_REGISTRY_FILE), user="user")
         data = json.loads(raw)
         return data if isinstance(data, list) else []
     except (FileNotFoundException, ValueError, TypeError):
@@ -487,7 +487,7 @@ async def read_registry(sandbox: AsyncSandbox) -> list[dict[str, Any]]:
 
 
 async def write_registry(sandbox: AsyncSandbox, entries: list[dict[str, Any]]) -> None:
-    await sandbox.files.write(sandbox_temp(PREVIEW_REGISTRY_FILE), json.dumps(entries))
+    await sandbox.files.write(sandbox_temp(PREVIEW_REGISTRY_FILE), json.dumps(entries), user="user")
 
 
 async def upsert_preview(sandbox: AsyncSandbox, entry: dict[str, Any]) -> None:

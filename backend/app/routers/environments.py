@@ -371,7 +371,9 @@ async def list_environment_files(
     node = await _load_ready(project_id, node_id, env_repo)
     resolved = _resolve(path)
     try:
-        entries = await _on_sandbox(env_repo, node, lambda s: s.files.list(resolved, depth=1))
+        entries = await _on_sandbox(
+            env_repo, node, lambda s: s.files.list(resolved, depth=1, user="user")
+        )
     except FileNotFoundException as exc:
         raise HTTPException(
             status_code=status.HTTP_404_NOT_FOUND, detail=f"No such directory: {path}"
@@ -396,7 +398,7 @@ async def list_many_environment_files(
 
     async def one(sandbox: AsyncSandbox, path: str) -> DirListing:
         try:
-            entries = await sandbox.files.list(path, depth=1)
+            entries = await sandbox.files.list(path, depth=1, user="user")
         except FileNotFoundException:
             return DirListing(path=path, error=f"No such directory: {path}")
         return DirListing(path=path, entries=[_entry(e) for e in entries])
@@ -418,7 +420,7 @@ async def read_environment_file(
     node = await _load_ready(project_id, node_id, env_repo)
     resolved = _resolve(path)
     try:
-        content = await _on_sandbox(env_repo, node, lambda s: s.files.read(resolved))
+        content = await _on_sandbox(env_repo, node, lambda s: s.files.read(resolved, user="user"))
     except FileNotFoundException as exc:
         raise HTTPException(
             status_code=status.HTTP_404_NOT_FOUND, detail=f"No such file: {path}"
@@ -443,13 +445,13 @@ async def _stream(sandbox: AsyncSandbox, path: str, *, remove_after: bool) -> As
     client gives up, so an abandoned download does not fill /tmp.
     """
     try:
-        async with await sandbox.files.read(path, format="stream") as stream:
+        async with await sandbox.files.read(path, format="stream", user="user") as stream:
             async for chunk in stream:
                 yield bytes(chunk)
     finally:
         if remove_after:
             try:
-                await sandbox.files.remove(path)
+                await sandbox.files.remove(path, user="user")
             except Exception:
                 logger.warning("failed to remove temp archive %s", path)
 
@@ -469,7 +471,7 @@ async def download_environment_file(
     node = await _load_ready(project_id, node_id, env_repo)
     resolved = _resolve(path)
     try:
-        info = await _on_sandbox(env_repo, node, lambda s: s.files.get_info(resolved))
+        info = await _on_sandbox(env_repo, node, lambda s: s.files.get_info(resolved, user="user"))
     except FileNotFoundException as exc:
         raise HTTPException(
             status_code=status.HTTP_404_NOT_FOUND, detail=f"No such file: {path}"
@@ -511,13 +513,13 @@ async def archive_environment_directory(
     command = workspace.archive_command(resolved, out, skip_heavy=not include_dependencies)
 
     async def build(sandbox: AsyncSandbox) -> tuple[int, int]:
-        info = await sandbox.files.get_info(resolved)
+        info = await sandbox.files.get_info(resolved, user="user")
         if info.type != FileType.DIR:
             raise HTTPException(
                 status_code=status.HTTP_422_UNPROCESSABLE_ENTITY,
                 detail="That is a file. Download it with /files/download.",
             )
-        result = await sandbox.commands.run(command, timeout=120)
+        result = await sandbox.commands.run(command, timeout=120, user="user")
         return workspace.parse_archive_output(result.stdout)
 
     try:
@@ -554,7 +556,7 @@ async def archive_environment_directory(
 
 async def _remove_quietly(sandbox: AsyncSandbox, path: str) -> None:
     try:
-        await sandbox.files.remove(path)
+        await sandbox.files.remove(path, user="user")
     except Exception:
         logger.warning("failed to remove %s", path)
 
@@ -594,7 +596,7 @@ async def write_environment_file(
             )
 
     data = bytes(body)
-    await _on_sandbox(env_repo, node, lambda s: s.files.write(resolved, data))
+    await _on_sandbox(env_repo, node, lambda s: s.files.write(resolved, data, user="user"))
     return FileWriteResponse(path=resolved, size=len(data))
 
 
@@ -688,7 +690,7 @@ async def serve_environment_directory(
     resolved = _resolve(req.path)
 
     async def serve(sandbox: AsyncSandbox) -> dict[str, Any]:
-        info = await sandbox.files.get_info(resolved)
+        info = await sandbox.files.get_info(resolved, user="user")
         directory = resolved if info.type == FileType.DIR else posixpath.dirname(resolved)
         file_part = "" if info.type == FileType.DIR else posixpath.basename(resolved)
 
@@ -699,7 +701,9 @@ async def serve_environment_directory(
             raise HTTPException(status_code=status.HTTP_409_CONFLICT, detail=str(exc)) from exc
 
         if not reused:
-            await sandbox.commands.run(workspace.serve_command(directory, port), timeout=15)
+            await sandbox.commands.run(
+                workspace.serve_command(directory, port), timeout=15, user="user"
+            )
             deadline = asyncio.get_running_loop().time() + _SERVE_WAIT_SECONDS
             while asyncio.get_running_loop().time() < deadline:
                 ports = await workspace.listening_ports(sandbox)
@@ -936,7 +940,9 @@ async def environment_terminal(
     # Output arrives on E2B's own read loop, so the callback stays sync and
     # only hands the bytes to a queue this side drains.
     output: asyncio.Queue[bytes] = asyncio.Queue()
-    handle = await sandbox.pty.create(size, output.put_nowait, cwd=WORKSPACE_ROOT, timeout=0)
+    handle = await sandbox.pty.create(
+        size, output.put_nowait, cwd=WORKSPACE_ROOT, timeout=0, user="user"
+    )
     pid = handle.pid
 
     try:
