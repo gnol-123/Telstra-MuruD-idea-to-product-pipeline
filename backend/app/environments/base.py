@@ -9,7 +9,7 @@ from collections.abc import Awaitable, Callable
 from dataclasses import dataclass
 from typing import Any
 
-from pydantic_ai.toolsets import FunctionToolset
+from pydantic_ai.toolsets import AbstractToolset
 
 from app.config import settings
 from app.tools.base import VerifyResult
@@ -62,9 +62,10 @@ class EnvSpec:
 
     runtime: str
     # Creates the sandbox and its workspace root. Returns the sandbox id.
+    # May drop config keys it could not honour; lifecycle persists ctx.config.
     provision: Callable[[EnvContext], Awaitable[str]]
     # Sync, never raises. The connection is made lazily on first tool call.
-    build: Callable[[EnvContext], FunctionToolset]
+    build: Callable[[EnvContext], AbstractToolset]
     # Can we reach sandbox_id right now.
     verify: Callable[[EnvContext], Awaitable[VerifyResult]]
     # Kill the sandbox. Safe when it is already gone.

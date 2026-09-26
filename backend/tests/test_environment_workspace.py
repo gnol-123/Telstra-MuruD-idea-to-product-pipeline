@@ -67,7 +67,7 @@ class FakeFiles:
     def _is_dir(self, path: str) -> bool:
         return any(p.startswith(path.rstrip("/") + "/") for p in self.data)
 
-    async def list(self, path: str, depth: int = 1):
+    async def list(self, path: str, depth: int = 1, **_k):
         if not self._is_dir(path):
             raise FileNotFoundException(path)
         seen: dict[str, Entry] = {}
@@ -87,7 +87,7 @@ class FakeFiles:
             )
         return list(seen.values())
 
-    async def read(self, path: str, format: str = "text"):
+    async def read(self, path: str, format: str = "text", **_k):
         if path not in self.data:
             raise FileNotFoundException(path)
         raw = self.data[path]
@@ -97,17 +97,17 @@ class FakeFiles:
             return bytearray(raw)
         return raw.decode("utf-8")
 
-    async def get_info(self, path: str):
+    async def get_info(self, path: str, **_k):
         if path in self.data:
             return Entry(posixpath.basename(path), FileType.FILE, path, len(self.data[path]))
         if self._is_dir(path):
             return Entry(posixpath.basename(path), FileType.DIR, path)
         raise FileNotFoundException(path)
 
-    async def write(self, path: str, data):
+    async def write(self, path: str, data, **_k):
         self.data[path] = data if isinstance(data, bytes) else data.encode()
 
-    async def remove(self, path: str):
+    async def remove(self, path: str, **_k):
         self.removed.append(path)
         self.data.pop(path, None)
 

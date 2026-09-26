@@ -10,6 +10,8 @@ export const AGENT_ICONS: Record<string, string> = {
   coding: "⌗",
   ux_ui: "✦",
   orchestrator: "❖",
+  scrutinizer: "⚖",
+  evaluator: "✓",
 };
 
 export const TOOL_ICONS: Record<string, string> = {
@@ -37,6 +39,8 @@ export const AGENT_ROLES: Record<string, string> = {
   coding: "Scaffolds, tests and ships code",
   ux_ui: "Turns briefs into UI and mockups",
   orchestrator: "Plans the work and provisions other agents",
+  scrutinizer: "Pitches the product and argues its limits",
+  evaluator: "Checks a stage against its brief",
 };
 
 export function agentRole(slug: string | undefined) {

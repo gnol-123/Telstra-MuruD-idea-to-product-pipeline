@@ -34,6 +34,8 @@ log = logging.getLogger(__name__)
 _ARGS_MAX = 2000
 # Progressive writes are throttled: each is an HTTP round trip to PostgREST.
 _FLUSH_INTERVAL_S = 1.5
+# Live-turn heartbeat. runs.sweep_stale treats 90s without one as dead.
+_HEARTBEAT_S = 20
 
 
 @dataclass
@@ -96,9 +98,9 @@ def build_context_instructions(context: list[InboundContext]) -> str | None:
     return "\n".join(parts)
 
 
-def _limits() -> UsageLimits:
+def _limits(request_limit: int | None = None) -> UsageLimits:
     """Per-turn cap on model requests. UsageLimitExceeded lands as a failed row."""
-    return UsageLimits(request_limit=settings.turn_request_limit)
+    return UsageLimits(request_limit=request_limit or settings.turn_request_limit)
 
 
 async def refresh_edge(repo: ProjectRepository, edge: Edge) -> Edge | None:
@@ -242,6 +244,7 @@ async def _stream_agent(
     durable: bool = False,
     resume: "ResumeInput | None" = None,
     workflow_id: str | None = None,
+    request_limit: int | None = None,
 ) -> AsyncIterator[tuple[str, dict]]:
     """Run one agent turn, yielding ``chunk`` deltas then one ``done`` or ``paused``.
 
@@ -323,7 +326,7 @@ async def _stream_agent(
         try:
             if resume is not None:
                 return await _resume_agent_direct(
-                    system_prompt, model, resume, instructions, toolsets, handler
+                    system_prompt, model, resume, instructions, toolsets, handler, request_limit
                 )
             if use_durable:
                 if workflow_id is not None:
@@ -331,13 +334,26 @@ async def _stream_agent(
 
                     with SetWorkflowID(workflow_id):
                         return await _run_agent_durable(
-                            system_prompt, model, prompt, history, instructions, handler_key
+                            system_prompt,
+                            model,
+                            prompt,
+                            history,
+                            instructions,
+                            handler_key,
+                            request_limit,
                         )
                 return await _run_agent_durable(
-                    system_prompt, model, prompt, history, instructions, handler_key
+                    system_prompt, model, prompt, history, instructions, handler_key, request_limit
                 )
             return await _run_agent_direct(
-                system_prompt, model, prompt, history, instructions, toolsets, handler
+                system_prompt,
+                model,
+                prompt,
+                history,
+                instructions,
+                toolsets,
+                handler,
+                request_limit,
             )
         finally:
             send.close()
@@ -377,7 +393,7 @@ async def _stream_agent(
 
 
 async def _run_agent_direct(
-    system_prompt, model, prompt, history, instructions, toolsets, handler
+    system_prompt, model, prompt, history, instructions, toolsets, handler, request_limit=None
 ) -> AgentTurn:
     agent = get_agent_for(system_prompt, model)
     result = await agent.run(
@@ -386,13 +402,13 @@ async def _run_agent_direct(
         instructions=instructions,
         toolsets=toolsets or None,
         event_stream_handler=handler,
-        usage_limits=_limits(),
+        usage_limits=_limits(request_limit),
     )
     return _turn_from_result(result, model)
 
 
 async def _resume_agent_direct(
-    system_prompt, model, resume, instructions, toolsets, handler
+    system_prompt, model, resume, instructions, toolsets, handler, request_limit=None
 ) -> AgentTurn:
     agent = get_agent_for(system_prompt, model)
     # Instructions are per run, not replayed from history: pass them again.
@@ -402,7 +418,7 @@ async def _resume_agent_direct(
         instructions=instructions,
         toolsets=toolsets or None,
         event_stream_handler=handler,
-        usage_limits=_limits(),
+        usage_limits=_limits(request_limit),
     )
     return _turn_from_result(result, model)
 
@@ -414,7 +430,7 @@ _HANDLERS: dict[str, Callable] = {}
 
 @DBOS.workflow(name="chat.stream_agent")
 async def _run_agent_durable(
-    system_prompt, model, prompt, history, instructions, handler_key
+    system_prompt, model, prompt, history, instructions, handler_key, request_limit=None
 ) -> AgentTurn:
     """Checkpointed counterpart to ``_run_agent_direct``.
 
@@ -427,7 +443,7 @@ async def _run_agent_durable(
         # run replays without deltas and finalises from turn.output alone.
         log.warning("no live handler for %s; recovering without streamed events", handler_key)
     return await _run_agent_direct(
-        system_prompt, model, prompt, history, instructions, None, handler
+        system_prompt, model, prompt, history, instructions, None, handler, request_limit
     )
 
 
@@ -516,6 +532,54 @@ class _Flusher:
             log.exception("progress write failed for turn %s", self._run.conversation_id)
 
 
+def _now_iso() -> str:
+    from datetime import UTC, datetime
+
+    return datetime.now(UTC).isoformat()
+
+
+class _Heartbeat:
+    """Bumps messages.heartbeat_at and the node's updated_at while a turn lives.
+
+    Its own task, so it beats through silent stretches (a nested run_agent,
+    a long tool call). ``stop`` waits out an in-flight beat, so a late
+    ``running`` never lands after finalise wrote ``ready``.
+    """
+
+    def __init__(self, repo: ProjectRepository, run: RunningTurn) -> None:
+        self._repo, self._run = repo, run
+        self._stop = asyncio.Event()
+        self._task: asyncio.Task | None = None
+
+    def start(self) -> None:
+        self._task = asyncio.ensure_future(self._loop())
+
+    async def stop(self) -> None:
+        self._stop.set()
+        if self._task is not None:
+            # Waited, not cancelled: a cancel cannot stop a write already in a thread.
+            await asyncio.wait([self._task])
+
+    async def _loop(self) -> None:
+        from anyio import to_thread
+
+        while True:
+            try:
+                await asyncio.wait_for(self._stop.wait(), _HEARTBEAT_S)
+                return
+            except TimeoutError:
+                pass
+            try:
+                await to_thread.run_sync(self._beat)
+            except Exception:
+                log.exception("heartbeat failed for turn %s", self._run.conversation_id)
+
+    def _beat(self) -> None:
+        self._repo.update_message(self._run.message.id, heartbeat_at=_now_iso())
+        if not self._stop.is_set():
+            self._repo.set_agent_status(self._run.node_id, "running")
+
+
 def close_dangling_calls(
     events: list[dict], *, status: str, only: set[str] | None = None
 ) -> list[dict]:
@@ -594,6 +658,10 @@ async def _finalise(
         if status == "complete" and not run.events:
             fields["content"] = turn.output
     fields = {k: v for k, v in fields.items() if v is not None}
+    if status != "failed":
+        # Explicit null: a wrong restart sweep may have set error, and
+        # messages_error_iff_failed rejects it beside any other status.
+        fields["error"] = None
     try:
         message = await to_thread.run_sync(lambda: repo.update_message(run.message.id, **fields))
     except Exception:
@@ -638,6 +706,7 @@ async def start_turn(
     resume: ResumeInput | None = None,
     sender_node_id: str | None = None,
     setup: Callable[[], Awaitable[TurnSetup]] | None = None,
+    request_limit: int | None = None,
 ) -> RunningTurn:
     """Register and start one turn. Raises ``runs.TurnBusy`` before writing anything.
 
@@ -666,14 +735,18 @@ async def start_turn(
                 )
             )
             run.message = await to_thread.run_sync(
-                lambda: repo.add_message(conversation_id, "assistant", "", status="running")
+                lambda: repo.add_message(
+                    conversation_id, "assistant", "", status="running", heartbeat_at=_now_iso()
+                )
             )
         else:
             history = []
             run.text.append(resume.message.content)
             run.events.extend(resume.message.tool_calls)
             run.message = await to_thread.run_sync(
-                lambda: repo.update_message(resume.message.id, status="running")
+                lambda: repo.update_message(
+                    resume.message.id, status="running", heartbeat_at=_now_iso()
+                )
             )
         await _set_node_status(repo, node_id, "running")
     except BaseException:
@@ -681,6 +754,7 @@ async def start_turn(
         raise
 
     flusher = _Flusher(repo, run)
+    heartbeat = _Heartbeat(repo, run)
 
     async def drive() -> None:
         nonlocal instructions, toolsets, on_paused
@@ -701,6 +775,7 @@ async def start_turn(
             reader waiting on a stream that never closes.
             """
             run.result = result
+            await heartbeat.stop()
             message = await _finalise(repo, tool_repo, run, status=status, turn=turn, error=error)
             run.message = message
             await runs.close(
@@ -728,6 +803,7 @@ async def start_turn(
                 durable=durable,
                 resume=resume,
                 workflow_id=workflow_id,
+                request_limit=request_limit,
             ):
                 if event in ("chunk", "tool"):
                     await runs.emit(run, event, payload)
@@ -818,6 +894,7 @@ async def start_turn(
         )
 
     async def guarded() -> None:
+        heartbeat.start()
         try:
             await drive()
         except asyncio.CancelledError:
@@ -829,10 +906,14 @@ async def start_turn(
             # the row running and the node stuck.
             log.exception("turn %s failed outside the model run", conversation_id)
             runs.unregister(conversation_id)
+            await heartbeat.stop()
             # Best effort: without it the row sits running until the restart sweep.
             with contextlib.suppress(Exception):
                 await _finalise(repo, tool_repo, run, status="failed", error="turn failed")
             await _set_node_status(repo, node_id, "ready")
+        finally:
+            # Safety net; every finalise path stopped it already.
+            await _shielded(heartbeat.stop())
 
     run.task = asyncio.ensure_future(guarded())
     return run

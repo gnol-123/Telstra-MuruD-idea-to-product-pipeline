@@ -94,8 +94,9 @@ async def ensure_provisioned(env_repo, node: EnvNode, *, force: bool = False) ->
         return await _reload(env_repo, node.id) or node
 
     # The id lands before the status, so nothing sees ready without a sandbox.
+    # ctx.config: provision may drop what it could not honour (e2b: mcp).
     await to_thread.run_sync(
-        lambda: env_repo.set_config(node.id, {**node.config, "sandbox_id": sandbox_id})
+        lambda: env_repo.set_config(node.id, {**ctx.config, "sandbox_id": sandbox_id})
     )
     await _set(env_repo, node.id, "ready", "Sandbox running")
     return await _reload(env_repo, node.id) or node

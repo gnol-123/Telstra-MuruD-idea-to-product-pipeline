@@ -11,6 +11,7 @@ from anyio import to_thread
 from pydantic_ai.toolsets import ApprovalRequiredToolset, PrefixedToolset
 
 from app.environments.base import WORKSPACE_ROOT, EnvContext
+from app.environments.browser import BROWSER_TOOL_NAMES
 from app.environments.lifecycle import ensure_provisioned
 from app.environments.registry import get_spec
 from app.repositories.environment_repo import EnvNode
@@ -104,7 +105,10 @@ async def assemble_environments(
         owner_by_tool[prefix] = current.id
         # pydantic-ai reports the prefixed name, and _record_pending_calls
         # looks the owner up by exactly that.
-        for base in ENV_TOOL_NAMES:
+        names = ENV_TOOL_NAMES
+        if current.config.get("mcp"):
+            names = (*ENV_TOOL_NAMES, *BROWSER_TOOL_NAMES)
+        for base in names:
             owner_by_tool[f"{prefix}_{base}"] = current.id
 
         toolsets.append(toolset)
@@ -159,4 +163,11 @@ def environment_note(described: list[tuple[EnvNode, str]], agent_node_id: str) -
             else "an environment the user provisioned"
         )
         lines.append(f'- "{node.name}" (tools: {prefix}_*): {purpose}.')
+        if node.config.get("mcp"):
+            lines.append(
+                f"  It also has a headless browser ({prefix}_browser_*). Reach servers "
+                "in this environment at http://172.17.0.1:<port>, never localhost. "
+                "Read pages with browser_snapshot; screenshots land in "
+                f"{WORKSPACE_ROOT}/{agent_node_id}/screenshots/."
+            )
     return "\n".join(lines)

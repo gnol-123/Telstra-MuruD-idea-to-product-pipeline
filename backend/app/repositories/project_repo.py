@@ -74,6 +74,8 @@ class Node:
     status_detail: str | None = None
     # Environment identity: runtime, role, sandbox id. Empty for other kinds.
     config: dict[str, Any] = field(default_factory=dict)
+    # Per agent type model request cap. None = settings.turn_request_limit.
+    request_limit: int | None = None
 
 
 @dataclass(frozen=True)
@@ -430,7 +432,7 @@ class ProjectRepository:
             .select(
                 "id, project_id, name, agent_type_id, tool_policy, kind,"
                 " position_x, position_y, status, status_detail, config, model,"
-                " agent_types(slug, system_prompt, model)"
+                " agent_types(slug, system_prompt, model, request_limit)"
             )
             .eq("project_id", project_id)
             .eq("owner_id", self._user_id)
@@ -446,7 +448,7 @@ class ProjectRepository:
             .select(
                 "id, project_id, name, agent_type_id, tool_policy,"
                 " position_x, position_y, model,"
-                " agent_types(slug, system_prompt, model)"
+                " agent_types(slug, system_prompt, model, request_limit)"
             )
             .eq("id", node_id)
             .eq("owner_id", self._user_id)
@@ -710,6 +712,7 @@ class ProjectRepository:
         status: str = "complete",
         error: str | None = None,
         sender_node_id: str | None = None,
+        heartbeat_at: str | None = None,
     ) -> Message:
         """
         Insert one message, returning the stored row.
@@ -732,6 +735,7 @@ class ProjectRepository:
             ("requests", requests),
             ("error", error),
             ("sender_node_id", sender_node_id),
+            ("heartbeat_at", heartbeat_at),
         ):
             if value is not None:
                 payload[key] = value
@@ -764,6 +768,7 @@ class ProjectRepository:
         "tool_calls",
         "status",
         "error",
+        "heartbeat_at",
         "model",
         "input_tokens",
         "output_tokens",
@@ -922,4 +927,5 @@ def _to_node(row: dict[str, Any]) -> Node:
         status=row.get("status") or "ready",
         status_detail=row.get("status_detail"),
         config=row.get("config") or {},
+        request_limit=template.get("request_limit"),
     )
