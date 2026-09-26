@@ -130,35 +130,49 @@ async def close(run: RunningTurn, event: str, payload: dict) -> None:
 def sweep_stale(client, *, min_age_s: float) -> dict[str, int]:
     """Repair rows a dead process left mid-turn, on backend startup.
 
-    Skips rows younger than ``min_age_s``: a draining replica finishing its
-    own turns during a redeploy should not be raced.
+    A running message is dead once its heartbeat (``created_at`` before the
+    first beat) is older than the cutoff. The live driver beats every 20s, so
+    another backend's long turn on the same DB is left alone.
 
-    ponytail: in-process registry means a live run in *this* process is never
-    swept (its rows are younger than min_age_s by construction at startup);
-    a second replica's live run is invisible here and could be swept if this
-    process starts while that one is still mid-turn on an old row. Acceptable
-    single-process ceiling; a DB-visible heartbeat would close it.
+    ponytail: heartbeat_at is stamped by each backend's own clock; skew between
+    replicas eats into the 90s floor. Use a DB-side now() via RPC if it bites.
     """
     from datetime import UTC, datetime, timedelta
 
-    cutoff = (datetime.now(UTC) - timedelta(seconds=min_age_s)).isoformat()
+    # At least 3 missed heartbeats. Z suffix: a "+" would need quoting in or_.
+    stale_s = max(min_age_s, 90)
+    cutoff = (datetime.now(UTC) - timedelta(seconds=stale_s)).strftime("%Y-%m-%dT%H:%M:%S.%fZ")
     counts = {}
     counts["messages"] = len(
         client.table("messages")
         .update({"status": "failed", "error": "backend restarted"})
         .eq("status", "running")
-        .lt("created_at", cutoff)
+        .or_(f"heartbeat_at.lt.{cutoff},and(heartbeat_at.is.null,created_at.lt.{cutoff})")
         .execute()
         .data
     )
-    counts["tool_calls"] = len(
+    # Whatever still runs after the sweep above is live somewhere.
+    live = {
+        r["conversation_id"]
+        for r in client.table("messages")
+        .select("conversation_id")
+        .eq("status", "running")
+        .execute()
+        .data
+    }
+    # tool_calls has no message_id: a running call is dead when its
+    # conversation has no live running message.
+    # ponytail: live ids go in the URL; fine for tens of concurrent turns.
+    q = (
         client.table("tool_calls")
         .update({"status": "error", "error": "backend restarted"})
         .eq("status", "running")
         .lt("created_at", cutoff)
-        .execute()
-        .data
     )
+    if live:
+        q = q.not_.in_("conversation_id", sorted(live))
+    counts["tool_calls"] = len(q.execute().data)
+    # The heartbeat re-touches its node, so only abandoned ones are this old.
     counts["nodes"] = len(
         client.table("nodes")
         .update({"status": "ready"})
