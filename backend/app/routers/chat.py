@@ -247,6 +247,7 @@ async def chat(
             # Only the LLM call becomes durable; persistence is identical either way.
             durable=bool(settings.dbos_database_url),
             setup=_setup(turn_repos, node, conversation_id),
+            request_limit=node.request_limit,
         )
     except runs.TurnBusy:
         raise _BUSY from None
@@ -305,6 +306,7 @@ async def chat_stream(
             client_token=req.client_token,
             durable=bool(settings.dbos_database_url),
             setup=_setup(turn_repos, node, conversation_id),
+            request_limit=node.request_limit,
         )
     except runs.TurnBusy:
         raise _BUSY from None
@@ -457,6 +459,7 @@ async def chat_resume(
             project_id=node.project_id,
             tool_repo=tool_repo,
             setup=_setup(turn_repos, node, conversation_id),
+            request_limit=node.request_limit,
             resume=ResumeInput(history=history, deferred=deferred_results, message=awaiting),
         )
     except runs.TurnBusy:
