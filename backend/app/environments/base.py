@@ -62,6 +62,7 @@ class EnvSpec:
 
     runtime: str
     # Creates the sandbox and its workspace root. Returns the sandbox id.
+    # May drop config keys it could not honour; lifecycle persists ctx.config.
     provision: Callable[[EnvContext], Awaitable[str]]
     # Sync, never raises. The connection is made lazily on first tool call.
     build: Callable[[EnvContext], AbstractToolset]

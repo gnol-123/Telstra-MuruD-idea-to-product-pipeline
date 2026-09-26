@@ -41,8 +41,11 @@ _PREFIX = "playwright-"
 _READY_S = 45.0
 _RETRY_S = 1.0
 _CLOSE_S = 10.0
-# ponytail: kills every browser in this sandbox; per-session container ids if two agents ever browse the same sandbox at once
-_PRUNE = "docker ps -q --filter ancestor=mcp/playwright | xargs -r docker rm -f"
+# Run on open and close. By label: the image is pinned by digest, so an
+# ancestor=mcp/playwright filter matches nothing (verified live).
+# ponytail: kills every browser in this sandbox; per-session container ids
+# if two agents ever browse the same sandbox at once
+_PRUNE = "docker ps -q --filter label=docker-mcp-name=playwright | xargs -r docker rm -f"
 
 _UNSAFE = re.compile(r"[^a-z0-9_-]+")
 
@@ -80,6 +83,7 @@ class _Session:
         self._mcp: Any = None
         self._error: str | None = None
         self._task: asyncio.Task | None = None
+        self._sbx: AsyncSandbox | None = None
         self._ready = asyncio.Event()
         self._stop = asyncio.Event()
         self._last: Exception | None = None
@@ -121,6 +125,7 @@ class _Session:
             if self._mcp is not None:
                 return sbx, self._mcp
             await self._prune(sbx)
+            self._sbx = sbx
             headers = {"Authorization": f"Bearer {await sbx.get_mcp_token()}"}
             mcp = mcp_base.toolset(sbx.get_mcp_url(), headers)
             self._task = asyncio.create_task(self._hold(mcp))
@@ -148,6 +153,10 @@ class _Session:
             logger.warning("browser session did not close in %ss", _CLOSE_S)
             task.cancel()
         self._ready, self._stop = asyncio.Event(), asyncio.Event()
+        # The gateway leaves containers running after the session ends.
+        sbx, self._sbx = self._sbx, None
+        if sbx is not None:
+            await self._prune(sbx)
 
     async def end_run(self) -> None:
         await self.close()
@@ -188,11 +197,11 @@ def build(ctx: EnvContext, get_sandbox: Callable[[], Awaitable[AsyncSandbox]]) -
         return await _call("browser_snapshot", {})
 
     async def browser_click(element: str, ref: str) -> str:
-        return await _call("browser_click", {"element": element, "ref": ref})
+        return await _call("browser_click", {"element": element, "target": ref})
 
     async def browser_type(element: str, ref: str, text: str, submit: bool = False) -> str:
         return await _call(
-            "browser_type", {"element": element, "ref": ref, "text": text, "submit": submit}
+            "browser_type", {"element": element, "target": ref, "text": text, "submit": submit}
         )
 
     async def browser_wait_for(text: str = "", time: float = 0) -> str:
