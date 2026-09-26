@@ -105,7 +105,9 @@ async def assemble_environments(
         owner_by_tool[prefix] = current.id
         # pydantic-ai reports the prefixed name, and _record_pending_calls
         # looks the owner up by exactly that.
-        names = (*ENV_TOOL_NAMES, *BROWSER_TOOL_NAMES) if current.config.get("mcp") else ENV_TOOL_NAMES
+        names = ENV_TOOL_NAMES
+        if current.config.get("mcp"):
+            names = (*ENV_TOOL_NAMES, *BROWSER_TOOL_NAMES)
         for base in names:
             owner_by_tool[f"{prefix}_{base}"] = current.id
 
