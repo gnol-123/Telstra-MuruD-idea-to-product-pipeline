@@ -9,6 +9,10 @@ alter table public.messages add constraint messages_status_valid
 alter table public.messages alter column tool_calls set default '[]'::jsonb;
 update public.messages set tool_calls = '[]'::jsonb where tool_calls is null;
 
+-- messages: the agent node that wrote a user row (canvas run_agent). Null = the user.
+alter table public.messages add column if not exists sender_node_id uuid
+  references public.nodes (id) on delete set null;
+
 -- tool_calls: a call aborted by cancel.
 alter table public.tool_calls drop constraint if exists tool_calls_status_valid;
 alter table public.tool_calls add constraint tool_calls_status_valid

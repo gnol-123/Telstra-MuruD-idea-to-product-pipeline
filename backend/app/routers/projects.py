@@ -1,5 +1,6 @@
 """Projects and the agent nodes provisioned inside them."""
 
+import asyncio
 import logging
 from datetime import datetime
 from typing import Any, Literal
@@ -470,9 +471,8 @@ async def list_node_messages(
 ) -> list[ChatMessage]:
     """An agent node's transcript, oldest first. ``after_seq`` for polling.
 
-    Reads on the pooled service client (TurnRepos), not a fresh per-request
-    user client: get_user_client deliberately builds a brand new httpx.Client
-    (and pays a cold TLS handshake) on every call.
+    Reads on the service client (TurnRepos). Predates user clients sharing a
+    pool (see supabase._user_http); either is warm now.
 
     No separate project lookup: get_agent_node is owner-filtered and
     its project_id is checked below.
@@ -598,6 +598,7 @@ async def _provision_tool_node(
     position_x: float,
     position_y: float,
     tool_repo: ToolRepo,
+    verify: bool = True,
 ) -> str:
     """Create a tool row, store its secrets, verify it. Returns the node id.
 
@@ -624,7 +625,8 @@ async def _provision_tool_node(
     for key, value in secrets.items():
         await to_thread.run_sync(lambda k=key, v=value: tool_repo.set_secret(node_id, k, v))
 
-    await _verify_tool_node(node_id, tool_repo)
+    if verify:
+        await _verify_tool_node(node_id, tool_repo)
     return node_id
 
 
@@ -750,10 +752,12 @@ async def _wire_default_presets(
                 position_x=req.position_x + _DEFAULT_TOOL_DX,
                 position_y=req.position_y + slot * _DEFAULT_TOOL_DY,
                 tool_repo=tool_repo,
+                verify=False,
             )
         except Exception:
             log.exception("default preset %s failed for agent %s", preset.slug, node_id)
             return
+        tool_ids.append(tool_id)
         try:
             await to_thread.run_sync(lambda t=tool_id: repo.create_edge(t, node_id, "tool"))
         except Exception:
@@ -762,9 +766,39 @@ async def _wire_default_presets(
 
     # Each preset is independent, so wire them at once rather than paying
     # ~6 sequential round trips each. gather never raises: wire swallows.
+    tool_ids: list[str] = []
     async with anyio.create_task_group() as tg:
         for slot, preset, tool_type in planned:
             tg.start_soon(wire, slot, preset, tool_type)
+
+    # Verify hits the network (MCP handshake, API ping) and was gating the
+    # response. Rows sit at 'pending' until it lands; the canvas poll shows it.
+    task = asyncio.create_task(_verify_all(tool_ids, tool_repo))
+    _background.add(task)
+    task.add_done_callback(_background.discard)
+
+
+# Strong refs so the loop doesn't GC a running verify.
+_background: set[asyncio.Task] = set()
+
+
+async def _verify_all(tool_ids: list[str], tool_repo: ToolRepo) -> None:
+    async def one(tool_id: str) -> None:
+        try:
+            await _verify_tool_node(tool_id, tool_repo)
+        except Exception:
+            log.exception("background verify failed for tool node %s", tool_id)
+            # Never leave it 'pending': the canvas spins its agent until it isn't.
+            try:
+                await to_thread.run_sync(
+                    lambda: tool_repo.set_node_status(tool_id, "error", "Verification failed.")
+                )
+            except Exception:
+                log.exception("could not mark tool node %s as error", tool_id)
+
+    async with anyio.create_task_group() as tg:
+        for tool_id in tool_ids:
+            tg.start_soon(one, tool_id)
 
 
 async def _verify_tool_node(node_id: str, tool_repo: ToolRepo) -> None:

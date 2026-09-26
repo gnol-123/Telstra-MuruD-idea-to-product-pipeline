@@ -1,0 +1,103 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 1280 400" width="1280" height="400">
+  <defs>
+    <pattern id="dots" width="24" height="24" patternUnits="userSpaceOnUse">
+      <circle cx="2" cy="2" r="1" fill="#141e26"/>
+    </pattern>
+  </defs>
+  <style>
+    text { font-family: ui-sans-serif, -apple-system, "Segoe UI", Helvetica, Arial, sans-serif; }
+    .mono { font-family: ui-monospace, "SF Mono", Menlo, Consolas, monospace; }
+    .card { fill: #0b1116; stroke: #1d2731; stroke-width: 1.5; }
+    .name { fill: #f1f5f9; font-size: 17px; font-weight: 700; }
+    .sub { fill: #5b6975; font-size: 12px; }
+    .flow { stroke-width: 2; stroke-dasharray: 6 7; animation: dash 1s linear infinite; }
+    @keyframes dash { to { stroke-dashoffset: -26; } }
+    .step { font-size: 15px; }
+  </style>
+
+  <rect width="1280" height="400" rx="18" fill="#05080a"/>
+  <rect width="1280" height="400" rx="18" fill="url(#dots)"/>
+
+  <!-- source agent -->
+  <rect class="card" x="80" y="70" width="300" height="220" rx="14"/>
+  <text x="104" y="104" class="name">Market Research</text>
+  <text x="104" y="124" class="sub">its own chat history</text>
+  <g fill="#1a242d">
+    <rect x="104" y="146" width="220" height="14" rx="7"/>
+    <rect x="144" y="170" width="212" height="14" rx="7"/>
+    <rect x="104" y="194" width="240" height="14" rx="7"/>
+  </g>
+  <rect x="144" y="218" width="190" height="14" rx="7" fill="#22d3ee" fill-opacity=".45" opacity="0">
+    <animate attributeName="opacity" values="0;0;1;1;0" keyTimes="0;.3;.32;.96;1" dur="10s" repeatCount="indefinite"/>
+  </rect>
+  <rect x="104" y="242" width="230" height="14" rx="7" fill="#22d3ee" fill-opacity=".45" opacity="0">
+    <animate attributeName="opacity" values="0;0;1;1;0" keyTimes="0;.4;.42;.96;1" dur="10s" repeatCount="indefinite"/>
+  </rect>
+
+  <!-- arrows -->
+  <line class="flow" x1="380" y1="180" x2="510" y2="180" stroke="#22d3ee"/>
+  <line class="flow" x1="380" y1="180" x2="510" y2="180" stroke="#fbbf24" opacity="0">
+    <animate attributeName="opacity" values="0;0;1;1;0;0" keyTimes="0;.45;.46;.83;.84;1" dur="10s" repeatCount="indefinite"/>
+  </line>
+  <line class="flow" x1="770" y1="180" x2="900" y2="180" stroke="#22d3ee"/>
+  <circle cx="380" cy="180" r="6" fill="#22d3ee"/>
+  <circle cx="900" cy="180" r="6" fill="#05080a" stroke="#22d3ee" stroke-width="2"/>
+
+  <!-- summary note on the arrow -->
+  <rect x="510" y="128" width="260" height="104" rx="12" fill="#0e161c" stroke="#2a3642" stroke-width="1.5"/>
+  <rect x="510" y="128" width="260" height="104" rx="12" fill="none" stroke="#22d3ee" stroke-width="2" opacity="0">
+    <animate attributeName="opacity" values="0;0;1;1;0;0" keyTimes="0;.83;.84;.9;.93;1" dur="10s" repeatCount="indefinite"/>
+  </rect>
+  <text x="640" y="154" text-anchor="middle" class="mono" fill="#5b6975" font-size="10.5" letter-spacing="2">SUMMARY ON THE ARROW</text>
+  <text x="640" y="182" text-anchor="middle" fill="#e2e8f0" font-size="14">budgeting app for AU students</text>
+  <text x="640" y="204" text-anchor="middle" fill="#e2e8f0" font-size="14">main rival: CommBank</text>
+
+  <!-- freshness pill -->
+  <g>
+    <animate attributeName="opacity" values="1;1;0;0;1;1" keyTimes="0;.45;.46;.83;.84;1" dur="10s" repeatCount="indefinite"/>
+    <rect x="580" y="246" width="120" height="26" rx="13" fill="#22d3ee" fill-opacity=".12" stroke="#22d3ee" stroke-opacity=".6"/>
+    <text x="640" y="263" text-anchor="middle" class="mono" fill="#22d3ee" font-size="11" font-weight="700" letter-spacing="1">UP TO DATE</text>
+  </g>
+  <g opacity="0">
+    <animate attributeName="opacity" values="0;0;1;1;0;0" keyTimes="0;.45;.46;.83;.84;1" dur="10s" repeatCount="indefinite"/>
+    <rect x="550" y="246" width="180" height="26" rx="13" fill="#fbbf24"/>
+    <text x="640" y="263" text-anchor="middle" class="mono" fill="#1a1204" font-size="11" font-weight="700" letter-spacing="1">STALE · 2 NEW MSGS</text>
+  </g>
+
+  <!-- target agent -->
+  <rect class="card" x="900" y="70" width="300" height="220" rx="14"/>
+  <text x="924" y="104" class="name">Project Scoping</text>
+  <text x="924" y="124" class="sub">what it knows on its next reply</text>
+  <g opacity="0">
+    <animate attributeName="opacity" values="0;0;1;1;0" keyTimes="0;.14;.16;.96;1" dur="10s" repeatCount="indefinite"/>
+    <rect x="924" y="146" width="252" height="70" rx="10" fill="#22d3ee" fill-opacity=".07" stroke="#22d3ee" stroke-opacity=".35"/>
+    <text x="940" y="174" fill="#a5f3fc" font-size="13">"Budgeting app for AU students.</text>
+    <text x="940" y="196" fill="#a5f3fc" font-size="13"> Main rival is CommBank."</text>
+  </g>
+  <text x="924" y="258" class="sub">+ its own chat history</text>
+
+  <!-- travelling pulses -->
+  <circle cy="180" r="6" fill="#e0fbff">
+    <animate attributeName="cx" values="770;770;900;900" keyTimes="0;.05;.15;1" dur="10s" repeatCount="indefinite"/>
+    <animate attributeName="opacity" values="0;0;1;1;0;0" keyTimes="0;.04;.05;.15;.16;1" dur="10s" repeatCount="indefinite"/>
+  </circle>
+  <circle cy="180" r="6" fill="#e0fbff">
+    <animate attributeName="cx" values="380;380;510;510" keyTimes="0;.75;.83;1" dur="10s" repeatCount="indefinite"/>
+    <animate attributeName="opacity" values="0;0;1;1;0;0" keyTimes="0;.74;.75;.83;.84;1" dur="10s" repeatCount="indefinite"/>
+  </circle>
+
+  <!-- step captions -->
+  <g class="step" text-anchor="middle" fill="#3e4a55">
+    <text x="213" y="345">1 · Scoping reads the summary when it replies</text>
+    <text x="640" y="345">2 · Research keeps talking, the arrow goes stale</text>
+    <text x="1067" y="345">3 · You hit refresh, a new summary is written</text>
+  </g>
+  <g class="step" text-anchor="middle" fill="#f1f5f9">
+    <text x="213" y="345" opacity="0">1 · Scoping reads the summary when it replies
+      <animate attributeName="opacity" values="1;1;0;0" keyTimes="0;.28;.29;1" dur="10s" repeatCount="indefinite"/></text>
+    <text x="640" y="345" opacity="0">2 · Research keeps talking, the arrow goes stale
+      <animate attributeName="opacity" values="0;0;1;1;0;0" keyTimes="0;.28;.29;.74;.75;1" dur="10s" repeatCount="indefinite"/></text>
+    <text x="1067" y="345" opacity="0">3 · You hit refresh, a new summary is written
+      <animate attributeName="opacity" values="0;0;1;1" keyTimes="0;.74;.75;1" dur="10s" repeatCount="indefinite"/></text>
+  </g>
+</svg>

@@ -207,6 +207,8 @@ values
       || chr(10)
       || 'Comments say what, not why you were clever. Delete code before adding it. When you cut a real corner, mark it with a comment naming the ceiling and the upgrade path.' || chr(10)
       || chr(10)
+      || 'When you have something running to show, preview it: get a port from next_free_port, start the server in the background bound to 0.0.0.0, then call publish_preview with a short title naming what it shows (like ''Todo app'', never a port) so it appears beside the chat.' || chr(10)
+      || chr(10)
       || 'Show the diff, then at most three lines: what you skipped and when it would matter.'
     ),
     30

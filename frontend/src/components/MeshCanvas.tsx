@@ -50,6 +50,9 @@ function dedupeById<T extends { id: string }>(items: T[]): T[] {
   return [...map.values()];
 }
 
+// Id prefix for a dropped card the backend hasn't confirmed yet.
+const PENDING_PREFIX = "pending-";
+
 export default function MeshCanvas({
   project,
   onBack,
@@ -90,6 +93,9 @@ export default function MeshCanvas({
   // In-flight create/delete calls. Non-zero means the server list is behind
   // the UI, so the poll merges status only and skips add/remove.
   const pendingMutations = useRef(0);
+  // Agents dropped this session. Only these lock while tools verify, so a
+  // backfilled or orphaned 'pending' tool can't lock a card for good.
+  const createdHere = useRef(new Set<string>());
   // Same idea for the tool modal: its create call lives inside the modal.
   const toolModalOpen = useRef(false);
   // Ticks once per completed mutation, so a poll can detect one landed while
@@ -312,23 +318,38 @@ export default function MeshCanvas({
   }
 
   async function handleAddAgent(agentSlug: string, pos?: { x: number; y: number }) {
+    const offset = nodes.length * 40;
+    const position_x = pos?.x ?? 120 + offset;
+    const position_y = pos?.y ?? 100 + offset;
+    // Card lands now with a spinner; swapped for the real row on confirm.
+    const tempId = `${PENDING_PREFIX}${crypto.randomUUID()}`;
+    const placeholder: ProjectNode = {
+      kind: "agent",
+      id: tempId,
+      project_id: project.id,
+      name: agentTypes.find((t) => t.slug === agentSlug)?.name ?? agentSlug,
+      agent_slug: agentSlug,
+      tool_policy: "auto",
+      position_x,
+      position_y,
+    };
+    setNodes((n) => [...n, placeholder]);
     try {
-      const offset = nodes.length * 40;
-      const node = await mutating(() =>
-        createAgentNode(project.id, agentSlug, {
-          position_x: pos?.x ?? 120 + offset,
-          position_y: pos?.y ?? 100 + offset,
-        })
-      );
-      setNodes((n) => dedupeById([...n, node]));
-      setSelectedId(node.id);
+      const node = await mutating(() => createAgentNode(project.id, agentSlug, { position_x, position_y }));
 
       // "kind='agent' now provisions the agent type's default_presets": one
       // tool node + tool edge per preset, created server-side alongside the
       // agent. The response above is still just the agent's own node, so
-      // reload to pick up whatever else the backend just created.
+      // reload to pick up whatever else the backend just created. Placeholder
+      // goes only after, so the spinner hands straight off to pending tools.
       const agentType = agentTypes.find((t) => t.slug === agentSlug);
+      createdHere.current.add(node.id);
       await reloadCanvas();
+      setNodes((n) => {
+        const rest = n.filter((x) => x.id !== tempId);
+        return rest.some((x) => x.id === node.id) ? rest : [...rest, node];
+      });
+      setSelectedId(node.id);
       if (agentType?.default_presets && agentType.default_presets.length > 0) {
         setNotice(
           `${agentType.name} came equipped with ${agentType.default_presets.length} default tool${
@@ -337,6 +358,7 @@ export default function MeshCanvas({
         );
       }
     } catch (e) {
+      setNodes((n) => n.filter((x) => x.id !== tempId));
       setError(e instanceof ApiError ? e.message : "Could not add agent");
     }
   }
@@ -676,7 +698,8 @@ export default function MeshCanvas({
   const contextLinkCount = edges.filter((e) => e.kind === "context").length;
 
   const chatNode = nodes.find((n) => n.id === chatNodeId);
-  const openChat = (id: string) => {
+  const openChat = (id: string, envId?: string) => {
+    if (envId) handleChatChange(id, (p) => ({ ...p, panelOpen: true, panelEnvId: envId }));
     setSelectedId(id);
     setChatNodeId(id);
   };
@@ -865,6 +888,12 @@ export default function MeshCanvas({
                   staleCount={inbound.filter((e) => e.is_stale).length}
                   busy={!!chatByNode[node.id]?.busy}
                   deleting={deletingIds.has(node.id)}
+                  creating={
+                    node.id.startsWith(PENDING_PREFIX) ||
+                    // Default tools still verifying in the background.
+                    (createdHere.current.has(node.id) &&
+                      (attachedToolsByAgent.get(node.id) ?? []).some((t) => t.tool.status === "pending"))
+                  }
                   zoom={zoom}
                   attachedEnvironments={isAgentNode(node) ? attachedEnvsByAgent.get(node.id) ?? [] : undefined}
                   onSelect={() => setSelectedId(node.id)}
@@ -878,7 +907,7 @@ export default function MeshCanvas({
                   onChipClick={(toolNodeId) => setSelectedId(toolNodeId)}
                   onChipRemove={(edge) => handleUnequipTool(edge)}
                   onClearStale={() => clearStaleFor(node.id)}
-                  onOpenChat={isAgentNode(node) ? () => openChat(node.id) : undefined}
+                  onOpenChat={isAgentNode(node) ? (envId) => openChat(node.id, envId) : undefined}
                   onOpenWorkspace={openWorkspace}
                 />
               );

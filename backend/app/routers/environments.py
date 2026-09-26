@@ -157,6 +157,22 @@ class PortsResponse(BaseModel):
     ports: list[PortInfo]
 
 
+class PreviewInfo(BaseModel):
+    id: str
+    title: str | None = None
+    port: int
+    path: str = "/"
+    url: str
+    live: bool
+    published: bool
+    agent_node_id: str | None = None
+    created_at: str | None = None
+
+
+class PreviewsResponse(BaseModel):
+    previews: list[PreviewInfo]
+
+
 class ServeRequest(BaseModel):
     # A directory to serve, or a file whose directory to serve. Absolute, or
     # relative to the workspace root.
@@ -622,6 +638,35 @@ async def list_environment_ports(
             detail=f"Could not list ports: {(exc.stderr or '')[-300:]}",
         ) from exc
     return PortsResponse(ports=[PortInfo(**p) for p in payloads])
+
+
+@router.get("/{node_id}/previews", response_model=PreviewsResponse)
+async def list_environment_previews(
+    project_id: UUID, node_id: UUID, env_repo: EnvRepo
+) -> PreviewsResponse:
+    """Published previews first (newest first), then any other listening port.
+
+    Mirrors /ports but merges in the agent-published registry, so a preview
+    an agent named shows its title instead of just a bare port.
+    """
+    node = await _load_ready(project_id, node_id, env_repo)
+
+    async def scan(sandbox: AsyncSandbox) -> list[dict[str, Any]]:
+        registry = await workspace.read_registry(sandbox)
+        # Live means answers HTTP, not just listening (ssh, rpcbind).
+        listening = await workspace.web_ports(sandbox, await workspace.listening_ports(sandbox))
+        return workspace.merge_previews(
+            registry, listening, lambda port: f"https://{sandbox.get_host(port)}"
+        )
+
+    try:
+        rows = await _on_sandbox(env_repo, node, scan)
+    except CommandExitException as exc:
+        raise HTTPException(
+            status_code=status.HTTP_502_BAD_GATEWAY,
+            detail=f"Could not list previews: {(exc.stderr or '')[-300:]}",
+        ) from exc
+    return PreviewsResponse(previews=[PreviewInfo(**r) for r in rows])
 
 
 # How long /serve waits for a new server to start listening before answering

@@ -37,7 +37,8 @@ export default function CodeView({
 }: {
   file: OpenFile;
   agentNames: Record<string, string>;
-  onEdit: () => void;
+  // Omit for a read-only view.
+  onEdit?: () => void;
   onDraftChange: (draft: string) => void;
   onSave: () => void;
   onCancelEdit: () => void;
@@ -118,7 +119,7 @@ export default function CodeView({
                   ▶ Preview
                 </ToolbarBtn>
               )}
-              {file.kind === "text" && !file.truncated && !file.loading && !file.error && (
+              {onEdit && file.kind === "text" && !file.truncated && !file.loading && !file.error && (
                 <ToolbarBtn onClick={onEdit} title="Make a quick edit">
                   ✎ Edit
                 </ToolbarBtn>

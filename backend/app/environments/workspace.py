@@ -31,7 +31,7 @@ from e2b import (
 )
 
 from app.environments import e2b
-from app.environments.base import EnvContext
+from app.environments.base import WORKSPACE_ROOT, EnvContext
 
 logger = logging.getLogger(__name__)
 
@@ -258,20 +258,27 @@ for pid in os.listdir("/proc"):
 res = {}
 for addr, port, inode in socks:
     pid = owners.get(inode)
-    cmd = ""
+    cmd = cwd = ""
     if pid:
         try:
             raw = open("/proc/%s/cmdline" % pid, "rb").read()
             cmd = raw.replace(b"\\0", b" ").decode("utf-8", "replace").strip()
         except OSError:
             pass
+        try:
+            cwd = os.readlink("/proc/%s/cwd" % pid)
+        except OSError:
+            cwd = ""
     local = addr in LOOPBACK
-    e = res.setdefault(port, {"port": port, "pid": None, "command": "", "local_only": True})
+    e = res.setdefault(
+        port, {"port": port, "pid": None, "command": "", "cwd": "", "local_only": True}
+    )
     if not local:
         e["local_only"] = False
     if pid and e["pid"] is None:
         e["pid"] = int(pid)
         e["command"] = cmd
+        e["cwd"] = cwd
 print(json.dumps(sorted(res.values(), key=lambda r: r["port"])))
 """
 
@@ -296,6 +303,8 @@ class ListeningPort:
     # refuses the forwarded Host header is the usual reason a preview fails,
     # so the UI says so.
     local_only: bool
+    # Working directory of the owning process, when /proc shows it.
+    cwd: str = ""
 
     @property
     def process(self) -> str:
@@ -319,6 +328,7 @@ def parse_ports_json(stdout: str) -> list[ListeningPort]:
             pid=r.get("pid"),
             command=str(r.get("command") or ""),
             local_only=bool(r.get("local_only")),
+            cwd=str(r.get("cwd") or ""),
         )
         for r in rows
     ]
@@ -359,6 +369,40 @@ async def listening_ports(sandbox: AsyncSandbox) -> list[ListeningPort]:
         logger.info("port script failed, falling back to /proc/net/tcp")
     r = await sandbox.commands.run(PROC_NET_COMMAND, timeout=15)
     return previewable(parse_proc_net_tcp(r.stdout))
+
+
+# Runs inside the sandbox: which of the given ports answer HTTP. Any status
+# counts; ssh, rpcbind and friends fail the parse and drop out.
+_HTTP_PROBE_SCRIPT = """
+import http.client, json, sys
+from concurrent.futures import ThreadPoolExecutor
+def ok(port):
+    try:
+        c = http.client.HTTPConnection("127.0.0.1", port, timeout=2)
+        c.request("GET", "/")
+        c.getresponse()
+        return port
+    except Exception:
+        return None
+ports = [int(p) for p in sys.argv[1:]]
+with ThreadPoolExecutor(max_workers=16) as ex:
+    print(json.dumps([p for p in ex.map(ok, ports) if p is not None]))
+"""
+
+
+async def web_ports(sandbox: AsyncSandbox, ports: list[ListeningPort]) -> list[ListeningPort]:
+    """The subset of ports that answer HTTP. Empty on any probe failure."""
+    if not ports:
+        return []
+    cmd = " ".join(
+        ["python3", "-c", shlex.quote(_HTTP_PROBE_SCRIPT), *(str(p.port) for p in ports)]
+    )
+    try:
+        r = await sandbox.commands.run(cmd, timeout=15)
+        answering = set(json.loads(r.stdout.strip().splitlines()[-1]))
+    except (CommandExitException, ValueError, IndexError):
+        return []
+    return [p for p in ports if p.port in answering]
 
 
 # -- static serving --------------------------------------------------------------
@@ -413,3 +457,104 @@ def port_payload(sandbox: AsyncSandbox, p: ListeningPort) -> dict[str, Any]:
         "local_only": p.local_only,
         "serving": serving_directory(p),
     }
+
+
+# -- agent previews ------------------------------------------------------------
+
+# Where agents publish their own servers. Disjoint from SERVE_PORTS (8080-8099,
+# the UI's own serve button) so the two never fight over a port.
+AGENT_PORTS = range(3000, 3100)
+
+PREVIEW_REGISTRY_FILE = "murud-previews.json"
+
+
+def next_free(candidates: range, taken: set[int]) -> int | None:
+    """The first candidate not in taken, or None if all are."""
+    for port in candidates:
+        if port not in taken:
+            return port
+    return None
+
+
+async def read_registry(sandbox: AsyncSandbox) -> list[dict[str, Any]]:
+    """Published previews, oldest to newest. Missing or corrupt file reads as empty."""
+    try:
+        raw = await sandbox.files.read(sandbox_temp(PREVIEW_REGISTRY_FILE))
+        data = json.loads(raw)
+        return data if isinstance(data, list) else []
+    except (FileNotFoundException, ValueError, TypeError):
+        return []
+
+
+async def write_registry(sandbox: AsyncSandbox, entries: list[dict[str, Any]]) -> None:
+    await sandbox.files.write(sandbox_temp(PREVIEW_REGISTRY_FILE), json.dumps(entries))
+
+
+async def upsert_preview(sandbox: AsyncSandbox, entry: dict[str, Any]) -> None:
+    """Add or replace the entry for entry['port']. Read-modify-write, not atomic.
+
+    # ponytail: two agents publishing at once can race and drop one write.
+    # Fine at today's scale (one coding agent per project); a file lock or a
+    # DB row would fix it if concurrent publishes become real.
+    """
+    entries = await read_registry(sandbox)
+    entries = [e for e in entries if e.get("port") != entry["port"]]
+    entries.append(entry)
+    await write_registry(sandbox, entries)
+
+
+def fallback_title(p: ListeningPort) -> str | None:
+    """Unpublished server name: its workspace folder, else its process."""
+    folder = serving_directory(p) or p.cwd
+    if folder.startswith(WORKSPACE_ROOT + "/"):
+        return posixpath.basename(folder.rstrip("/"))
+    return p.process or None
+
+
+def merge_previews(
+    registry: list[dict[str, Any]],
+    listening: list[ListeningPort],
+    host_fn: Callable[[int], str],
+) -> list[dict[str, Any]]:
+    """Live registry rows (newest first) then unregistered listening ports.
+
+    A registered port that stopped listening is dropped: dead previews don't show.
+    """
+    live_ports = {p.port for p in listening}
+    registered_ports = {e.get("port") for e in registry}
+
+    rows = []
+    for e in reversed(registry):
+        port = e["port"]
+        if port not in live_ports:
+            continue
+        rows.append(
+            {
+                "id": str(port),
+                "title": e.get("title"),
+                "port": port,
+                "path": e.get("path") or "/",
+                "url": host_fn(port),
+                "live": port in live_ports,
+                "published": True,
+                "agent_node_id": e.get("agent_node_id"),
+                "created_at": e.get("created_at"),
+            }
+        )
+    for p in listening:
+        if p.port in registered_ports:
+            continue
+        rows.append(
+            {
+                "id": str(p.port),
+                "title": fallback_title(p),
+                "port": p.port,
+                "path": "/",
+                "url": host_fn(p.port),
+                "live": True,
+                "published": False,
+                "agent_node_id": None,
+                "created_at": None,
+            }
+        )
+    return rows

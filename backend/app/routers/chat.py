@@ -22,6 +22,7 @@ from app.services import runs
 from app.services.turns import prepare_turn
 from app.workflows import (
     ResumeInput,
+    TurnSetup,
     attach_events,
     cancel_paused,
     cancel_turn,
@@ -58,6 +59,8 @@ class ChatMessage(BaseModel):
     status: str
     created_at: datetime
     tool_calls: list[dict[str, Any]] = []
+    # Agent node that wrote this user row (canvas run_agent). None = the user.
+    sender_node_id: UUID | None = None
 
     @classmethod
     def of(cls, m: Message) -> "ChatMessage":
@@ -69,6 +72,7 @@ class ChatMessage(BaseModel):
             status=m.status,
             created_at=m.created_at,
             tool_calls=m.tool_calls,
+            sender_node_id=m.sender_node_id,
         )
 
 
@@ -95,15 +99,6 @@ class ApprovalRequiredResponse(BaseModel):
     node_id: UUID
     conversation_id: UUID
     pending_calls: list[PendingCall]
-
-
-class ResumeResponse(BaseModel):
-    """A completed resume. No ``user_message``: the prompt was persisted on the paused turn."""
-
-    node_id: UUID
-    conversation_id: UUID
-    output: str
-    assistant_message: ChatMessage
 
 
 def _pending_calls(pending: DeferredToolRequests) -> list[PendingCall]:
@@ -185,6 +180,23 @@ def _make_on_paused(
     return on_paused
 
 
+def _setup(turn_repos, node, conversation_id: str):
+    """Build tools inside the turn's task: slow, and must not delay the rows or block cancel."""
+
+    async def setup() -> TurnSetup:
+        prepared = await prepare_turn(turn_repos, node, conversation_id)
+        on_paused = _make_on_paused(
+            turn_repos.tool,
+            project_id=node.project_id,
+            conversation_id=conversation_id,
+            agent_node_id=node.id,
+            owner_by_tool=prepared.tools.owner_by_tool,
+        )
+        return TurnSetup(prepared.instructions, prepared.toolsets, on_paused)
+
+    return setup
+
+
 def _sse(event: str, payload: dict) -> str:
     return f"event: {event}\ndata: {json.dumps(payload, default=str)}\n\n"
 
@@ -220,14 +232,6 @@ async def chat(
     conversation_id = await to_thread.run_sync(
         lambda: trepo.get_or_create_conversation(node.id, node.project_id)
     )
-    prepared = await prepare_turn(turn_repos, node, conversation_id)
-    on_paused = _make_on_paused(
-        tool_repo,
-        project_id=node.project_id,
-        conversation_id=conversation_id,
-        agent_node_id=node.id,
-        owner_by_tool=prepared.tools.owner_by_tool,
-    )
 
     try:
         turn = await run_turn(
@@ -242,9 +246,7 @@ async def chat(
             client_token=req.client_token,
             # Only the LLM call becomes durable; persistence is identical either way.
             durable=bool(settings.dbos_database_url),
-            instructions=prepared.instructions,
-            toolsets=prepared.toolsets,
-            on_paused=on_paused,
+            setup=_setup(turn_repos, node, conversation_id),
         )
     except runs.TurnBusy:
         raise _BUSY from None
@@ -289,14 +291,6 @@ async def chat_stream(
     conversation_id = await to_thread.run_sync(
         lambda: trepo.get_or_create_conversation(node.id, node.project_id)
     )
-    prepared = await prepare_turn(turn_repos, node, conversation_id)
-    on_paused = _make_on_paused(
-        tool_repo,
-        project_id=node.project_id,
-        conversation_id=conversation_id,
-        agent_node_id=node.id,
-        owner_by_tool=prepared.tools.owner_by_tool,
-    )
 
     try:
         run = await start_turn(
@@ -310,9 +304,7 @@ async def chat_stream(
             tool_repo=tool_repo,
             client_token=req.client_token,
             durable=bool(settings.dbos_database_url),
-            instructions=prepared.instructions,
-            toolsets=prepared.toolsets,
-            on_paused=on_paused,
+            setup=_setup(turn_repos, node, conversation_id),
         )
     except runs.TurnBusy:
         raise _BUSY from None
@@ -388,14 +380,15 @@ class ResumeRequest(BaseModel):
     approvals: dict[str, bool] = Field(min_length=1)
 
 
-@router.post("/resume", response_model=None)
+@router.post("/resume")
 async def chat_resume(
     req: ResumeRequest, repo: ProjectRepo, turn_repos: TurnRepos
-) -> ResumeResponse | ApprovalRequiredResponse:
-    """Resume a turn that paused for tool approval.
+) -> StreamingResponse:
+    """Resume a turn that paused for tool approval, streamed as SSE.
 
-    Toolsets are not serialisable, so they are rebuilt from the node. A resume
-    can pause again; same branch handles it.
+    Same events as /chat/stream, so a resume can pause again with
+    ``approval_required``. Toolsets are not serialisable, so they are rebuilt
+    from the node. 404/409/422 are raised before any headers are sent.
     """
     node = await to_thread.run_sync(repo.get_agent_node, str(req.node_id))
     if node is None:
@@ -453,17 +446,8 @@ async def chat_resume(
         events = close_dangling_calls(awaiting.tool_calls, status="denied", only=denied)
         awaiting = dataclasses.replace(awaiting, tool_calls=events)
 
-    prepared = await prepare_turn(turn_repos, node, conversation_id)
-    on_paused = _make_on_paused(
-        tool_repo,
-        project_id=node.project_id,
-        conversation_id=conversation_id,
-        agent_node_id=node.id,
-        owner_by_tool=prepared.tools.owner_by_tool,
-    )
-
     try:
-        turn = await run_turn(
+        run = await start_turn(
             trepo,
             conversation_id,
             node.system_prompt,
@@ -472,35 +456,27 @@ async def chat_resume(
             node_id=node.id,
             project_id=node.project_id,
             tool_repo=tool_repo,
-            instructions=prepared.instructions,
-            toolsets=prepared.toolsets,
-            on_paused=on_paused,
+            setup=_setup(turn_repos, node, conversation_id),
             resume=ResumeInput(history=history, deferred=deferred_results, message=awaiting),
         )
     except runs.TurnBusy:
         raise _BUSY from None
 
-    # Decisions are settled: denied were answered without a result, approved ran.
+    # Past TurnBusy the denials are final.
     await to_thread.run_sync(
         lambda: _apply_approval_decisions(tool_repo, conversation_id, req.approvals)
     )
 
-    if turn.pending is not None:
-        # Second pause. on_paused already recorded and parked it.
-        return ApprovalRequiredResponse(
-            node_id=UUID(node.id),
-            conversation_id=UUID(conversation_id),
-            pending_calls=_pending_calls(turn.pending),
-        )
+    async def clear_parked_run() -> None:
+        # Detached like the run, so a reader leaving cannot skip it.
+        await run.task
+        if run.result is None or run.result.pending is None:
+            # A second pause re-parked through on_paused; keep that one.
+            await to_thread.run_sync(lambda: tool_repo.set_pending_run(conversation_id, None))
 
-    await to_thread.run_sync(lambda: tool_repo.set_pending_run(conversation_id, None))
+    runs.track_finaliser(asyncio.ensure_future(clear_parked_run()))
 
-    return ResumeResponse(
-        node_id=UUID(node.id),
-        conversation_id=UUID(conversation_id),
-        output=turn.output,
-        assistant_message=ChatMessage.of(turn.assistant_message),
-    )
+    return StreamingResponse(_events(run), media_type="text/event-stream", headers=_SSE_HEADERS)
 
 
 def _apply_approval_decisions(

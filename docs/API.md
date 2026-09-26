@@ -942,6 +942,10 @@ The node implies its project and its template, so one identifier is enough.
 }
 ```
 
+**Sender.** `sender_node_id` is set on a `user` row an orchestrator wrote
+through canvas `run_agent` (the orchestrator's node id), and `null` when the
+user typed it.
+
 **Message statuses.** `running` while the turn is in flight, then `complete`,
 `failed` (with `error`), `cancelled` (stopped by the user, partial `content`
 kept), or `awaiting_approval` (paused for a tool decision). Every message
@@ -949,13 +953,17 @@ carries `tool_calls`, an ordered list of the tool events behind that bubble:
 
 ```json
 "tool_calls": [
-  {"type": "call",   "tool_call_id": "c1", "name": "run_agent", "args": {"node_id": "..."}, "at": "..."},
-  {"type": "result", "tool_call_id": "c1", "name": "run_agent", "status": "ok", "result_head": "...", "at": "..."}
+  {"type": "call",   "tool_call_id": "c1", "name": "run_agent", "args": {"node_id": "..."}, "at": "...", "offset": 18},
+  {"type": "result", "tool_call_id": "c1", "name": "run_agent", "status": "ok", "result_head": "...", "at": "...", "offset": 18}
 ]
 ```
 
-Render a bubble by interleaving: the `call`/`result` pairs arrived in that
-order relative to the text, and `content` is the text. `result.status` is one
+Render a bubble by interleaving: `offset` is the character index in `content`
+where the event landed, so split the text there (`content[0:18]`, tool rows,
+then `content[18:]`). The same field rides on the live `event: tool`. A turn
+that used tools keeps the full streamed text as `content`; a tool-free turn
+stores the final output. `offset` is absent on older rows and on synthetic
+results; place those after the previous event. `result.status` is one
 of `ok`, `error` (the tool raised, or the turn died mid-call), `denied`
 (refused at an approval prompt) or `cancelled` (in flight when the turn was
 stopped, or parked when the pause was abandoned). On every terminal status a
@@ -1103,10 +1111,9 @@ the paused shape:
 }
 ```
 
-Note: this JSON body from `POST /chat` and `/chat/resume` has no
-`assistant_message` field; read the paused bubble from `.../messages`. The
-SSE `approval_required` event below (from `/chat/stream` and `/chat/attach`)
-does carry it.
+Note: this JSON body from `POST /chat` has no `assistant_message` field;
+read the paused bubble from `.../messages`. The SSE `approval_required` event
+below (from `/chat/stream`, `/chat/resume` and `/chat/attach`) does carry it.
 
 **`/chat/stream` emits `event: approval_required` and then ends the stream
 with no `done` event.** This is the thing a frontend will break on if it
@@ -1130,16 +1137,18 @@ the pending calls:
 }
 ```
 
-→ `200`, `ResumeResponse` (**no `user_message` field**: the prompt was already
-persisted on the turn that paused):
-```json
-{
-  "node_id": "uuid",
-  "conversation_id": "uuid",
-  "output": "...",
-  "assistant_message": { "id": "uuid", "role": "assistant", "content": "...",
-    "seq": 2, "status": "complete", "created_at": "...", "tool_calls": [...] }
-}
+→ `200`, `text/event-stream`, same events as `/chat/stream`. `start` has **no
+`user_message`** (the prompt was already persisted on the turn that paused)
+and its `assistant_message` snapshot already holds the pre-pause text and
+calls; `chunk` and `tool` carry only what follows. Detached like
+`/chat/stream`: a disconnect stops the events, not the run, and
+`/chat/attach` re-joins it.
+
+```
+event: start   data: {"conversation_id": "...", "assistant_message": {...}}
+event: tool    data: {"type": "result", "tool_call_id": "call_abc123", ...}
+event: chunk   data: {"text": "Done, issue 4"}
+event: done    data: {"assistant_message": {...}}
 ```
 
 **The resume reuses the paused bubble.** `assistant_message.id` and `.seq`
@@ -1151,10 +1160,10 @@ Denied calls are marked `status: "denied"` in the tool-calls log rather than
 run, and their `call` event on the bubble gets a matching `result` with the
 same status. `409` if there is nothing parked for that node, or the pause is more than
 an hour old. `422` if an `approvals` key isn't a pending `tool_call_id` for
-that conversation.
+that conversation. All errors are plain JSON, sent before the stream starts.
 
 **A resumed run can pause again** (another `tool_policy: "ask"` call further
-in the same turn): the response is then `ApprovalRequiredResponse`, same shape
+in the same turn): the stream then ends with `approval_required`, same shape
 as above, and resume again.
 
 ### Live status: agents and tool calls

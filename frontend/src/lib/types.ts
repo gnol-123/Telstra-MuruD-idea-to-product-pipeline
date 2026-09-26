@@ -181,6 +181,21 @@ export interface ChatMessage {
   // rt-stream-checkpoint change.
   status: "complete" | "failed" | "pending" | "running" | "cancelled";
   created_at: string;
+  tool_calls?: ToolEvent[];
+  // Agent node that sent this user row (orchestrator run_agent). Null = the user.
+  sender_node_id?: string | null;
+}
+
+// One `event: tool` payload, also persisted on the row. `offset` is where in
+// `content` it landed; missing on older rows and synthetic denied/cancelled results.
+export interface ToolEvent {
+  type: "call" | "result";
+  tool_call_id?: string;
+  name?: string;
+  args?: Record<string, unknown>;
+  status?: string;
+  result_head?: string;
+  offset?: number;
 }
 
 export interface CancelChatResponse {
@@ -212,20 +227,9 @@ export interface ApprovalRequiredResponse {
 
 export type SendChatResult = ChatResponse | ApprovalRequiredResponse;
 
-export function isApprovalRequired(
-  r: SendChatResult | ResumeResult
-): r is ApprovalRequiredResponse {
+export function isApprovalRequired(r: SendChatResult): r is ApprovalRequiredResponse {
   return (r as ApprovalRequiredResponse).paused === true;
 }
-
-export interface ResumeResponse {
-  node_id: string;
-  conversation_id: string;
-  output: string;
-  assistant_message: ChatMessage;
-}
-
-export type ResumeResult = ResumeResponse | ApprovalRequiredResponse;
 
 // -------------------- Environments: files & preview --------------------
 
@@ -273,6 +277,20 @@ export interface ServeResult extends EnvironmentPort {
   reused: boolean;
   // The port URL plus the file that was asked for, if any.
   open_url: string;
+}
+
+// GET /previews: published entries first (newest first), then other
+// listening ports as published: false. id is the port as a string.
+export interface EnvironmentPreviewEntry {
+  id: string;
+  title: string | null;
+  port: number;
+  path: string;
+  url: string;
+  live: boolean;
+  published: boolean;
+  agent_node_id: string | null;
+  created_at: string | null;
 }
 
 export interface EnvironmentFileWrite {

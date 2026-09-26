@@ -12,11 +12,11 @@ import {
   ToolPreset,
   ToolCall,
   SendChatResult,
-  ResumeResult,
   EnvironmentFilesResponse,
   EnvironmentFileContent,
   EnvironmentPreview,
   EnvironmentPort,
+  EnvironmentPreviewEntry,
   ServeResult,
   EnvironmentFileWrite,
   UsageTotals,
@@ -510,6 +510,11 @@ export async function listEnvironmentPorts(projectId: string, nodeId: string) {
   return request<{ ports: EnvironmentPort[] }>(envPath(projectId, nodeId, "/ports"), { auth: true });
 }
 
+// Published previews plus any other listening port.
+export async function listEnvironmentPreviews(projectId: string, nodeId: string) {
+  return request<{ previews: EnvironmentPreviewEntry[] }>(envPath(projectId, nodeId, "/previews"), { auth: true });
+}
+
 // Start (or reuse) a static server on a directory — or on a file's
 // directory, in which case open_url points straight at the file.
 export async function serveEnvironmentPath(projectId: string, nodeId: string, path: string) {
@@ -586,15 +591,26 @@ export async function sendChat(
   });
 }
 
+// Same SSE events as streamChat; a second pause arrives as approval_required.
 export async function resumeChat(
   nodeId: string,
-  approvals: Record<string, boolean>
-): Promise<ResumeResult> {
-  return request<ResumeResult>("/chat/resume", {
+  approvals: Record<string, boolean>,
+  handlers: StreamHandlers
+) {
+  const res = await fetch(`${API_URL}/chat/resume`, {
     method: "POST",
-    auth: true,
-    body: { node_id: nodeId, approvals },
+    headers: {
+      "Content-Type": "application/json",
+      Authorization: `Bearer ${await authToken()}`,
+    },
+    body: JSON.stringify({ node_id: nodeId, approvals }),
   });
+  // 404/409/422 come back as JSON before any stream starts.
+  if (!res.ok) {
+    const data = await res.json().catch(() => ({}));
+    throw new ApiError(res.status, data?.detail ?? res.statusText);
+  }
+  await consumeSSE(res, handlers);
 }
 
 // Streaming uses POST, so the browser's built-in EventSource (GET-only)

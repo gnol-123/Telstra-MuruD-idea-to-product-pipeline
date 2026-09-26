@@ -15,7 +15,7 @@ creates, so run it second.
 | `provider.sql` | Switches the default model provider to Ollama, adds the per-node `model` override. Run eighth. |
 | `usage.sql` | Token usage columns on messages and the usage_totals rollup. Run ninth. |
 | `orchestrator.sql` | Canvas tool type and preset, the orchestrator agent type and its prompt. Run tenth. |
-| `turns.sql` | Progressive turn persistence: status constraints and realtime publication for nodes, messages, tool_calls. Run eleventh. |
+| `turns.sql` | Progressive turn persistence: status constraints, `messages.sender_node_id`, and realtime publication for nodes, messages, tool_calls. Run eleventh. |
 | `apply.py` | Runs them all, in order, in one transaction. |
 
 ## Applying

@@ -974,7 +974,7 @@ function Workspace({
   );
 }
 
-function StatusPill({ status }: { status: string }) {
+export function StatusPill({ status }: { status: string }) {
   const color =
     status === "ready" ? "bg-green" : status === "error" ? "bg-red-400" : status === "provisioning" ? "bg-amber animate-pulse" : "bg-white/30";
   return (

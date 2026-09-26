@@ -339,7 +339,7 @@ Build it:
 - Navigation between screens by showing and hiding sections with JS, so one file holds the whole flow.
 
 Serve it:
-- run_command: python3 -m http.server 8080 --directory <your workspace dir> in the background, and give the user the preview URL for port 8080. If a port is already serving, reuse it.
+- Get a port from next_free_port, then run_command: python3 -m http.server <port> --bind 0.0.0.0 --directory <your workspace dir> in the background. Call publish_preview with that port and a short title naming the prototype (like 'Checkout flow prototype') so it shows beside the chat.
 - Say which screens exist and how to move between them.
 
 Hand it off:
@@ -376,7 +376,7 @@ Draw it honestly:
 - Legible at 400px wide. If it is not, it is a table.
 
 How to produce it in the workspace:
-- One self-contained HTML file with an inline SVG or a canvas drawn by inline JS; no chart library installs. Serve it with python3 -m http.server and give the preview URL.
+- One self-contained HTML file with an inline SVG or a canvas drawn by inline JS; no chart library installs. Serve it: next_free_port for a port, python3 -m http.server on it bound to 0.0.0.0 in the background, then publish_preview with a title naming the chart.
 - Or, when the reader needs the numbers more than the shape, a markdown table with units in the header.
 
 Before you show it: read the chart cold. Can someone get the point in five seconds without you explaining? If not, simplify until they can.$t$

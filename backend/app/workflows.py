@@ -322,7 +322,9 @@ async def _stream_agent(
         # The stream closes on any exit, so a failed run cannot hang the reader.
         try:
             if resume is not None:
-                return await _resume_agent_direct(system_prompt, model, resume, toolsets, handler)
+                return await _resume_agent_direct(
+                    system_prompt, model, resume, instructions, toolsets, handler
+                )
             if use_durable:
                 if workflow_id is not None:
                     from dbos import SetWorkflowID
@@ -389,11 +391,15 @@ async def _run_agent_direct(
     return _turn_from_result(result, model)
 
 
-async def _resume_agent_direct(system_prompt, model, resume, toolsets, handler) -> AgentTurn:
+async def _resume_agent_direct(
+    system_prompt, model, resume, instructions, toolsets, handler
+) -> AgentTurn:
     agent = get_agent_for(system_prompt, model)
+    # Instructions are per run, not replayed from history: pass them again.
     result = await agent.run(
         message_history=resume.history,
         deferred_tool_results=resume.deferred,
+        instructions=instructions,
         toolsets=toolsets or None,
         event_stream_handler=handler,
         usage_limits=_limits(),
@@ -437,6 +443,15 @@ def _turn_from_result(result, model: str) -> AgentTurn:
 
 
 @dataclass(frozen=True)
+class TurnSetup:
+    """What a turn's ``setup`` hands back: built inside the task, so it is cancellable."""
+
+    instructions: str | None
+    toolsets: list
+    on_paused: Callable[[DeferredToolRequests, list[ModelMessage]], Awaitable[None]] | None
+
+
+@dataclass(frozen=True)
 class ResumeInput:
     """A parked run to continue, and the bubble it keeps appending to."""
 
@@ -454,6 +469,7 @@ def _message_payload(m: Message) -> dict:
         "status": m.status,
         "created_at": m.created_at,
         "tool_calls": m.tool_calls,
+        "sender_node_id": m.sender_node_id,
     }
 
 
@@ -573,7 +589,9 @@ async def _finalise(
             cache_write_tokens=turn.cache_write_tokens,
             requests=turn.requests,
         )
-        if status == "complete":
+        # turn.output is only the text after the last tool call. With tools,
+        # keep the streamed text so tool offsets still index into it.
+        if status == "complete" and not run.events:
             fields["content"] = turn.output
     fields = {k: v for k, v in fields.items() if v is not None}
     try:
@@ -618,11 +636,16 @@ async def start_turn(
     toolsets: list | None = None,
     on_paused: Callable[[DeferredToolRequests, list[ModelMessage]], Awaitable[None]] | None = None,
     resume: ResumeInput | None = None,
+    sender_node_id: str | None = None,
+    setup: Callable[[], Awaitable[TurnSetup]] | None = None,
 ) -> RunningTurn:
     """Register and start one turn. Raises ``runs.TurnBusy`` before writing anything.
 
     Detached: the model run and every write live in ``run.task``, which outlives
     any reader. Readers attach through ``attach_events``.
+
+    ``setup``, when given, replaces instructions/toolsets/on_paused and runs
+    inside the task: the rows exist and cancel works while tools are built.
     """
     from anyio import to_thread
 
@@ -634,7 +657,13 @@ async def start_turn(
         if resume is None:
             history = await to_thread.run_sync(repo.list_messages, conversation_id)
             run.user_message = await to_thread.run_sync(
-                lambda: repo.add_message(conversation_id, "user", prompt, client_token=client_token)
+                lambda: repo.add_message(
+                    conversation_id,
+                    "user",
+                    prompt,
+                    client_token=client_token,
+                    sender_node_id=sender_node_id,
+                )
             )
             run.message = await to_thread.run_sync(
                 lambda: repo.add_message(conversation_id, "assistant", "", status="running")
@@ -651,11 +680,11 @@ async def start_turn(
         runs.unregister(conversation_id)
         raise
 
-    workflow_id = str(uuid4()) if durable and not toolsets and resume is None else None
-    run.dbos_workflow_id = workflow_id
     flusher = _Flusher(repo, run)
 
     async def drive() -> None:
+        nonlocal instructions, toolsets, on_paused
+
         async def settle(
             *,
             status: str,
@@ -680,6 +709,15 @@ async def start_turn(
 
         turn: AgentTurn | None = None
         try:
+            if setup is not None:
+                built = await setup()
+                instructions, toolsets, on_paused = (
+                    built.instructions,
+                    built.toolsets,
+                    built.on_paused,
+                )
+            workflow_id = str(uuid4()) if durable and not toolsets and resume is None else None
+            run.dbos_workflow_id = workflow_id
             async for event, payload in _stream_agent(
                 system_prompt,
                 model,
@@ -914,7 +952,7 @@ async def stream_turn(*args, **kwargs) -> AsyncIterator[tuple[str, dict]]:
 
 
 async def run_turn(*args, parent: RunningTurn | None = None, **kwargs) -> ChatTurn:
-    """Start a turn and wait for it. Shared by /chat, /chat/resume and canvas run_agent.
+    """Start a turn and wait for it. Shared by /chat and canvas run_agent.
 
     With ``parent`` the turn is a child: cancelling the parent cancels it, and
     cancelling only the child returns a cancelled ChatTurn rather than raising.

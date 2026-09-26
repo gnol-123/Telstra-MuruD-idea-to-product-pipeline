@@ -1,7 +1,6 @@
 "use client";
 
 import { useState } from "react";
-import { WORKSPACE_ROOT } from "@/lib/files";
 import { PORT_Y } from "./EdgeLayer";
 import { Edge, ProjectNode, ToolNode, EnvironmentNode, isAgentNode, isEnvironmentNode } from "@/lib/types";
 
@@ -64,7 +63,8 @@ export default function NodeCard({
   inboundCount,
   staleCount,
   busy,
-  deleting,
+  deleting: deletingProp,
+  creating,
   zoom,
   onSelect,
   onDragMove,
@@ -95,6 +95,8 @@ export default function NodeCard({
   busy?: boolean;
   // Delete is in flight: card dims, x becomes a spinner.
   deleting?: boolean;
+  // Create is in flight: same look as deleting until the backend confirms.
+  creating?: boolean;
   // Canvas scale; pointer deltas are divided by it.
   zoom: number;
   onSelect: () => void;
@@ -112,10 +114,12 @@ export default function NodeCard({
   onChipClick?: (toolNodeId: string) => void;
   onChipRemove?: (edge: Edge) => void;
   onClearStale?: () => void;
-  onOpenChat?: () => void;
+  // envId: open with that environment's workspace panel expanded.
+  onOpenChat?: (envId?: string) => void;
   // Opens the code preview on an environment, optionally at a folder.
   onOpenWorkspace?: (envId: string, path?: string | null) => void;
 }) {
+  const deleting = deletingProp || creating;
   const agent = isAgentNode(node);
   const env = isEnvironmentNode(node);
   // Native HTML5 drag-over state (a tool/preset card being dragged from the
@@ -263,7 +267,7 @@ export default function NodeCard({
             onDelete();
           }}
           title={
-            deleting ? "Deleting..." : agent ? "Delete agent" : env ? "Delete environment" : "Delete tool"
+            creating ? "Creating..." : deleting ? "Deleting..." : agent ? "Delete agent" : env ? "Delete environment" : "Delete tool"
           }
           className="shrink-0 text-white/[0.28] hover:text-white/70 text-[13px] px-0.5 leading-none disabled:hover:text-white/[0.28]"
         >
@@ -320,7 +324,7 @@ export default function NodeCard({
                   }}
                   onDoubleClick={(e) => {
                     e.stopPropagation();
-                    onOpenWorkspace?.(envNode.id, `${WORKSPACE_ROOT}/${node.id}`);
+                    onOpenChat?.(envNode.id);
                   }}
                   title={`${envNode.name} — click to inspect, double-click to open ${node.name}'s files`}
                   className="inline-flex items-center gap-1 pl-[7px] pr-1 py-[3px] rounded-[5px] text-[10px] bg-accent/10 border border-accent/30 text-accent cursor-pointer hover:bg-accent/15"
