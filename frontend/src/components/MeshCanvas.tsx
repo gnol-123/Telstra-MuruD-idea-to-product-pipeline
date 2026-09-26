@@ -91,6 +91,7 @@ export default function MeshCanvas({
   const [workspace, setWorkspace] = useState<{ envId: string; path: string | null } | null>(null);
   const canvasRef = useRef<HTMLDivElement | null>(null);
   const pinchDist = useRef<number | null>(null);
+  const pan = useRef<{ id: number; x: number; y: number } | null>(null);
   const [zoom, setZoom] = useState(1);
   const zoomRef = useRef(1);
   // In-flight create/delete calls. Non-zero means the server list is behind
@@ -312,6 +313,27 @@ export default function MeshCanvas({
     if (prev) zoomAt(zoomRef.current * (dist / prev), (a.clientX + b.clientX) / 2, (a.clientY + b.clientY) / 2);
     else setLink(null);
     pinchDist.current = dist;
+  }
+
+  // One finger on empty canvas pans (touch-none disables native scroll). Mouse keeps scrollbars/wheel.
+  function panStart(e: React.PointerEvent) {
+    if (e.pointerType === "mouse" || link) return;
+    if (!e.isPrimary) {
+      pan.current = null; // second finger = pinch
+      return;
+    }
+    if ((e.target as HTMLElement).closest("[data-card]")) return;
+    pan.current = { id: e.pointerId, x: e.clientX, y: e.clientY };
+  }
+
+  function panMove(e: React.PointerEvent) {
+    const p = pan.current;
+    const c = canvasRef.current;
+    if (!p || !c || p.id !== e.pointerId) return;
+    c.scrollLeft -= e.clientX - p.x;
+    c.scrollTop -= e.clientY - p.y;
+    p.x = e.clientX;
+    p.y = e.clientY;
   }
 
   function relPos(e: { clientX: number; clientY: number }) {
@@ -861,10 +883,16 @@ export default function MeshCanvas({
             else if (kind === "preset") handleAddPreset(slug, pos);
             else if (kind === "environment") handleAddEnvironment(pos);
           }}
+          onPointerDown={panStart}
           onPointerMove={(e) => {
             if (link) setLink((l) => (l ? { ...l, cursor: relPos(e) } : l));
+            panMove(e);
           }}
-          onPointerUp={() => setLink(null)}
+          onPointerUp={() => {
+            setLink(null);
+            pan.current = null;
+          }}
+          onPointerCancel={() => (pan.current = null)}
           onTouchMove={handleTouchMove}
           onTouchEnd={() => (pinchDist.current = null)}
           onClick={(e) => {

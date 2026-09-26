@@ -167,6 +167,7 @@ export default function NodeCard({
 
   return (
     <div
+      data-card
       onPointerDown={handlePointerDown}
       onPointerUp={onCardPointerUp}
       onPointerEnter={() => onHoverChange(true)}
