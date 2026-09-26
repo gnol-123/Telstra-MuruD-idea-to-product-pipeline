@@ -56,16 +56,30 @@ async def provision(ctx: EnvContext) -> str:
     if settings.e2b_auto_resume:
         lifecycle["auto_resume"] = True
 
-    sbx = await AsyncSandbox.create(
-        template=ctx.template,
-        timeout=ctx.idle_timeout_s,
-        # Lets the sweep find sandboxes whose node row is gone.
-        metadata={"app": "murud", "node_id": ctx.node_id, "project_id": ctx.project_id},
-        lifecycle=lifecycle,
-        # mcp needs the mcp-gateway template, set by the config.
-        mcp=ctx.config.get("mcp"),
-        **_api(),
-    )
+    async def _create(template: str, mcp: dict | None) -> AsyncSandbox:
+        return await AsyncSandbox.create(
+            template=template,
+            timeout=ctx.idle_timeout_s,
+            # Lets the sweep find sandboxes whose node row is gone.
+            metadata={"app": "murud", "node_id": ctx.node_id, "project_id": ctx.project_id},
+            lifecycle=lifecycle,
+            # mcp needs the mcp-gateway template, set by the config.
+            mcp=mcp,
+            **_api(),
+        )
+
+    mcp = ctx.config.get("mcp")
+    try:
+        sbx = await _create(ctx.template, mcp)
+    except Exception:
+        if not mcp:
+            raise
+        # Gateway failed: plain sandbox, no browser. Dropped from the config
+        # lifecycle persists, so build stops offering browser tools.
+        logger.exception("mcp sandbox failed for %s, retrying without mcp", ctx.node_id)
+        sbx = await _create(settings.e2b_template, None)
+        ctx.config.pop("mcp", None)
+        ctx.config["template"] = settings.e2b_template
     try:
         await sbx.files.make_dir(WORKSPACE_ROOT, user="user")
     except Exception:
