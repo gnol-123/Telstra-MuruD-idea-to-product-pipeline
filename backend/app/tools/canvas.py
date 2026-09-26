@@ -79,7 +79,9 @@ def _user_env_config() -> dict:
         "runtime": "e2b",
         "role": "user",
         "sandbox_id": None,
-        "template": settings.e2b_template,
+        # Playwright MCP runs only on the mcp-gateway template.
+        "template": "mcp-gateway",
+        "mcp": {"playwright": {}},
         "idle_timeout_s": settings.environment_idle_timeout_s,
         "preview_ports": [],
     }
