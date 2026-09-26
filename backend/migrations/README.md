@@ -16,6 +16,7 @@ creates, so run it second.
 | `usage.sql` | Token usage columns on messages and the usage_totals rollup. Run ninth. |
 | `orchestrator.sql` | Canvas tool type and preset, the orchestrator agent type and its prompt. Run tenth. |
 | `turns.sql` | Progressive turn persistence: status constraints, `messages.sender_node_id`, and realtime publication for nodes, messages, tool_calls. Run eleventh. |
+| `pitch.sql` | Scrutinizer and evaluator agent types, pitch scrutiny skill preset. Run twelfth. |
 | `apply.py` | Runs them all, in order, in one transaction. |
 
 ## Applying
