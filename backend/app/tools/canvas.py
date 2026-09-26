@@ -47,6 +47,9 @@ _ENV_DX = 260
 _RESULT_HEAD = 6000
 # Stage reply handed to an evaluator
 _REPLY_HEAD = 12000
+# Bound on waiting for a freshly provisioned evaluator's tools to verify
+_TOOL_WAIT_TIMEOUT_S = 20
+_TOOL_WAIT_POLL_S = 0.5
 
 UNATTENDED_INSTRUCTION = (
     "You are being run by an orchestrator with no human in the loop. Do not ask "
@@ -398,6 +401,35 @@ class CanvasTools:
             )
         return output + note
 
+    async def _wait_for_tools_ready(self, node_id: str) -> None:
+        """Poll until node's tool nodes leave 'pending' (default preset verify
+        runs detached in provision_agent), bounded so a stuck verify can't hang
+        the turn. Gives up silently on timeout: evaluate proceeds regardless."""
+        repo, tool_repo = self._repos.project, self._repos.tool
+        deadline = anyio.current_time() + _TOOL_WAIT_TIMEOUT_S
+        while anyio.current_time() < deadline:
+            tool_ids = await to_thread.run_sync(repo.list_inbound_tool_node_ids, node_id)
+            nodes = await to_thread.run_sync(
+                lambda: [tool_repo.get_tool_node(t) for t in tool_ids]
+            )
+            if all(n is None or n.status != "pending" for n in nodes):
+                return
+            await anyio.sleep(_TOOL_WAIT_POLL_S)
+
+    async def _teardown_evaluator(self, eval_id: str) -> None:
+        """Cancel then delete a temporary evaluator. Each step is best-effort:
+        a cancel-lookup failure must never skip the delete."""
+        repo = self._repos.project
+        try:
+            conversation_id = await to_thread.run_sync(repo.get_conversation_for_node, eval_id)
+            await cancel_for_node(conversation_id)
+        except Exception:
+            log.exception("canvas: could not cancel evaluator %s before delete", eval_id)
+        try:
+            await to_thread.run_sync(repo.delete_node, eval_id)
+        except Exception:
+            log.exception("canvas: could not delete evaluator %s", eval_id)
+
     async def evaluate(self, node_id: str, criteria: str) -> str:
         """Check an agent's latest reply against criteria with a temporary evaluator.
         criteria: what that stage was asked to deliver, as a short checklist.
@@ -426,11 +458,12 @@ class CanvasTools:
         if not reply:
             return f"Refused: {target.name} has delivered nothing to evaluate yet."
 
+        eval_name = f"Eval: {target.name}"
         try:
             eval_id = await provision_agent(
                 self._orch.project_id,
                 agent_type,
-                f"Eval: {target.name}",
+                eval_name,
                 position_x=target.position_x,
                 position_y=target.position_y + _STAGE_DY // 2,
                 tool_policy="auto",
@@ -440,10 +473,23 @@ class CanvasTools:
             )
         except Exception as exc:
             log.exception("canvas: could not create evaluator for %s", target.id)
+            # provision_agent can fail after creating the node (preset wiring
+            # etc). Find it by its unique name so it doesn't strand.
+            try:
+                nodes = await to_thread.run_sync(repo.list_nodes, self._orch.project_id)
+                stranded = [
+                    n for n in nodes
+                    if n.kind == "agent" and n.agent_slug == EVALUATOR_SLUG and n.name == eval_name
+                ]
+                for n in stranded:
+                    await self._teardown_evaluator(n.id)
+            except Exception:
+                log.exception("canvas: could not sweep stranded evaluator for %s", target.id)
             return f"Could not create an evaluator: {exc}"
 
         try:
             shared = await self._share_environments(target, eval_id)
+            await self._wait_for_tools_ready(eval_id)
             evaluator = await to_thread.run_sync(repo.get_agent_node, eval_id)
             where = (
                 f"Its files are in its directory ({target.id}) of the shared environment: "
@@ -463,8 +509,7 @@ class CanvasTools:
         finally:
             # Shielded: a cancelled orchestrator turn must not strand the box.
             with anyio.CancelScope(shield=True):
-                await cancel_for_node(await to_thread.run_sync(repo.get_conversation_for_node, eval_id))
-                await to_thread.run_sync(repo.delete_node, eval_id)
+                await self._teardown_evaluator(eval_id)
 
     def toolset(self) -> FunctionToolset:
         # Sequential: placement and the duplicate guard read before they write.
