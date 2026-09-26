@@ -10,6 +10,7 @@ The turn repositories bypass RLS, so that read is the tenant boundary.
 import json
 import logging
 
+import anyio
 from anyio import to_thread
 from pydantic_ai.toolsets import ApprovalRequiredToolset, FunctionToolset
 
@@ -20,11 +21,12 @@ from app.routers.projects import provision_agent
 from app.services import runs
 from app.services.turns import prepare_turn
 from app.tools.assembly import AssembledTools
-from app.workflows import refresh_outbound, run_turn
+from app.workflows import cancel_for_node, refresh_outbound, run_turn
 
 log = logging.getLogger(__name__)
 
 CANVAS_SLUG = "canvas"
+EVALUATOR_SLUG = "evaluator"
 TOOL_NAMES = (
     "list_canvas",
     "create_agent",
@@ -32,6 +34,7 @@ TOOL_NAMES = (
     "refresh_context",
     "give_environment",
     "run_agent",
+    "evaluate",
 )
 
 # Boundary box to keep margin between boxes
@@ -42,6 +45,8 @@ _ROW_TOLERANCE = 150
 _ENV_DX = 260
 # Head of a stage reply returned to the orchestrator.
 _RESULT_HEAD = 6000
+# Stage reply handed to an evaluator
+_REPLY_HEAD = 12000
 
 UNATTENDED_INSTRUCTION = (
     "You are being run by an orchestrator with no human in the loop. Do not ask "
@@ -78,7 +83,7 @@ def _user_env_config() -> dict:
 
 
 class CanvasTools:
-    """The six functions, bound to one orchestrator node and its turn repos."""
+    """The seven functions, bound to one orchestrator node and its turn repos."""
 
     def __init__(self, repos: TurnRepositories, orchestrator: Node, conversation_id: str) -> None:
         self._repos = repos
@@ -108,7 +113,7 @@ class CanvasTools:
                 "agent_types": [
                     {"slug": t.slug, "name": t.name, "description": t.description}
                     for t in types
-                    if t.slug != self._orch.agent_slug
+                    if t.slug not in (self._orch.agent_slug, EVALUATOR_SLUG)
                 ],
                 "agents": [
                     {
@@ -144,6 +149,8 @@ class CanvasTools:
         repo = self._repos.project
         if agent_slug == self._orch.agent_slug:
             return "Refused: an orchestrator cannot create another orchestrator."
+        if agent_slug == EVALUATOR_SLUG:
+            return "Refused: evaluators are created by evaluate, not by hand."
 
         agent_type = await to_thread.run_sync(repo.get_agent_type, agent_slug)
         if agent_type is None or agent_type.id == self._orch.agent_type_id:
@@ -232,18 +239,31 @@ class CanvasTools:
             )
         return f"Refreshed {len(edges)} context edge(s) out of {node.name}."
 
-    async def give_environment(self, node_id: str, name: str = "") -> str:
+    async def give_environment(self, node_id: str, name: str = "", share_from: str = "") -> str:
         """Give an agent its own sandbox, separate from the shared scratch space.
 
         Use this for an agent that needs to install packages, run a server or
         otherwise work without disturbing the other agents: the coding agent is
         the usual case. The agent keeps its scratch access, so it can still read
         what earlier stages wrote there; this adds a second, private sandbox on
-        top. An agent that already has one is left alone."""
+        top. An agent that already has one is left alone.
+
+        share_from: another agent's id; share its environment instead of creating
+        one (the Scrutinizer reads the coding agent's code and screenshots this
+        way)."""
         repo, env_repo = self._repos.project, self._repos.env
         node = await to_thread.run_sync(repo.get_agent_node, node_id)
         if node is None or node.project_id != self._orch.project_id:
             return f"Refused: agent {node_id} not found on this canvas."
+
+        if share_from:
+            src = await to_thread.run_sync(repo.get_agent_node, share_from)
+            if src is None or src.project_id != self._orch.project_id:
+                return f"Refused: agent {share_from} not found on this canvas."
+            shared = await self._share_environments(src, node.id)
+            if not shared:
+                return f"Refused: {src.name} has no environment of its own to share."
+            return f"{node.name} now shares {src.name}'s environment: {', '.join(shared)}."
 
         # Already has one? Adding a second would give the model two indistinct
         # sandboxes and no rule for choosing between them.
@@ -284,12 +304,28 @@ class CanvasTools:
             "remain readable."
         )
 
+    async def _share_environments(self, src: Node, dst_id: str) -> list[str]:
+        """Wire src's own environments into dst. Scratch is already on every agent."""
+        repo, env_repo = self._repos.project, self._repos.env
+        env_ids = await to_thread.run_sync(repo.list_inbound_environment_node_ids, src.id)
+        envs = await to_thread.run_sync(lambda: [env_repo.get_environment_node(i) for i in env_ids])
+        shared = []
+        for env in envs:
+            if env is None or env.role != "user":
+                continue
+            try:
+                await to_thread.run_sync(lambda e=env: repo.create_edge(e.id, dst_id, "environment"))
+            except DuplicateEdge:
+                pass
+            shared.append(env.name)
+        return shared
+
     async def run_agent(self, node_id: str, prompt: str) -> str:
         """Send prompt to an agent and wait for its reply. The agent runs unattended
         with its own tools and receives the context summaries wired into it.
         Returns the reply (head only if long). Afterwards its outbound context
         edges are refreshed, so the next agent you run sees what it settled."""
-        repo, tool_repo = self._repos.project, self._repos.tool
+        repo = self._repos.project
         if node_id == self._orch.id:
             return "Refused: an orchestrator cannot run itself."
         target = await to_thread.run_sync(repo.get_agent_node, node_id)
@@ -297,7 +333,11 @@ class CanvasTools:
             return f"Refused: agent {node_id} not found on this canvas."
         if target.agent_type_id == self._orch.agent_type_id:
             return "Refused: an orchestrator cannot run another orchestrator."
+        return await self._run(target, prompt)
 
+    async def _run(self, target: Node, prompt: str, *, refresh: bool = True) -> str:
+        """Run one turn on target and return its reply. Shared by run_agent and evaluate."""
+        repo, tool_repo = self._repos.project, self._repos.tool
         conversation_id = await to_thread.run_sync(
             lambda: repo.get_or_create_conversation(target.id, target.project_id)
         )
@@ -343,8 +383,10 @@ class CanvasTools:
         ):
             return f"Agent failed: {target.name}: {turn.error}"
 
-        failed = await refresh_outbound(repo, target.id)
-        note = f"\n\n[Could not refresh context edges: {', '.join(failed)}]" if failed else ""
+        note = ""
+        if refresh:
+            failed = await refresh_outbound(repo, target.id)
+            note = f"\n\n[Could not refresh context edges: {', '.join(failed)}]" if failed else ""
 
         output = turn.output
         if len(output) > _RESULT_HEAD:
@@ -355,6 +397,74 @@ class CanvasTools:
                 f"{target.name}'s conversation.]"
             )
         return output + note
+
+    async def evaluate(self, node_id: str, criteria: str) -> str:
+        """Check an agent's latest reply against criteria with a temporary evaluator.
+        criteria: what that stage was asked to deliver, as a short checklist.
+        Returns 'VERDICT: PASS' or 'VERDICT: FAIL' with up to 5 fixes. The
+        evaluator shares the agent's environment and is deleted afterwards."""
+        repo = self._repos.project
+        target = await to_thread.run_sync(repo.get_agent_node, node_id)
+        if target is None or target.project_id != self._orch.project_id:
+            return f"Refused: agent {node_id} not found on this canvas."
+        if target.agent_type_id == self._orch.agent_type_id or target.agent_slug == EVALUATOR_SLUG:
+            return "Refused: only stage agents can be evaluated."
+        agent_type = await to_thread.run_sync(repo.get_agent_type, EVALUATOR_SLUG)
+        if agent_type is None:
+            return "Refused: the evaluator agent type is not installed."
+
+        conversation_id = await to_thread.run_sync(repo.get_conversation_for_node, target.id)
+        messages = (
+            await to_thread.run_sync(lambda: repo.list_messages(conversation_id, limit=10))
+            if conversation_id
+            else []
+        )
+        reply = next(
+            (m.content for m in reversed(messages) if m.role == "assistant" and m.status == "complete" and m.content),
+            "",
+        )
+        if not reply:
+            return f"Refused: {target.name} has delivered nothing to evaluate yet."
+
+        try:
+            eval_id = await provision_agent(
+                self._orch.project_id,
+                agent_type,
+                f"Eval: {target.name}",
+                position_x=target.position_x,
+                position_y=target.position_y + _STAGE_DY // 2,
+                tool_policy="auto",
+                repo=repo,
+                tool_repo=self._repos.tool,
+                env_repo=self._repos.env,
+            )
+        except Exception as exc:
+            log.exception("canvas: could not create evaluator for %s", target.id)
+            return f"Could not create an evaluator: {exc}"
+
+        try:
+            shared = await self._share_environments(target, eval_id)
+            evaluator = await to_thread.run_sync(repo.get_agent_node, eval_id)
+            where = (
+                f"Its files are in its directory ({target.id}) of the shared environment: "
+                f"{', '.join(shared)}."
+                if shared
+                else f"Its files, if any, are in its directory ({target.id}) of the shared scratch space."
+            )
+            prompt = (
+                f"Evaluate {target.name}.\n\nCriteria:\n{criteria}\n\n{where}\n\n"
+                f"Its latest reply:\n---\n{reply[:_REPLY_HEAD]}\n---"
+            )
+            log.info("canvas: %s evaluating %s with %s", self._orch.id, target.id, eval_id)
+            return await self._run(evaluator, prompt, refresh=False)
+        except Exception as exc:
+            log.exception("canvas: evaluation of %s failed", target.id)
+            return f"Evaluation failed: {exc}"
+        finally:
+            # Shielded: a cancelled orchestrator turn must not strand the box.
+            with anyio.CancelScope(shield=True):
+                await cancel_for_node(await to_thread.run_sync(repo.get_conversation_for_node, eval_id))
+                await to_thread.run_sync(repo.delete_node, eval_id)
 
     def toolset(self) -> FunctionToolset:
         # Sequential: placement and the duplicate guard read before they write.
@@ -374,7 +484,7 @@ async def assemble_canvas(
 ) -> AssembledTools:
     """One canvas toolset for the turn. A second canvas box is reported unavailable.
 
-    ``ask`` gates only run_agent: creating and wiring boxes is cheap and
+    ``ask`` gates run_agent and evaluate: creating and wiring boxes is cheap and
     reversible, running an agent is the step that spends. refresh_context is
     on the cheap side too, a summariser call over one transcript, and gating
     it would interrupt the pause/resume flow for bookkeeping the user has no
@@ -390,7 +500,7 @@ async def assemble_canvas(
     toolset = CanvasTools(repos, orchestrator, conversation_id).toolset()
     if ask:
         toolset = ApprovalRequiredToolset(
-            toolset, approval_required_func=lambda ctx, tool, args: tool.name == "run_agent"
+            toolset, approval_required_func=lambda ctx, tool, args: tool.name in ("run_agent", "evaluate")
         )
     return AssembledTools(
         toolsets=[toolset],
