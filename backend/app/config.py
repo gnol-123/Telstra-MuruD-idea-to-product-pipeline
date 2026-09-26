@@ -42,6 +42,8 @@ class Settings(BaseSettings):
     # E2B sandboxes. Empty key disables environments: provisioning writes an error status.
     e2b_api_key: str = ""
     e2b_template: str = "base"
+    # Template for agent sandboxes with browser tools; must run the mcp-gateway.
+    e2b_mcp_template: str = "mcp-gateway"
     # Sent as lifecycle.auto_resume. A setting so ops can turn it off if the tier rejects it.
     e2b_auto_resume: bool = True
     # Wall clock deadline, pushed on every use so it behaves as an idle timeout.

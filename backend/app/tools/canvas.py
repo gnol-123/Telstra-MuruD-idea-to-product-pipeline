@@ -21,7 +21,7 @@ from app.routers.projects import provision_agent
 from app.services import runs
 from app.services.turns import prepare_turn
 from app.tools.assembly import AssembledTools
-from app.workflows import cancel_for_node, refresh_outbound, run_turn
+from app.workflows import cancel_for_node, refresh_edge, refresh_outbound, run_turn
 
 log = logging.getLogger(__name__)
 
@@ -79,8 +79,8 @@ def _user_env_config() -> dict:
         "runtime": "e2b",
         "role": "user",
         "sandbox_id": None,
-        # Playwright MCP runs only on the mcp-gateway template.
-        "template": "mcp-gateway",
+        # Playwright MCP runs only on an mcp-gateway based template.
+        "template": settings.e2b_mcp_template,
         "mcp": {"playwright": {}},
         "idle_timeout_s": settings.environment_idle_timeout_s,
         "preview_ports": [],
@@ -212,13 +212,23 @@ class CanvasTools:
             return "Refused: an agent cannot feed itself."
         words = max(20, min(2000, summary_max_words))
         try:
-            await to_thread.run_sync(
+            edge = await to_thread.run_sync(
                 lambda: repo.create_edge(src.id, tgt.id, "context", summary_max_words=words)
             )
         except DuplicateEdge:
             return f"Already connected: {src.name} -> {tgt.name}."
         log.info("canvas: %s connected %s -> %s", self._orch.id, src.id, tgt.id)
-        return f"Connected: {src.name} -> {tgt.name} (summary up to {words} words)."
+        done = f"Connected: {src.name} -> {tgt.name} (summary up to {words} words)."
+
+        # Source already replied and may not run again: summarise now.
+        try:
+            if await to_thread.run_sync(repo.get_conversation_head, src.id) <= 0:
+                return done
+            await refresh_edge(repo, edge)
+        except Exception:
+            log.exception("canvas: could not summarise new edge %s -> %s", src.id, tgt.id)
+            return f"{done} Could not generate the summary yet; call refresh_context on {src.name}."
+        return f"{done} Summary generated from {src.name}'s conversation."
 
     async def refresh_context(self, node_id: str) -> str:
         """Regenerate the context summaries flowing OUT of one agent, so everything
@@ -319,7 +329,9 @@ class CanvasTools:
             if env is None or env.role != "user":
                 continue
             try:
-                await to_thread.run_sync(lambda e=env: repo.create_edge(e.id, dst_id, "environment"))
+                await to_thread.run_sync(
+                    lambda e=env: repo.create_edge(e.id, dst_id, "environment")
+                )
             except DuplicateEdge:
                 pass
             shared.append(env.name)
@@ -372,6 +384,7 @@ class CanvasTools:
                 toolsets=prepared.toolsets,
                 parent=parent,
                 sender_node_id=self._orch.id,
+                request_limit=target.request_limit,
             )
         except runs.TurnBusy:
             return f"Refused: {target.name} is already running a turn."
@@ -412,7 +425,7 @@ class CanvasTools:
         while anyio.current_time() < deadline:
             tool_ids = await to_thread.run_sync(repo.list_inbound_tool_node_ids, node_id)
             nodes = await to_thread.run_sync(
-                lambda: [tool_repo.get_tool_node(t) for t in tool_ids]
+                lambda ids=tool_ids: [tool_repo.get_tool_node(t) for t in ids]
             )
             if all(n is None or n.status != "pending" for n in nodes):
                 return
@@ -454,42 +467,35 @@ class CanvasTools:
             else []
         )
         reply = next(
-            (m.content for m in reversed(messages) if m.role == "assistant" and m.status == "complete" and m.content),
+            (
+                m.content
+                for m in reversed(messages)
+                if m.role == "assistant" and m.status == "complete" and m.content
+            ),
             "",
         )
         if not reply:
             return f"Refused: {target.name} has delivered nothing to evaluate yet."
 
         eval_name = f"Eval: {target.name}"
+        eval_id = None
         try:
-            eval_id = await provision_agent(
-                self._orch.project_id,
-                agent_type,
-                eval_name,
-                position_x=target.position_x,
-                position_y=target.position_y + _STAGE_DY // 2,
-                tool_policy="auto",
-                repo=repo,
-                tool_repo=self._repos.tool,
-                env_repo=self._repos.env,
-            )
-        except Exception as exc:
-            log.exception("canvas: could not create evaluator for %s", target.id)
-            # provision_agent can fail after creating the node (preset wiring
-            # etc). Find it by its unique name so it doesn't strand.
             try:
-                nodes = await to_thread.run_sync(repo.list_nodes, self._orch.project_id)
-                stranded = [
-                    n for n in nodes
-                    if n.kind == "agent" and n.agent_slug == EVALUATOR_SLUG and n.name == eval_name
-                ]
-                for n in stranded:
-                    await self._teardown_evaluator(n.id)
-            except Exception:
-                log.exception("canvas: could not sweep stranded evaluator for %s", target.id)
-            return f"Could not create an evaluator: {exc}"
+                eval_id = await provision_agent(
+                    self._orch.project_id,
+                    agent_type,
+                    eval_name,
+                    position_x=target.position_x,
+                    position_y=target.position_y + _STAGE_DY // 2,
+                    tool_policy="auto",
+                    repo=repo,
+                    tool_repo=self._repos.tool,
+                    env_repo=self._repos.env,
+                )
+            except Exception as exc:
+                log.exception("canvas: could not create evaluator for %s", target.id)
+                return f"Could not create an evaluator: {exc}"
 
-        try:
             shared = await self._share_environments(target, eval_id)
             await self._wait_for_tools_ready(eval_id)
             evaluator = await to_thread.run_sync(repo.get_agent_node, eval_id)
@@ -497,7 +503,8 @@ class CanvasTools:
                 f"Its files are in its directory ({target.id}) of the shared environment: "
                 f"{', '.join(shared)}."
                 if shared
-                else f"Its files, if any, are in its directory ({target.id}) of the shared scratch space."
+                else f"Its files, if any, are in its directory ({target.id}) "
+                "of the shared scratch space."
             )
             prompt = (
                 f"Evaluate {target.name}.\n\nCriteria:\n{criteria}\n\n{where}\n\n"
@@ -511,7 +518,21 @@ class CanvasTools:
         finally:
             # Shielded: a cancelled orchestrator turn must not strand the box.
             with anyio.CancelScope(shield=True):
-                await self._teardown_evaluator(eval_id)
+                if eval_id is not None:
+                    await self._teardown_evaluator(eval_id)
+                else:
+                    await self._sweep_evaluator(eval_name)
+
+    async def _sweep_evaluator(self, eval_name: str) -> None:
+        """provision_agent failed or was cancelled, maybe after inserting the
+        node. Find it by its unique name and tear it down."""
+        try:
+            nodes = await to_thread.run_sync(self._repos.project.list_nodes, self._orch.project_id)
+            for n in nodes:
+                if n.kind == "agent" and n.agent_slug == EVALUATOR_SLUG and n.name == eval_name:
+                    await self._teardown_evaluator(n.id)
+        except Exception:
+            log.exception("canvas: could not sweep stranded evaluator %r", eval_name)
 
     def toolset(self) -> FunctionToolset:
         # Sequential: placement and the duplicate guard read before they write.
@@ -547,7 +568,8 @@ async def assemble_canvas(
     toolset = CanvasTools(repos, orchestrator, conversation_id).toolset()
     if ask:
         toolset = ApprovalRequiredToolset(
-            toolset, approval_required_func=lambda ctx, tool, args: tool.name in ("run_agent", "evaluate")
+            toolset,
+            approval_required_func=lambda ctx, tool, args: tool.name in ("run_agent", "evaluate"),
         )
     return AssembledTools(
         toolsets=[toolset],
