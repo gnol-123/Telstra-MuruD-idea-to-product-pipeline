@@ -18,6 +18,7 @@ creates, so run it second.
 | `turns.sql` | Progressive turn persistence: status constraints, `messages.sender_node_id`, and realtime publication for nodes, messages, tool_calls. Run eleventh. |
 | `pitch.sql` | Scrutinizer and evaluator agent types, pitch scrutiny skill preset. Run twelfth. |
 | `runtime.sql` | `messages.heartbeat_at` for the startup sweep, per agent type `request_limit`. Run thirteenth. |
+| `design_skills.sql` | Design Taste, Impeccable and Emil Design Engineering skill presets, wired onto UX/UI and Scrutinizer. Run fourteenth. |
 | `apply.py` | Runs them all, in order, in one transaction. |
 
 ## Applying
