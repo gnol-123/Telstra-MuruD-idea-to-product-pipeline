@@ -26,6 +26,9 @@ export const TOOL_ICONS: Record<string, string> = {
 
 export const ENV_ICON = "▣";
 
+// Chips shown on a collapsed agent card; the rest hide behind "+N".
+const CHIP_LIMIT = 2;
+
 // One-line role descriptions shown under an agent's name, matching the UX
 // mockup. The catalog (/agent-types) only returns a name + slug, so these
 // live client-side; unknown slugs just fall back to the slug itself.
@@ -119,6 +122,7 @@ export default function NodeCard({
   // palette), tracked separately from `linkHover` — that one is for the
   // pointer-based port-to-port linking gesture, a different drag system.
   const [nativeDragOver, setNativeDragOver] = useState(false);
+  const [chipsOpen, setChipsOpen] = useState(false);
   const icon = agent
     ? AGENT_ICONS[node.agent_slug] ?? "◆"
     : env
@@ -279,8 +283,9 @@ export default function NodeCard({
               no tools or environments — drop one here
             </span>
           ) : (
-            <>
-              {attachedTools?.map(({ edge, tool }) => (
+            (() => {
+              const chips = [
+              ...(attachedTools ?? []).map(({ edge, tool }) => (
                 <span
                   key={edge.id}
                   data-chip
@@ -305,8 +310,8 @@ export default function NodeCard({
                     ×
                   </span>
                 </span>
-              ))}
-              {attachedEnvironments?.map(({ edge, env: envNode }) => (
+              )),
+              ...(attachedEnvironments ?? []).map(({ edge, env: envNode }) => (
                 <span
                   key={edge.id}
                   data-chip
@@ -346,8 +351,28 @@ export default function NodeCard({
                     ×
                   </span>
                 </span>
-              ))}
-            </>
+              )),
+              ];
+              const hidden = chips.length - CHIP_LIMIT;
+              if (hidden <= 0) return chips;
+              return (
+                <>
+                  {chipsOpen ? chips : chips.slice(0, CHIP_LIMIT)}
+                  <span
+                    data-chip
+                    onPointerDown={(e) => e.stopPropagation()}
+                    onClick={(e) => {
+                      e.stopPropagation();
+                      setChipsOpen((o) => !o);
+                    }}
+                    title={chipsOpen ? "Show fewer" : `Show ${hidden} more`}
+                    className="inline-flex items-center px-[7px] py-[3px] rounded-[5px] text-[10px] border border-white/[0.13] text-white/50 cursor-pointer hover:text-white/80 hover:border-white/30"
+                  >
+                    {chipsOpen ? "less" : `+${hidden}`}
+                  </span>
+                </>
+              );
+            })()
           )}
         </div>
       )}
