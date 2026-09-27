@@ -9,66 +9,73 @@ limit_req_zone $binary_remote_addr zone=api:10m rate=10r/s;
 proxy_cache_path /var/cache/nginx levels=1:2 keys_zone=api_cache:10m
                  inactive=10m max_size=100m use_temp_path=off;
 
+# Railway's edge puts the client in X-Real-IP; without this every client
+# shares the edge's IP and one rate-limit bucket
+set_real_ip_from 0.0.0.0/0;
+set_real_ip_from ::/0;
+real_ip_header X-Real-IP;
+
+# WebSocket upgrade (terminal), plain close otherwise
+map $http_upgrade $connection_upgrade {
+    default upgrade;
+    ''      close;
+}
+
 server {
     listen ${PORT};
 
+    # Re-resolve the backend so a redeploy's new private IP is picked up
+    resolver ${RESOLVER} valid=10s;
+    set $backend http://${BACKEND_HOST};
+
+    # Inherited by every location below
+    proxy_http_version 1.1;
+    proxy_set_header Host $host;
+    proxy_set_header X-Real-IP $remote_addr;
+    proxy_set_header Upgrade $http_upgrade;
+    proxy_set_header Connection $connection_upgrade;
+
     # Health check
-    location /health {
-        proxy_pass http://backend:8000;
-        proxy_set_header Host $host;
-        proxy_set_header X-Real-IP $remote_addr;
+    location = /health {
+        proxy_pass $backend;
     }
 
-    # Auth routes strict rate limit, **NEVER cache**
-    location /auth {
+    # Credential endpoints strict rate limit, **NEVER cache**
+    location ~ ^/auth/(login|signup|password-reset) {
         limit_req zone=auth burst=5 nodelay;
         limit_req_status 429;
-
-        proxy_pass http://backend:8000;
-        proxy_set_header Host $host;
-        proxy_set_header X-Real-IP $remote_addr;
+        proxy_pass $backend;
     }
 
     # OAuth routes strict limit, **NEVER cache**
     location /oauth {
         limit_req zone=auth burst=5 nodelay;
         limit_req_status 429;
-
-        proxy_pass http://backend:8000;
-        proxy_set_header Host $host;
-        proxy_set_header X-Real-IP $remote_addr;
+        proxy_pass $backend;
     }
 
-    # Projects cache GET responses per user (auth header in cache key MD5 hashed not exposed) 
-    location /projects {
+    # Catalogs: rarely change, cached per user (auth header in key is MD5 hashed)
+    location ~ ^/(agent-types|tool-types|tool-presets|models)$ {
         limit_req zone=api burst=20 nodelay;
         limit_req_status 429;
 
-        # Only cache GET; writes go straight through
         proxy_cache api_cache;
-        proxy_cache_methods GET;
-        proxy_cache_valid 200 5m;
+        proxy_cache_valid 200 10m;
         proxy_cache_key "$request_uri$http_authorization";
-        proxy_cache_bypass $request_method;
         add_header X-Cache-Status $upstream_cache_status;
 
-        proxy_pass http://backend:8000;
-        proxy_set_header Host $host;
-        proxy_set_header X-Real-IP $remote_addr;
+        proxy_pass $backend;
     }
 
-    # All other routes rate limited, no cache (streaming/live data)
+    # Everything else: live data, no cache (canvas polls, chat SSE, terminal WS)
     location / {
         limit_req zone=api burst=20 nodelay;
         limit_req_status 429;
 
-        proxy_pass http://backend:8000;
-        proxy_set_header Host $host;
-        proxy_set_header X-Real-IP $remote_addr;
-
-        # Required for SSE / streaming responses
         proxy_buffering off;
         proxy_cache off;
         proxy_read_timeout 300s;
+
+        proxy_pass $backend;
     }
 }
