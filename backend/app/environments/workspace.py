@@ -465,7 +465,11 @@ def port_payload(sandbox: AsyncSandbox, p: ListeningPort) -> dict[str, Any]:
 # the UI's own serve button) so the two never fight over a port.
 AGENT_PORTS = range(3000, 3100)
 
-PREVIEW_REGISTRY_FILE = "murud-previews.json"
+# Not /tmp: envd opens files as root and the sandbox has protected_regular=2,
+# so a second write to any existing file in sticky /tmp is denied.
+PREVIEW_REGISTRY = "/home/user/.murud/previews.json"
+# Pre-move location, still read so older sandboxes keep their previews.
+LEGACY_PREVIEW_REGISTRY = sandbox_temp("murud-previews.json")
 
 
 def next_free(candidates: range, taken: set[int]) -> int | None:
@@ -478,16 +482,19 @@ def next_free(candidates: range, taken: set[int]) -> int | None:
 
 async def read_registry(sandbox: AsyncSandbox) -> list[dict[str, Any]]:
     """Published previews, oldest to newest. Missing or corrupt file reads as empty."""
-    try:
-        raw = await sandbox.files.read(sandbox_temp(PREVIEW_REGISTRY_FILE), user="user")
-        data = json.loads(raw)
-        return data if isinstance(data, list) else []
-    except (FileNotFoundException, ValueError, TypeError):
-        return []
+    for path in (PREVIEW_REGISTRY, LEGACY_PREVIEW_REGISTRY):
+        try:
+            data = json.loads(await sandbox.files.read(path, user="user"))
+            return data if isinstance(data, list) else []
+        except FileNotFoundException:
+            continue
+        except (ValueError, TypeError):
+            return []
+    return []
 
 
 async def write_registry(sandbox: AsyncSandbox, entries: list[dict[str, Any]]) -> None:
-    await sandbox.files.write(sandbox_temp(PREVIEW_REGISTRY_FILE), json.dumps(entries), user="user")
+    await sandbox.files.write(PREVIEW_REGISTRY, json.dumps(entries), user="user")
 
 
 async def upsert_preview(sandbox: AsyncSandbox, entry: dict[str, Any]) -> None:
