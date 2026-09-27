@@ -1,0 +1,74 @@
+# Rate limited per IP address
+# auth: strict (brute-force protection)
+# api: general request budget
+
+limit_req_zone $binary_remote_addr zone=auth:10m rate=3r/m;
+limit_req_zone $binary_remote_addr zone=api:10m rate=10r/s;
+
+# Cache zone stored on disk, 100MB max, items expire after 10min of no use
+proxy_cache_path /var/cache/nginx levels=1:2 keys_zone=api_cache:10m
+                 inactive=10m max_size=100m use_temp_path=off;
+
+server {
+    listen ${PORT};
+
+    # Health check
+    location /health {
+        proxy_pass http://backend:8000;
+        proxy_set_header Host $host;
+        proxy_set_header X-Real-IP $remote_addr;
+    }
+
+    # Auth routes strict rate limit, **NEVER cache**
+    location /auth {
+        limit_req zone=auth burst=5 nodelay;
+        limit_req_status 429;
+
+        proxy_pass http://backend:8000;
+        proxy_set_header Host $host;
+        proxy_set_header X-Real-IP $remote_addr;
+    }
+
+    # OAuth routes strict limit, **NEVER cache**
+    location /oauth {
+        limit_req zone=auth burst=5 nodelay;
+        limit_req_status 429;
+
+        proxy_pass http://backend:8000;
+        proxy_set_header Host $host;
+        proxy_set_header X-Real-IP $remote_addr;
+    }
+
+    # Projects cache GET responses per user (auth header in cache key MD5 hashed not exposed) 
+    location /projects {
+        limit_req zone=api burst=20 nodelay;
+        limit_req_status 429;
+
+        # Only cache GET; writes go straight through
+        proxy_cache api_cache;
+        proxy_cache_methods GET;
+        proxy_cache_valid 200 5m;
+        proxy_cache_key "$request_uri$http_authorization";
+        proxy_cache_bypass $request_method;
+        add_header X-Cache-Status $upstream_cache_status;
+
+        proxy_pass http://backend:8000;
+        proxy_set_header Host $host;
+        proxy_set_header X-Real-IP $remote_addr;
+    }
+
+    # All other routes rate limited, no cache (streaming/live data)
+    location / {
+        limit_req zone=api burst=20 nodelay;
+        limit_req_status 429;
+
+        proxy_pass http://backend:8000;
+        proxy_set_header Host $host;
+        proxy_set_header X-Real-IP $remote_addr;
+
+        # Required for SSE / streaming responses
+        proxy_buffering off;
+        proxy_cache off;
+        proxy_read_timeout 300s;
+    }
+}
