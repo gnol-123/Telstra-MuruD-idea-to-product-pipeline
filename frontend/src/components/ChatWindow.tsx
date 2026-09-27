@@ -1,7 +1,19 @@
 "use client";
 
 import { useEffect, useRef, useState } from "react";
-import { AgentNode, Edge, ProjectNode, PendingToolCall, isApprovalRequired, isToolNode } from "@/lib/types";
+import {
+  AgentNode,
+  ChatMessage,
+  Edge,
+  EnvironmentNode,
+  ProjectNode,
+  PendingToolCall,
+  ToolEvent,
+  isApprovalRequired,
+  isEnvironmentNode,
+  isToolNode,
+} from "@/lib/types";
+import EnvPanel from "./workspace/EnvPanel";
 import {
   sendChat,
   streamChat,
@@ -9,8 +21,21 @@ import {
   cancelChat,
   resumeChat,
   listNodeMessages,
+  listModels,
+  updateNode,
+  ApiError,
   StreamHandlers,
 } from "@/lib/api";
+
+// Fetched once per page load; a failed fetch is retried on next open.
+let modelsCache: Promise<string[]> | null = null;
+function cachedModels() {
+  modelsCache ??= listModels().catch((e) => {
+    modelsCache = null;
+    throw e;
+  });
+  return modelsCache;
+}
 import { AGENT_ICONS, ENV_ICON, TOOL_ICONS, agentRole } from "./NodeCard";
 
 // -------------------- chat state (lifted to MeshCanvas, keyed by node) --------------------
@@ -19,6 +44,8 @@ export interface LocalMessage {
   role: "user" | "assistant" | "system";
   content: string;
   pending?: boolean;
+  // User rows only: the agent node that sent it, when it wasn't the user.
+  senderId?: string;
   // Only for role: "system" — picks the row style. "tool" is a live
   // tool/sub-agent checkpoint, "warn" an approval pause, "ok" a context
   // refresh confirmation.
@@ -36,6 +63,9 @@ export interface ChatState {
   // that fetch failed and isn't worth retrying). Without this a reopened
   // project has no idea the conversation already has a transcript.
   historyLoaded: boolean;
+  // Workspace panel: expanded or not, and which env (null = default).
+  panelOpen: boolean;
+  panelEnvId: string | null;
 }
 
 export function defaultChatState(): ChatState {
@@ -47,53 +77,95 @@ export function defaultChatState(): ChatState {
     pendingCalls: null,
     approvals: {},
     historyLoaded: false,
+    panelOpen: false,
+    panelEnvId: null,
   };
 }
 
 type ChatUpdater = (updater: (prev: ChatState) => ChatState) => void;
 
-// Shared between POST /chat/stream (send) and GET /chat/attach (re-join) —
-// both emit the identical SSE event shape per API.md.
-function makeStreamHandlers(onChatChange: ChatUpdater): StreamHandlers {
-  const replaceLast = (fn: (m: LocalMessage) => LocalMessage) =>
-    onChatChange((prev) => {
-      if (prev.messages.length === 0) return prev;
-      const copy = [...prev.messages];
-      copy[copy.length - 1] = fn(copy[copy.length - 1]);
-      return { ...prev, messages: copy };
-    });
+function toolLabel(e: ToolEvent): string {
+  return e.type === "result"
+    ? `↳ ${e.name} → ${String(e.result_head ?? "").slice(0, 160)}`
+    : `⚙ calling ${e.name}${e.args ? ` ${JSON.stringify(e.args).slice(0, 160)}` : ""}`;
+}
 
+// Text after the last tool event: the only part a `done` can still add.
+function tailAfterTools(m?: ChatMessage): string {
+  if (!m) return "";
+  const at = Math.max(0, ...(m.tool_calls ?? []).map((e) => e.offset ?? 0));
+  return Array.from(m.content).slice(at).join("");
+}
+
+function stopped(content: string): string {
+  return `${content}${content ? "\n\n" : ""}⏹ Stopped.`;
+}
+
+// One stored assistant row → alternating text bubbles and tool rows, split at
+// each event's offset. Events without one land where the previous one did.
+function expandMessage(m: ChatMessage): LocalMessage[] {
+  // Code points, not UTF-16 units: offsets come from Python's len().
+  const chars = Array.from(m.content);
+  const out: LocalMessage[] = [];
+  let pos = 0;
+  for (const e of m.tool_calls ?? []) {
+    const at = Math.min(Math.max(pos, e.offset ?? pos), chars.length);
+    if (at > pos) out.push({ role: "assistant", content: chars.slice(pos, at).join("") });
+    pos = at;
+    out.push({ role: "system", tone: "tool", content: toolLabel(e) });
+  }
+  const rest = chars.slice(pos).join("");
+  const content =
+    m.status === "failed" ? rest || "⚠ This turn failed." : m.status === "cancelled" ? stopped(rest) : rest;
+  if (content || m.status === "running" || !m.tool_calls?.length)
+    out.push({ role: "assistant", content, pending: m.status === "running" ? true : undefined });
+  return out;
+}
+
+// Shared by POST /chat/stream, POST /chat/resume and GET /chat/attach —
+// both emit the identical SSE event shape per API.md. Each tool event closes
+// the current text bubble; the next chunk opens a new one.
+function makeStreamHandlers(onChatChange: ChatUpdater, onPublish?: (toolName: string) => void): StreamHandlers {
   return {
-    onChunk: (text) => replaceLast((m) => ({ ...m, content: m.content + text })),
-    onTool: (data) => {
-      // event: tool — fired when a tool/sub-agent is called and again with
-      // its result_head when it returns. Rendered as its own checkpoint row,
-      // inserted above the still-growing assistant reply.
-      const label =
-        "result_head" in data
-          ? `↳ ${data.name} → ${String(data.result_head ?? "").slice(0, 160)}`
-          : `⚙ calling ${data.name}${data.args ? ` ${JSON.stringify(data.args).slice(0, 160)}` : ""}`;
+    onChunk: (text) =>
       onChatChange((prev) => {
         const copy = [...prev.messages];
-        const idx = copy.length - 1;
-        return {
-          ...prev,
-          messages: [...copy.slice(0, idx), { role: "system", tone: "tool", content: label }, ...copy.slice(idx)],
-        };
+        const last = copy[copy.length - 1];
+        if (last?.role === "assistant") copy[copy.length - 1] = { ...last, content: last.content + text };
+        else copy.push({ role: "assistant", content: text, pending: true });
+        return { ...prev, messages: copy };
+      }),
+    onTool: (data: ToolEvent) => {
+      if (
+        data.type === "result" &&
+        String(data.name).endsWith("publish_preview") &&
+        String(data.result_head ?? "").startsWith("Preview published:")
+      )
+        onPublish?.(String(data.name));
+      onChatChange((prev) => {
+        const copy = [...prev.messages];
+        const last = copy[copy.length - 1];
+        if (last?.role === "assistant") {
+          if (last.content) copy[copy.length - 1] = { ...last, pending: false };
+          else copy.pop();
+        }
+        copy.push({ role: "system", tone: "tool", content: toolLabel(data) });
+        return { ...prev, messages: copy };
       });
     },
     onDone: (data) => {
       // `done` carries the final assistant_message; a cancelled turn keeps
       // its partial text and finalises with status "cancelled".
-      const status = data?.assistant_message?.status;
-      replaceLast((m) => ({
-        ...m,
-        pending: false,
-        content:
-          status === "cancelled"
-            ? `${m.content}${m.content ? "\n\n" : ""}⏹ Stopped.`
-            : m.content || data?.assistant_message?.content || m.content,
-      }));
+      const final: ChatMessage | undefined = data?.assistant_message;
+      onChatChange((prev) => {
+        const copy = [...prev.messages];
+        const open = copy[copy.length - 1]?.role === "assistant" ? copy.pop()! : null;
+        // No chunks arrived (non-streamed recovery): fall back to the row.
+        const content = open?.content || tailAfterTools(final);
+        const shown = final?.status === "cancelled" ? stopped(content) : content;
+        if (shown) copy.push({ role: "assistant", content: shown });
+        return { ...prev, messages: copy };
+      });
     },
     onError: (data) => {
       // The backend's SSE payload is {"error": str(exc)} — fall through
@@ -105,7 +177,12 @@ function makeStreamHandlers(onChatChange: ChatUpdater): StreamHandlers {
         data?.reason ??
         (data && Object.keys(data).length ? JSON.stringify(data) : null) ??
         "the backend closed the stream with no error detail — check its logs for a traceback";
-      replaceLast(() => ({ role: "assistant", content: `⚠ ${detail}` }));
+      onChatChange((prev) => {
+        const copy = [...prev.messages];
+        if (copy[copy.length - 1]?.role === "assistant") copy.pop();
+        copy.push({ role: "assistant", content: `⚠ ${detail}` });
+        return { ...prev, messages: copy };
+      });
     },
     onApprovalRequired: (data) => {
       const initial: Record<string, boolean> = {};
@@ -142,9 +219,10 @@ export default function ChatWindow({
   onAfterTurn,
   onRefreshEdge,
   onOpenWorkspace,
+  onNodeUpdated,
 }: {
   projectId: string;
-  node: AgentNode;
+  node: AgentNode; // carries a polled `status`, refreshed every 2s by the canvas
   nodes: ProjectNode[];
   edges: Edge[];
   chat: ChatState;
@@ -156,6 +234,7 @@ export default function ChatWindow({
   onRefreshEdge: (edge: Edge) => Promise<void>;
   // Opens the code preview on one of this agent's environments, at its folder.
   onOpenWorkspace?: (envId: string, path?: string | null) => void;
+  onNodeUpdated: (node: ProjectNode) => void;
 }) {
   const { messages, draft, useStream, busy, pendingCalls, approvals, historyLoaded } = chat;
   const icon = AGENT_ICONS[node.agent_slug] ?? "◆";
@@ -166,10 +245,42 @@ export default function ChatWindow({
   const envEdges = edges.filter((e) => e.kind === "environment" && e.target_node_id === node.id);
   const stale = upstream.filter((e) => e.is_stale);
 
+  // Workspace panel: defaults to a non-scratch env.
+  const agentEnvs = envEdges
+    .map((e) => nameOf(e.source_node_id))
+    .filter((n): n is EnvironmentNode => !!n && isEnvironmentNode(n));
+  const panelEnv =
+    agentEnvs.find((e) => e.id === chat.panelEnvId) ?? agentEnvs.find((e) => e.role !== "scratch") ?? agentEnvs[0];
+  const panelOpen = chat.panelOpen && !!panelEnv;
+  const setPanel = (patch: Partial<ChatState>) => onChatChange((prev) => ({ ...prev, ...patch }));
+  const [turnKey, setTurnKey] = useState(0);
+  const [publishKey, setPublishKey] = useState(0);
+  const afterTurn = () => {
+    setTurnKey((k) => k + 1);
+    onAfterTurn();
+  };
+  // Tool names are `<env>_<id8>_publish_preview`; the id8 picks the env.
+  const onPublish = (tool: string) => {
+    const id8 = tool.match(/_([0-9a-f]{8})_publish_preview$/)?.[1];
+    const target = id8 ? agentEnvs.find((e) => e.id.startsWith(id8)) : undefined;
+    onChatChange((prev) => ({ ...prev, panelOpen: true, panelEnvId: target?.id ?? prev.panelEnvId }));
+    setPublishKey((k) => k + 1);
+  };
+
   const [staleAsk, setStaleAsk] = useState<string | null>(null);
   const [clearing, setClearing] = useState(false);
+  const [models, setModels] = useState<string[] | null>(null);
+  const [modelErr, setModelErr] = useState<string | null>(null);
+  const [savingModel, setSavingModel] = useState(false);
+  const [modelOpen, setModelOpen] = useState(false);
+  const [modelQuery, setModelQuery] = useState("");
+  const filteredModels = (models ?? []).filter((m) => m.toLowerCase().includes(modelQuery.trim().toLowerCase()));
   const scrollRef = useRef<HTMLDivElement | null>(null);
   const inputRef = useRef<HTMLTextAreaElement | null>(null);
+  // Last message seq seen from the backend, so a re-attach only fetches the
+  // tail. Also doubles as the "are we attached/attaching" guard.
+  const lastSeqRef = useRef(0);
+  const attachingRef = useRef(false);
 
   // Esc closes, like the mockup.
   useEffect(() => {
@@ -180,77 +291,98 @@ export default function ChatWindow({
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, []);
 
+  useEffect(() => {
+    cachedModels()
+      .then(setModels)
+      .catch(() => setModelErr("Model list unavailable"));
+  }, []);
+
+  async function pickModel(model: string) {
+    setSavingModel(true);
+    setModelErr(null);
+    try {
+      onNodeUpdated(await updateNode(projectId, node.id, { model }));
+    } catch (e) {
+      setModelErr(e instanceof ApiError ? e.message : "Could not set model");
+    } finally {
+      setSavingModel(false);
+    }
+  }
+
   // Keep the newest message in view as history loads / chunks stream in.
   useEffect(() => {
     const el = scrollRef.current;
     if (el) el.scrollTop = el.scrollHeight;
   }, [messages, pendingCalls, staleAsk]);
 
+  // Try GET /chat/attach. If it attaches, stream into the open bubble same
+  // as send/resume. If it 204s (nothing live), poll briefly for the settled
+  // row and redraw whatever's after the last user message, but only if
+  // `expectRunning` — the caller already has a reason to believe a turn is
+  // (or was just) live, so this never fires an idle poll on every open chat.
+  async function attachLive(expectRunning: boolean) {
+    if (attachingRef.current) return;
+    attachingRef.current = true;
+    onChatChange((prev) => ({ ...prev, busy: true }));
+    try {
+      const attached = await attachChat(node.id, makeStreamHandlers(onChatChange, onPublish));
+      if (attached) return;
+      if (!expectRunning) return;
+      // 204: it finished between our GET and the attach. The backend
+      // unregisters just before its final write, so poll briefly for
+      // the settled row instead of leaving a stale "…" bubble.
+      let finalMsg: ChatMessage | undefined;
+      for (let i = 0; i < 10; i++) {
+        const tail = await listNodeMessages(projectId, node.id, Math.max(0, lastSeqRef.current - 1));
+        finalMsg = tail[tail.length - 1];
+        if (finalMsg) lastSeqRef.current = finalMsg.seq ?? lastSeqRef.current;
+        if (!finalMsg || finalMsg.status !== "running") break;
+        await new Promise((r) => setTimeout(r, 500));
+      }
+      if (!finalMsg) return;
+      // Nothing is attached any more, so never draw a spinner.
+      const drawn = expandMessage(finalMsg).map((m) => ({ ...m, pending: undefined }));
+      // Everything after the last user message is this turn: redraw it.
+      onChatChange((prev) => {
+        const cut = prev.messages.map((m) => m.role).lastIndexOf("user") + 1;
+        return { ...prev, messages: [...prev.messages.slice(0, cut), ...drawn] };
+      });
+    } catch {
+      // ignore: leave whatever partial state streaming produced
+    } finally {
+      attachingRef.current = false;
+      // Unconditional: chat state outlives this window, so a close
+      // mid-attach must still clear busy or the reopened chat is stuck.
+      onChatChange((prev) => ({ ...prev, busy: false }));
+      afterTurn();
+    }
+  }
+
   // Hydrate the transcript from the backend the first time this agent's
-  // chat is opened, and re-join a turn that's still running (reload, or a
-  // second tab) via GET /chat/attach.
+  // chat is opened. Always try GET /chat/attach after: the DB row can say
+  // "failed" while the backend's in-process registry still has the turn
+  // live (a bad DB write on the backend side), so the registry is checked
+  // regardless of what the last row says.
   useEffect(() => {
     if (historyLoaded) return;
     let cancelled = false;
     listNodeMessages(projectId, node.id)
       .then((history) => {
         if (cancelled) return;
-        const fetched: LocalMessage[] = history
-          .filter((m) => m.role === "user" || m.role === "assistant")
-          .map((m) => ({
-            role: m.role,
-            content:
-              m.status === "failed"
-                ? m.content || "⚠ This turn failed."
-                : m.status === "cancelled"
-                ? `${m.content}${m.content ? "\n\n" : ""}⏹ Stopped.`
-                : m.content,
-            pending: m.status === "running" ? true : undefined,
-          }));
+        const fetched: LocalMessage[] = history.flatMap((m) =>
+          m.role === "user" ? [{ role: "user" as const, content: m.content, senderId: m.sender_node_id ?? undefined }] : m.role === "assistant" ? expandMessage(m) : []
+        );
         const last = history[history.length - 1];
-        const stillRunning = !!last && last.role === "assistant" && last.status === "running";
+        lastSeqRef.current = last?.seq ?? 0;
+        const lastSaidRunning = !!last && last.role === "assistant" && last.status === "running";
 
         onChatChange((prev) =>
           prev.historyLoaded
             ? prev
-            : {
-                ...prev,
-                historyLoaded: true,
-                messages: [...fetched, ...prev.messages],
-                busy: stillRunning ? true : prev.busy,
-              }
+            : { ...prev, historyLoaded: true, messages: [...fetched, ...prev.messages] }
         );
 
-        if (!stillRunning) return;
-        attachChat(node.id, makeStreamHandlers(onChatChange))
-          .then((attached) => {
-            if (cancelled || attached) return;
-            // 204 — it finished between our GET and the attach; pull the
-            // final text instead of leaving a stale "…" bubble.
-            listNodeMessages(projectId, node.id, Math.max(0, (last.seq ?? 1) - 1))
-              .then((tail) => {
-                if (cancelled || tail.length === 0) return;
-                const finalMsg = tail[tail.length - 1];
-                onChatChange((prev) => {
-                  const copy = [...prev.messages];
-                  if (copy.length > 0) {
-                    copy[copy.length - 1] = {
-                      role: "assistant",
-                      content: finalMsg.status === "failed" ? finalMsg.content || "⚠ This turn failed." : finalMsg.content,
-                    };
-                  }
-                  return { ...prev, messages: copy };
-                });
-              })
-              .catch(() => {});
-          })
-          .catch(() => {})
-          .finally(() => {
-            if (!cancelled) {
-              onChatChange((prev) => ({ ...prev, busy: false }));
-              onAfterTurn();
-            }
-          });
+        attachLive(lastSaidRunning);
       })
       .catch(() => {
         if (!cancelled) onChatChange((prev) => ({ ...prev, historyLoaded: true }));
@@ -260,6 +392,32 @@ export default function ChatWindow({
     };
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [node.id]);
+
+  // After hydration: the canvas poll (every 2s) flips node.status to
+  // "running" when the orchestrator starts a turn on this agent behind our
+  // back. If we're not busy and not already attaching, fetch the tail
+  // (the orchestrator's user message plus whatever's streamed so far) and
+  // attach.
+  const prevStatusRef = useRef(node.status);
+  useEffect(() => {
+    const prevStatus = prevStatusRef.current;
+    prevStatusRef.current = node.status;
+    if (!historyLoaded) return;
+    if (prevStatus === node.status || node.status !== "running") return;
+    if (busy || attachingRef.current) return;
+    listNodeMessages(projectId, node.id, lastSeqRef.current)
+      .then((tail) => {
+        if (!tail.length) return attachLive(true);
+        lastSeqRef.current = tail[tail.length - 1].seq ?? lastSeqRef.current;
+        const fetched: LocalMessage[] = tail.flatMap((m) =>
+          m.role === "user" ? [{ role: "user" as const, content: m.content, senderId: m.sender_node_id ?? undefined }] : m.role === "assistant" ? expandMessage(m) : []
+        );
+        onChatChange((prev) => ({ ...prev, messages: [...prev.messages, ...fetched] }));
+        attachLive(true);
+      })
+      .catch(() => {});
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [node.status, historyLoaded, busy]);
 
   async function clearStale() {
     if (stale.length === 0) return;
@@ -319,17 +477,24 @@ export default function ChatWindow({
         } else {
           onChatChange((prev) => ({
             ...prev,
-            messages: [...prev.messages.slice(0, -1), { role: "assistant", content: res.assistant_message.content }],
+            messages: [...prev.messages.slice(0, -1), ...expandMessage(res.assistant_message)],
           }));
         }
       } catch (e: any) {
+        // 409: a turn is already running (the orchestrator beat us to it).
+        // Drop the placeholder and re-join it instead of showing a failure.
+        if (e instanceof ApiError && e.status === 409) {
+          onChatChange((prev) => ({ ...prev, messages: prev.messages.slice(0, -1) }));
+          await attachLive(true);
+          return;
+        }
         onChatChange((prev) => ({
           ...prev,
           messages: [...prev.messages.slice(0, -1), { role: "assistant", content: `⚠ ${e.message}` }],
         }));
       } finally {
         onChatChange((prev) => ({ ...prev, busy: false }));
-        onAfterTurn();
+        afterTurn();
       }
       return;
     }
@@ -339,8 +504,13 @@ export default function ChatWindow({
       messages: [...prev.messages, { role: "assistant", content: "", pending: true }],
     }));
     try {
-      await streamChat(node.id, text, clientToken, makeStreamHandlers(onChatChange));
+      await streamChat(node.id, text, clientToken, makeStreamHandlers(onChatChange, onPublish));
     } catch (e: any) {
+      if (e instanceof ApiError && e.status === 409) {
+        onChatChange((prev) => ({ ...prev, messages: prev.messages.slice(0, -1) }));
+        await attachLive(true);
+        return;
+      }
       onChatChange((prev) => {
         const copy = [...prev.messages];
         copy[copy.length - 1] = { role: "assistant", content: `⚠ ${e?.message ?? "stream failed"}` };
@@ -353,7 +523,7 @@ export default function ChatWindow({
         busy: false,
         messages: prev.messages.map((m) => (m.pending ? { ...m, pending: false } : m)),
       }));
-      onAfterTurn();
+      afterTurn();
     }
   }
 
@@ -361,10 +531,17 @@ export default function ChatWindow({
   // turn. The open stream closes itself once the backend finalises the
   // message as "cancelled".
   async function stop() {
-    try {
-      await cancelChat(node.id);
-    } catch {
-      // 409 = nothing left to stop.
+    // 409 = nothing running yet (still registering) or already done. Retry
+    // once, then stop waiting on a stream that may never close.
+    const tryCancel = () => cancelChat(node.id).then(() => true, (e) => !(e instanceof ApiError && e.status === 409));
+    if (!(await tryCancel())) {
+      await new Promise((r) => setTimeout(r, 1000));
+      if (!(await tryCancel()))
+        onChatChange((prev) => ({
+          ...prev,
+          busy: false,
+          messages: prev.messages.map((m) => (m.pending ? { ...m, pending: false } : m)),
+        }));
     }
     if (pendingCalls) {
       onChatChange((prev) => ({
@@ -376,17 +553,19 @@ export default function ChatWindow({
     }
   }
 
+  // POST /chat/resume streams like send. `start` only fires once the backend
+  // accepted the approvals, so a 409/422 keeps the approval panel up.
   async function resume() {
-    // Resume streams like /chat/stream; a further approval re-parks via onApprovalRequired.
     onChatChange((prev) => ({
       ...prev,
       busy: true,
-      pendingCalls: null,
-      approvals: {},
       messages: [...prev.messages, { role: "assistant", content: "", pending: true }],
     }));
     try {
-      await resumeChat(node.id, approvals, makeStreamHandlers(onChatChange));
+      await resumeChat(node.id, approvals, {
+        ...makeStreamHandlers(onChatChange, onPublish),
+        onStart: () => onChatChange((prev) => ({ ...prev, pendingCalls: null, approvals: {} })),
+      });
     } catch (e: any) {
       onChatChange((prev) => {
         const copy = [...prev.messages];
@@ -399,7 +578,7 @@ export default function ChatWindow({
         busy: false,
         messages: prev.messages.map((m) => (m.pending ? { ...m, pending: false } : m)),
       }));
-      onAfterTurn();
+      afterTurn();
     }
   }
 
@@ -408,13 +587,22 @@ export default function ChatWindow({
 
   return (
     <div
-      className="fixed inset-0 z-[60] bg-black/[0.66] backdrop-blur-[3px] grid place-items-center p-9 anim-fadein"
+      className={`fixed inset-0 z-[60] bg-black/[0.66] backdrop-blur-[3px] grid place-items-center anim-fadein ${
+        panelOpen ? "p-4" : "p-9"
+      }`}
       onClick={onClose}
     >
       <div
-        className="w-[min(880px,100%)] h-[min(660px,100%)] bg-modal border border-accent/[0.34] rounded-2xl shadow-[0_40px_120px_rgba(0,0,0,.8),0_0_70px_rgba(92,141,255,.09)] flex flex-col overflow-hidden anim-pop"
+        className={`${
+          panelOpen ? "w-full max-w-[1600px] h-full" : "w-[min(880px,100%)] h-[min(660px,100%)]"
+        } relative bg-modal border border-accent/[0.34] rounded-2xl shadow-[0_40px_120px_rgba(0,0,0,.8),0_0_70px_rgba(92,141,255,.09)] flex overflow-hidden anim-pop`}
         onClick={(e) => e.stopPropagation()}
       >
+        <div
+          className={`${
+            panelOpen ? "flex-none w-[440px] max-[900px]:w-full border-r border-white/[0.09]" : "flex-1"
+          } min-w-0 flex flex-col`}
+        >
         {/* header */}
         <div className="flex-none flex items-center gap-3 px-[18px] py-[15px] border-b border-white/[0.09]">
           <div className="w-8 h-8 rounded-lg border border-accent/[0.55] grid place-items-center text-accent text-sm">{icon}</div>
@@ -429,19 +617,23 @@ export default function ChatWindow({
                 running
               </span>
             )}
-            {envEdges.length > 0 && onOpenWorkspace && (
+            {panelEnv && (
               <button
-                onClick={() => onOpenWorkspace(envEdges[0].source_node_id, `/home/user/workspace/${node.id}`)}
+                onClick={() => setPanel({ panelOpen: !panelOpen })}
                 title={`See the files ${node.name} has written, and preview what it's serving`}
-                className="text-[10.5px] px-2.5 py-[5px] rounded-md border border-green/35 text-green hover:bg-green/10 whitespace-nowrap"
+                className={`text-[10.5px] px-2.5 py-[5px] rounded-md border border-green/35 text-green hover:bg-green/10 whitespace-nowrap ${
+                  panelOpen ? "bg-green/10" : ""
+                }`}
               >
                 {ENV_ICON} Files &amp; preview
               </button>
             )}
-            <span className="text-[10.5px] text-white/40 px-2.5 py-[5px] border border-white/[0.12] rounded-md whitespace-nowrap">
-              {toolEdges.length} tool{toolEdges.length === 1 ? "" : "s"} · {upstream.length} inherited
-              {envEdges.length > 0 ? ` · ${envEdges.length} env` : ""}
-            </span>
+            {!panelOpen && (
+              <span className="text-[10.5px] text-white/40 px-2.5 py-[5px] border border-white/[0.12] rounded-md whitespace-nowrap">
+                {toolEdges.length} tool{toolEdges.length === 1 ? "" : "s"} · {upstream.length} inherited
+                {envEdges.length > 0 ? ` · ${envEdges.length} env` : ""}
+              </span>
+            )}
             <button
               onClick={onClose}
               title="Close (Esc)"
@@ -480,7 +672,7 @@ export default function ChatWindow({
           {envEdges.map((e) => (
             <button
               key={e.id}
-              onClick={() => onOpenWorkspace?.(e.source_node_id, `/home/user/workspace/${node.id}`)}
+              onClick={() => setPanel({ panelOpen: true, panelEnvId: e.source_node_id })}
               title="Open this environment's files and preview"
               className="inline-flex items-center gap-[5px] px-[9px] py-1 rounded-full text-[10.5px] bg-green/10 border border-green/[0.35] text-green hover:bg-green/20"
             >
@@ -559,6 +751,7 @@ export default function ChatWindow({
               );
             }
             const mine = m.role === "user";
+            const sender = m.senderId ? nameOf(m.senderId)?.name ?? "Orchestrator" : null;
             const failed = !mine && m.content.startsWith("⚠");
             return (
               <div key={i} className="flex gap-[11px]">
@@ -569,10 +762,10 @@ export default function ChatWindow({
                       : "border border-accent/[0.55] text-accent text-xs"
                   }`}
                 >
-                  {mine ? "ME" : icon}
+                  {mine ? (sender ? "OR" : "ME") : icon}
                 </div>
                 <div className="min-w-0 flex-1">
-                  <div className="text-[12.5px] font-semibold mb-1.5">{mine ? "You" : node.name}</div>
+                  <div className="text-[12.5px] font-semibold mb-1.5">{mine ? sender ?? "You" : node.name}</div>
                   <div
                     className={`rounded-[10px] px-3.5 py-3 text-[13px] leading-[1.6] whitespace-pre-wrap break-words border ${
                       mine
@@ -720,10 +913,68 @@ export default function ChatWindow({
               <span className="text-[11px] text-white/[0.34] truncate">
                 {upstream.length ? `Replies use ${scopeCount} merged context sources` : "Replies use this thread only"}
               </span>
+              <div className="relative ml-auto shrink-0">
+                <button
+                  disabled={busy || savingModel || !models}
+                  onClick={() => {
+                    setModelQuery("");
+                    setModelOpen((o) => !o);
+                  }}
+                  title={modelErr ?? "Model this agent runs on"}
+                  className={`max-w-[160px] truncate border rounded-md px-2 py-1 text-[10.5px] disabled:opacity-50 ${
+                    modelErr ? "border-red-400/50 text-red-300" : "border-white/[0.12] text-white/60 hover:text-white/80"
+                  }`}
+                >
+                  {savingModel ? "saving…" : node.model ?? "default"} ▾
+                </button>
+                {modelOpen && models && (
+                  <>
+                    {/* click-away */}
+                    <div className="fixed inset-0 z-10" onClick={() => setModelOpen(false)} />
+                    <div className="absolute bottom-full right-0 mb-1.5 z-20 w-52 rounded-lg border border-accent/[0.34] bg-panel2 shadow-[0_14px_34px_rgba(0,0,0,.5),0_0_24px_rgba(92,141,255,.08)]">
+                      <input
+                        autoFocus
+                        value={modelQuery}
+                        onChange={(e) => setModelQuery(e.target.value)}
+                        onKeyDown={(e) => {
+                          if (e.key === "Escape") {
+                            e.stopPropagation(); // don't close the chat
+                            setModelOpen(false);
+                          } else if (e.key === "Enter" && filteredModels[0]) {
+                            setModelOpen(false);
+                            pickModel(filteredModels[0]);
+                          }
+                        }}
+                        placeholder="Search models…"
+                        className="w-full bg-transparent border-b border-accent/20 px-2.5 py-1.5 text-[11px] text-text outline-none placeholder:text-white/30"
+                      />
+                      <div className="max-h-[118px] overflow-y-auto py-0.5">
+                        {filteredModels.length === 0 && (
+                          <div className="px-2.5 py-1.5 text-[11px] text-white/30">No matches</div>
+                        )}
+                        {filteredModels.map((m) => (
+                          <button
+                            key={m}
+                            onClick={() => {
+                              setModelOpen(false);
+                              if (m !== node.model) pickModel(m);
+                            }}
+                            className={`block w-full text-left truncate px-2.5 py-1 text-[10.5px] leading-[14px] hover:bg-accent/10 ${
+                              m === node.model ? "text-accent" : "text-white/70"
+                            }`}
+                          >
+                            {m}
+                          </button>
+                        ))}
+                      </div>
+                    </div>
+                  </>
+                )}
+              </div>
               <button
                 onClick={() => onChatChange((prev) => ({ ...prev, useStream: !prev.useStream }))}
                 title="Stream the reply token-by-token (POST /chat/stream) and show tool checkpoints live"
-                className={`ml-auto shrink-0 flex items-center gap-1.5 text-[10.5px] rounded-md px-2 py-1 border transition-colors ${
+                className={`shrink-0 flex items-center gap-1.5 text-[10.5px] rounded-md px-2 py-1 border transition-colors ${
                   useStream ? "border-accent/30 text-accent/80" : "border-white/[0.12] text-white/40 hover:text-white/60"
                 }`}
               >
@@ -752,6 +1003,25 @@ export default function ChatWindow({
             </div>
           </div>
         </div>
+        </div>
+
+        {panelEnv && (
+          <EnvPanel
+            key={panelEnv.id}
+            projectId={projectId}
+            agentId={node.id}
+            env={panelEnv}
+            envs={agentEnvs}
+            nodes={nodes}
+            open={panelOpen}
+            turnKey={turnKey}
+            publishKey={publishKey}
+            onOpen={() => setPanel({ panelOpen: true })}
+            onCollapse={() => setPanel({ panelOpen: false })}
+            onSwitchEnv={(id) => setPanel({ panelEnvId: id })}
+            onOpenFull={(envId, path) => onOpenWorkspace?.(envId, path)}
+          />
+        )}
       </div>
     </div>
   );
