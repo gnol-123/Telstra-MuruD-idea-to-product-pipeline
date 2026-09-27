@@ -17,5 +17,6 @@ USER appuser
 
 EXPOSE 8000
 
-# :: is dual-stack; legacy Railway private networking is IPv6 only
-CMD ["sh", "-c", "uvicorn app.main:app --host :: --port ${PORT:-8000}"]
+# Empty host = IPv4 and IPv6 sockets. Not ::, asyncio makes that IPv6 only and
+# Railway's healthcheck is IPv4; legacy private networking is IPv6 only
+CMD ["sh", "-c", "uvicorn app.main:app --host '' --port ${PORT:-8000}"]
