@@ -51,17 +51,17 @@ Double-click an agent to talk to it. The chips along the top show everything the
 
 An orange **STALE** chip means one of the agents feeding this one has said more since it was last summarised. You decide when to refresh it.
 
-### Files and live preview
-
-![Files and preview](docs/screenshots/workspace.png)
-
-Once an agent has a sandbox, **Files & preview** opens right next to the chat. Files appear as the agent writes them, and anything with a web page shows up as a live preview. That calculator? We asked the Coding agent to *"build me a calculator"*.
-
-### The full workspace
+### The workspace
 
 ![Full workspace](docs/screenshots/full-workspace.png)
 
-**Open full workspace** gives you a proper editor view: file explorer, code, live preview, and a real terminal inside the sandbox. Hit **Download .zip** when you want to take the project with you.
+Once an agent has a sandbox, **Files & preview** opens the workspace: file explorer, code, live preview, and a real terminal inside the sandbox. Files appear as the agent writes them. Hit **Download .zip** when you want to take the project with you.
+
+### The slides
+
+![Pitch deck](docs/screenshots/slides.png)
+
+Once the app is built, the **Scrutinizer** judges it and writes two slide decks: a **pitch deck** that makes the case for the product, and a **limitations deck** that argues against it and ends with a verdict. Every number cites the research it came from, and anything it can't trace is marked *unverified*. Both decks open as live previews in the workspace.
 
 ---
 
