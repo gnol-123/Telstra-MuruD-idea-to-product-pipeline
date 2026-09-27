@@ -40,6 +40,8 @@ import ChatWindow, { ChatState, defaultChatState } from "./ChatWindow";
 import ToolConfigModal from "./ToolConfigModal";
 import WorkspaceWindow from "./workspace/WorkspaceWindow";
 import { BrandMark } from "./Brand";
+import RunProgress from "./RunProgress";
+import { tidyLayout } from "@/lib/layout";
 
 // Defensive: if the backend ever returns the same row twice (e.g. a join
 // without DISTINCT), collapsing by id here keeps React's keys unique
@@ -650,20 +652,24 @@ export default function MeshCanvas({
     setChatByNode((prev) => ({ ...prev, [nodeId]: updater(prev[nodeId] ?? defaultChatState()) }));
   }
 
+  // Lays out only the cards that are actually on the canvas (see lib/layout):
+  // equipped tools and environments render as chips, so they're skipped.
   async function handleTidy() {
-    const laidOut = nodes.map((n, i) => ({
-      ...n,
-      position_x: 110 + (i % 3) * 330,
-      position_y: 80 + Math.floor(i / 3) * 220,
-    }));
-    setNodes(laidOut);
-    for (const n of laidOut) {
-      try {
-        await savePosition(n, n.position_x ?? 0, n.position_y ?? 0);
-      } catch {
-        // best-effort — a single failed save shouldn't block the rest
-      }
-    }
+    const placed = tidyLayout(visibleNodes, edges);
+    const moved = nodes.filter((n) => {
+      const p = placed.get(n.id);
+      return p && (p.x !== n.position_x || p.y !== n.position_y);
+    });
+    if (moved.length === 0) return;
+    setNodes((prev) =>
+      prev.map((n) => {
+        const p = placed.get(n.id);
+        return p ? { ...n, position_x: p.x, position_y: p.y } : n;
+      })
+    );
+    canvasRef.current?.scrollTo({ left: 0, top: 0, behavior: "smooth" });
+    // Best-effort and in parallel — one failed save shouldn't block the rest.
+    await Promise.allSettled(moved.map((n) => savePosition(n, placed.get(n.id)!.x, placed.get(n.id)!.y)));
   }
 
   const selectedNode = nodes.find((n) => n.id === selectedId) ?? null;
@@ -709,6 +715,13 @@ export default function MeshCanvas({
       !(isToolNode(n) && attachedToolNodeIds.has(n.id)) &&
       !(isEnvironmentNode(n) && attachedEnvNodeIds.has(n.id))
   );
+
+  // Agents with work in flight: a turn running from this browser, or one the
+  // backend reports (the orchestrator starting it). Drives RunProgress.
+  const agentNodes = nodes.filter(isAgentNode);
+  const workingAgentIds = agentNodes
+    .filter((n) => chatByNode[n.id]?.busy || n.status === "running")
+    .map((n) => n.id);
 
   const toolNodeCount = nodes.filter(isToolNode).length;
   const agentNodeCount = nodes.filter(isAgentNode).length;
@@ -820,10 +833,11 @@ export default function MeshCanvas({
         onAddAgent={(slug) => handleAddAgent(slug)}
         onAddTool={(slug) => openToolConfig(slug)}
         onAddPreset={(slug) => handleAddPreset(slug)}
-        onAddEnvironment={() => handleAddEnvironment()}
         onRefreshEdge={handleRefreshEdge}
         onDeleteEdge={handleDeleteEdge}
       />
+
+      <RunProgress agents={agentNodes} workingIds={workingAgentIds} edges={edges} />
 
       <div className="flex-1 flex min-h-0 relative">
         {/* Toasts float over the canvas instead of pushing it down. */}
@@ -927,6 +941,7 @@ export default function MeshCanvas({
                   inboundCount={inbound.length}
                   staleCount={inbound.filter((e) => e.is_stale).length}
                   busy={!!chatByNode[node.id]?.busy}
+                  pendingApproval={!!chatByNode[node.id]?.pendingCalls?.length}
                   deleting={deletingIds.has(node.id)}
                   zoom={zoom}
                   attachedEnvironments={isAgentNode(node) ? attachedEnvsByAgent.get(node.id) ?? [] : undefined}

@@ -215,10 +215,14 @@ function AgentInspector({
         <select
           value={node.tool_policy}
           onChange={(e) => onUpdateAgentPolicy(node.id, e.target.value as ToolPolicy)}
-          className="w-full bg-white/[0.03] border border-white/[0.12] rounded-[7px] px-2.5 py-2 text-[11.5px] outline-none focus:border-accent/50"
+          className="w-full bg-white/[0.03] border border-white/[0.12] rounded-[7px] px-2.5 py-2 text-[11.5px] text-text outline-none focus:border-accent/50"
         >
-          <option value="ask">Ask before every tool call</option>
-          <option value="auto">Run tools automatically</option>
+          {/* Background isn't inherited, so the closed select's dark bg
+              doesn't carry into the open option list — left unset it fell
+              back to the OS default (white on white with our light text).
+              Set both explicitly on every option. */}
+          <option value="ask" className="bg-panel2 text-text">Ask before every tool call</option>
+          <option value="auto" className="bg-panel2 text-text">Run tools automatically</option>
         </select>
       </div>
 
@@ -763,10 +767,10 @@ function EnvironmentInspector({
               }).catch(() => null);
               if (updated) onNodeUpdated(updated);
             }}
-            className="mt-1.5 w-full bg-panel2 border border-border rounded-md px-2 py-1.5 text-xs outline-none focus:border-accent/50"
+            className="mt-1.5 w-full bg-panel2 border border-border rounded-md px-2 py-1.5 text-xs text-text outline-none focus:border-accent/50"
           >
-            <option value="ask">Ask before executing in this shell</option>
-            <option value="auto">Run commands automatically</option>
+            <option value="ask" className="bg-panel2 text-text">Ask before executing in this shell</option>
+            <option value="auto" className="bg-panel2 text-text">Run commands automatically</option>
           </select>
         </div>
 

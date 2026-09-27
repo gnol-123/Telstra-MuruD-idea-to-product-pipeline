@@ -1,6 +1,6 @@
 "use client";
 
-import { useState } from "react";
+import { useEffect, useRef, useState } from "react";
 import { WORKSPACE_ROOT } from "@/lib/files";
 import { PORT_Y } from "./EdgeLayer";
 import { Edge, ProjectNode, ToolNode, EnvironmentNode, isAgentNode, isEnvironmentNode } from "@/lib/types";
@@ -22,6 +22,7 @@ export const TOOL_ICONS: Record<string, string> = {
   github: "⌗",
   obsidian: "▤",
   gmail: "✉",
+  canvas: "▦",
 };
 
 export const ENV_ICON = "▣";
@@ -64,6 +65,7 @@ export default function NodeCard({
   inboundCount,
   staleCount,
   busy,
+  pendingApproval,
   deleting,
   zoom,
   onSelect,
@@ -93,6 +95,9 @@ export default function NodeCard({
   staleCount?: number;
   // Agent nodes only: a chat turn is in flight for this agent right now.
   busy?: boolean;
+  // Agent nodes only: a tool call is parked waiting on the user to approve
+  // it (tool policy "ask"). Takes over the glow with an orange alert strobe.
+  pendingApproval?: boolean;
   // Delete is in flight: card dims, x becomes a spinner.
   deleting?: boolean;
   // Canvas scale; pointer deltas are divided by it.
@@ -123,6 +128,19 @@ export default function NodeCard({
   // pointer-based port-to-port linking gesture, a different drag system.
   const [nativeDragOver, setNativeDragOver] = useState(false);
   const [chipsOpen, setChipsOpen] = useState(false);
+  // An agent is working while a turn is in flight here (busy) or the
+  // backend says it's running one (e.g. the orchestrator started it).
+  const working = agent && (!!busy || node.status === "running");
+  // A tool call from this agent is parked waiting on the user to approve
+  // it. Overrides the working glow with an orange alert strobe.
+  const awaitingApproval = !!agent && !!pendingApproval;
+  // Bumped each time work finishes cleanly; keys the one-shot strobe.
+  const [flash, setFlash] = useState(0);
+  const wasWorking = useRef(working);
+  useEffect(() => {
+    if (wasWorking.current && !working && node.status !== "error") setFlash((f) => f + 1);
+    wasWorking.current = working;
+  }, [working, node.status]);
   const icon = agent
     ? AGENT_ICONS[node.agent_slug] ?? "◆"
     : env
@@ -382,7 +400,7 @@ export default function NodeCard({
           {(() => {
             // A turn in flight on this client wins over the polled backend
             // value, which today only ever reads "ready" for agents.
-            const status = busy ? "running" : node.status ?? "ready";
+            const status = working ? "running" : node.status ?? "ready";
             return (
               <>
                 <span
@@ -483,6 +501,20 @@ export default function NodeCard({
         </div>
       )}
 
+      {awaitingApproval ? (
+        <div aria-hidden className="absolute -inset-px rounded-[13px] pointer-events-none border anim-strobe-approval" />
+      ) : working ? (
+        <div aria-hidden className="absolute -inset-px rounded-[13px] pointer-events-none border anim-breathe" />
+      ) : (
+        flash > 0 && (
+          <div
+            key={flash}
+            aria-hidden
+            onAnimationEnd={() => setFlash(0)}
+            className="absolute -inset-px rounded-[13px] pointer-events-none border anim-strobe"
+          />
+        )
+      )}
       {linking && !linkHover && (
         <div className="absolute inset-0 rounded-xl pointer-events-none border border-dashed border-white/10" />
       )}
