@@ -994,6 +994,7 @@ export default function MeshCanvas({
           onAfterTurn={reloadCanvas}
           onRefreshEdge={handleRefreshEdge}
           onOpenWorkspace={openWorkspace}
+          onNodeUpdated={handleNodeUpdated}
         />
       )}
 
