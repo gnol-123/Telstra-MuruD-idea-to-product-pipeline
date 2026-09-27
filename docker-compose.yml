@@ -1,0 +1,13 @@
+services:
+  nginx:
+    build: ./nginx
+    ports:
+      - "${PORT:-80}:${PORT:-80}"
+    depends_on:
+      - backend
+
+  backend:
+    build: ./backend
+    expose:
+      - "8000"
+    env_file: ./backend/.env
