@@ -377,36 +377,28 @@ export default function ChatWindow({
   }
 
   async function resume() {
-    onChatChange((prev) => ({ ...prev, busy: true }));
+    // Resume streams like /chat/stream; a further approval re-parks via onApprovalRequired.
+    onChatChange((prev) => ({
+      ...prev,
+      busy: true,
+      pendingCalls: null,
+      approvals: {},
+      messages: [...prev.messages, { role: "assistant", content: "", pending: true }],
+    }));
     try {
-      const res = await resumeChat(node.id, approvals);
-      if (isApprovalRequired(res)) {
-        const initial: Record<string, boolean> = {};
-        res.pending_calls.forEach((c) => (initial[c.tool_call_id] = true));
-        onChatChange((prev) => ({
-          ...prev,
-          pendingCalls: res.pending_calls,
-          approvals: initial,
-          messages: [
-            ...prev.messages,
-            { role: "system", tone: "warn", content: `Waiting on approval for ${res.pending_calls.length} more tool call(s).` },
-          ],
-        }));
-      } else {
-        onChatChange((prev) => ({
-          ...prev,
-          pendingCalls: null,
-          approvals: {},
-          messages: [...prev.messages, { role: "assistant", content: res.assistant_message.content }],
-        }));
-      }
+      await resumeChat(node.id, approvals, makeStreamHandlers(onChatChange));
     } catch (e: any) {
+      onChatChange((prev) => {
+        const copy = [...prev.messages];
+        copy[copy.length - 1] = { role: "assistant", content: `⚠ ${e?.message ?? "resume failed"}` };
+        return { ...prev, messages: copy };
+      });
+    } finally {
       onChatChange((prev) => ({
         ...prev,
-        messages: [...prev.messages, { role: "assistant", content: `⚠ ${e.message}` }],
+        busy: false,
+        messages: prev.messages.map((m) => (m.pending ? { ...m, pending: false } : m)),
       }));
-    } finally {
-      onChatChange((prev) => ({ ...prev, busy: false }));
       onAfterTurn();
     }
   }
