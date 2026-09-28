@@ -278,6 +278,8 @@ export default function ChatWindow({
   const filteredModels = (models ?? []).filter((m) => m.toLowerCase().includes(modelQuery.trim().toLowerCase()));
   const scrollRef = useRef<HTMLDivElement | null>(null);
   const inputRef = useRef<HTMLTextAreaElement | null>(null);
+  const atBottomRef = useRef(true);
+  const [showScrollBtn, setShowScrollBtn] = useState(false);
   // Last message seq seen from the backend, so a re-attach only fetches the
   // tail. Also doubles as the "are we attached/attaching" guard.
   const lastSeqRef = useRef(0);
@@ -310,11 +312,28 @@ export default function ChatWindow({
     }
   }
 
-  // Keep the newest message in view as history loads / chunks stream in.
+  // Auto-scroll only when already pinned to the bottom.
   useEffect(() => {
     const el = scrollRef.current;
-    if (el) el.scrollTop = el.scrollHeight;
+    if (el && atBottomRef.current) el.scrollTop = el.scrollHeight;
   }, [messages, pendingCalls, staleAsk]);
+
+  function scrollToBottom() {
+    const el = scrollRef.current;
+    if (!el) return;
+    el.scrollTop = el.scrollHeight;
+    atBottomRef.current = true;
+    setShowScrollBtn(false);
+  }
+
+  function handleScroll(e: React.UIEvent<HTMLDivElement>) {
+    const el = e.currentTarget;
+    const near = el.scrollHeight - el.scrollTop - el.clientHeight < 80;
+    if (near !== atBottomRef.current) {
+      atBottomRef.current = near;
+      setShowScrollBtn(!near);
+    }
+  }
 
   // Try GET /chat/attach. If it attaches, stream into the open bubble same
   // as send/resume. If it 204s (nothing live), poll briefly for the settled
@@ -696,7 +715,16 @@ export default function ChatWindow({
         </div>
 
         {/* messages */}
-        <div ref={scrollRef} className="flex-1 min-h-0 overflow-auto px-[18px] py-5 flex flex-col gap-[18px] select-text">
+        <div className="relative flex-1 min-h-0">
+        {showScrollBtn && (
+          <button
+            onClick={scrollToBottom}
+            className="absolute bottom-3 left-1/2 -translate-x-1/2 z-10 flex items-center gap-1.5 px-3 py-1.5 rounded-full text-[11px] font-medium bg-panel2 border border-accent/40 text-accent shadow-lg hover:bg-accent/10 anim-fadein"
+          >
+            ↓ Latest message
+          </button>
+        )}
+        <div ref={scrollRef} onScroll={handleScroll} className="h-full overflow-auto px-[18px] py-5 flex flex-col gap-[18px] select-text">
           {!historyLoaded && messages.length === 0 && (
             <div className="m-auto text-xs text-white/[0.35]">Loading conversation…</div>
           )}
@@ -791,6 +819,7 @@ export default function ChatWindow({
               </div>
             );
           })}
+        </div>
         </div>
 
         {/* composer */}
