@@ -37,6 +37,7 @@ function cachedModels() {
   return modelsCache;
 }
 import { AGENT_ICONS, ENV_ICON, TOOL_ICONS, agentRole } from "./NodeCard";
+import MarkdownMessage from "./MarkdownMessage";
 
 // -------------------- chat state (lifted to MeshCanvas, keyed by node) --------------------
 
@@ -767,17 +768,23 @@ export default function ChatWindow({
                 <div className="min-w-0 flex-1">
                   <div className="text-[12.5px] font-semibold mb-1.5">{mine ? sender ?? "You" : node.name}</div>
                   <div
-                    className={`rounded-[10px] px-3.5 py-3 text-[13px] leading-[1.6] whitespace-pre-wrap break-words border ${
+                    className={`rounded-[10px] px-3.5 py-3 border ${
                       mine
-                        ? "bg-white/[0.04] border-white/[0.07] text-white/[0.76]"
+                        ? "bg-white/[0.04] border-white/[0.07] text-white/[0.76] text-[13px] leading-[1.6] whitespace-pre-wrap break-words"
                         : failed
                         ? "border-red-400/30 bg-red-400/[0.04] text-red-300"
                         : "border-white/[0.09] text-white/[0.76]"
                     }`}
                   >
-                    {m.content}
-                    {m.pending && (
-                      <span className="inline-block ml-0.5 text-accent anim-softpulse">{m.content ? "▍" : "Thinking…"}</span>
+                    {mine ? (
+                      <>
+                        {m.content}
+                        {m.pending && (
+                          <span className="inline-block ml-0.5 text-accent anim-softpulse">▍</span>
+                        )}
+                      </>
+                    ) : (
+                      <MarkdownMessage content={m.content} pending={m.pending} />
                     )}
                   </div>
                 </div>
