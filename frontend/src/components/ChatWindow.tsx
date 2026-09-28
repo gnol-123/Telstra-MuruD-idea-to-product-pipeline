@@ -37,6 +37,7 @@ function cachedModels() {
   return modelsCache;
 }
 import { AGENT_ICONS, ENV_ICON, TOOL_ICONS, agentRole } from "./NodeCard";
+import MarkdownMessage from "./MarkdownMessage";
 
 // -------------------- chat state (lifted to MeshCanvas, keyed by node) --------------------
 
@@ -277,6 +278,8 @@ export default function ChatWindow({
   const filteredModels = (models ?? []).filter((m) => m.toLowerCase().includes(modelQuery.trim().toLowerCase()));
   const scrollRef = useRef<HTMLDivElement | null>(null);
   const inputRef = useRef<HTMLTextAreaElement | null>(null);
+  const atBottomRef = useRef(true);
+  const [showScrollBtn, setShowScrollBtn] = useState(false);
   // Last message seq seen from the backend, so a re-attach only fetches the
   // tail. Also doubles as the "are we attached/attaching" guard.
   const lastSeqRef = useRef(0);
@@ -309,11 +312,28 @@ export default function ChatWindow({
     }
   }
 
-  // Keep the newest message in view as history loads / chunks stream in.
+  // Auto-scroll only when already pinned to the bottom.
   useEffect(() => {
     const el = scrollRef.current;
-    if (el) el.scrollTop = el.scrollHeight;
+    if (el && atBottomRef.current) el.scrollTop = el.scrollHeight;
   }, [messages, pendingCalls, staleAsk]);
+
+  function scrollToBottom() {
+    const el = scrollRef.current;
+    if (!el) return;
+    el.scrollTop = el.scrollHeight;
+    atBottomRef.current = true;
+    setShowScrollBtn(false);
+  }
+
+  function handleScroll(e: React.UIEvent<HTMLDivElement>) {
+    const el = e.currentTarget;
+    const near = el.scrollHeight - el.scrollTop - el.clientHeight < 80;
+    if (near !== atBottomRef.current) {
+      atBottomRef.current = near;
+      setShowScrollBtn(!near);
+    }
+  }
 
   // Try GET /chat/attach. If it attaches, stream into the open bubble same
   // as send/resume. If it 204s (nothing live), poll briefly for the settled
@@ -695,7 +715,16 @@ export default function ChatWindow({
         </div>
 
         {/* messages */}
-        <div ref={scrollRef} className="flex-1 min-h-0 overflow-auto px-[18px] py-5 flex flex-col gap-[18px] select-text">
+        <div className="relative flex-1 min-h-0">
+        {showScrollBtn && (
+          <button
+            onClick={scrollToBottom}
+            className="absolute bottom-3 left-1/2 -translate-x-1/2 z-10 flex items-center gap-1.5 px-3 py-1.5 rounded-full text-[11px] font-medium bg-panel2 border border-accent/40 text-accent shadow-lg hover:bg-accent/10 anim-fadein"
+          >
+            ↓ Latest message
+          </button>
+        )}
+        <div ref={scrollRef} onScroll={handleScroll} className="h-full overflow-auto px-[18px] py-5 flex flex-col gap-[18px] select-text">
           {!historyLoaded && messages.length === 0 && (
             <div className="m-auto text-xs text-white/[0.35]">Loading conversation…</div>
           )}
@@ -767,23 +796,30 @@ export default function ChatWindow({
                 <div className="min-w-0 flex-1">
                   <div className="text-[12.5px] font-semibold mb-1.5">{mine ? sender ?? "You" : node.name}</div>
                   <div
-                    className={`rounded-[10px] px-3.5 py-3 text-[13px] leading-[1.6] whitespace-pre-wrap break-words border ${
+                    className={`rounded-[10px] px-3.5 py-3 border ${
                       mine
-                        ? "bg-white/[0.04] border-white/[0.07] text-white/[0.76]"
+                        ? "bg-white/[0.04] border-white/[0.07] text-white/[0.76] text-[13px] leading-[1.6] whitespace-pre-wrap break-words"
                         : failed
                         ? "border-red-400/30 bg-red-400/[0.04] text-red-300"
                         : "border-white/[0.09] text-white/[0.76]"
                     }`}
                   >
-                    {m.content}
-                    {m.pending && (
-                      <span className="inline-block ml-0.5 text-accent anim-softpulse">{m.content ? "▍" : "Thinking…"}</span>
+                    {mine ? (
+                      <>
+                        {m.content}
+                        {m.pending && (
+                          <span className="inline-block ml-0.5 text-accent anim-softpulse">▍</span>
+                        )}
+                      </>
+                    ) : (
+                      <MarkdownMessage content={m.content} pending={m.pending} />
                     )}
                   </div>
                 </div>
               </div>
             );
           })}
+        </div>
         </div>
 
         {/* composer */}

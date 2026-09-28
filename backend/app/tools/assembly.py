@@ -2,13 +2,14 @@
 Turn configured tool nodes into toolsets for one agent run.
 """
 
+import logging
 import re
 import time
 from dataclasses import dataclass, field
 from typing import Any
 
 from anyio import to_thread
-from pydantic_ai import ApprovalRequired, ModelRetry, RunContext
+from pydantic_ai import ApprovalRequired, ModelRetry, RunContext, ToolFailed
 from pydantic_ai.toolsets import (
     AbstractToolset,
     ApprovalRequiredToolset,
@@ -21,6 +22,8 @@ from app.repositories.tool_repo import ToolNode, load_node_secrets
 from app.tools.base import ToolContext
 from app.tools.oauth_refresh import with_access_token
 from app.tools.registry import get_spec, platform_secrets
+
+log = logging.getLogger(__name__)
 
 _PREFIX_SAFE = re.compile(r"[^a-z0-9_]+")
 
@@ -65,7 +68,8 @@ class RecordingToolset(WrapperToolset):
         self, name: str, tool_args: dict[str, Any], ctx: RunContext, tool: ToolsetTool
     ) -> Any:
         started = time.perf_counter()
-        call_id = await to_thread.run_sync(
+        call_id = await self._audit(
+            name,
             lambda: self.repo.record_call(
                 project_id=self.project_id,
                 conversation_id=self.conversation_id,
@@ -75,43 +79,49 @@ class RecordingToolset(WrapperToolset):
                 tool_name=name,
                 arguments=tool_args,
                 status="running",
-            )
+            ),
         )
+
+        async def finish(**kw: Any) -> None:
+            if call_id is not None:
+                await self._audit(name, lambda: self.repo.finish_call(call_id, **kw))
+
         try:
             result = await super().call_tool(name, tool_args, ctx, tool)
         except ModelRetry:
             # The tool asked for a retry itself. Record and let it through.
-            await to_thread.run_sync(lambda: self.repo.finish_call(call_id, status="error"))
+            await finish(status="error")
             raise
         except ApprovalRequired:
             # Control flow, not a failure: the run pauses for user approval.
             # Task 10 handles the pause; the row stays pending_approval.
-            await to_thread.run_sync(
-                lambda: self.repo.finish_call(call_id, status="pending_approval")
-            )
+            await finish(status="pending_approval")
             raise
         except Exception as exc:
-            message = f"{type(exc).__name__}: {exc}"
-            await to_thread.run_sync(
-                lambda: self.repo.finish_call(
-                    call_id,
-                    status="error",
-                    error=message,
-                    duration_ms=int((time.perf_counter() - started) * 1000),
-                )
-            )
-            # Hand the failure to the model rather than killing the turn.
-            raise ModelRetry(f"{name} failed: {exc}") from exc
-
-        await to_thread.run_sync(
-            lambda: self.repo.finish_call(
-                call_id,
-                status="ok",
-                result=str(result)[:8000],
+            await finish(
+                status="error",
+                error=f"{type(exc).__name__}: {exc}",
                 duration_ms=int((time.perf_counter() - started) * 1000),
             )
+            # Hand the failure to the model rather than killing the turn. Not
+            # ModelRetry: that spends the tool's retry budget and a second
+            # failure ends the turn. turn_request_limit bounds repeats.
+            raise ToolFailed(f"{name} failed: {exc}") from exc
+
+        await finish(
+            status="ok",
+            result=str(result)[:8000],
+            duration_ms=int((time.perf_counter() - started) * 1000),
         )
         return result
+
+    async def _audit(self, name: str, write: Any) -> Any:
+        """Best effort: a tool_calls row is a log, a DB blip must not end the turn."""
+        try:
+            return await to_thread.run_sync(write)
+        except Exception:
+            log.exception("tool_calls write failed for %s in turn %s", name, self.conversation_id)
+            return None
 
 
 async def assemble(repo, tool_nodes: list[ToolNode], *, ask: bool) -> AssembledTools:

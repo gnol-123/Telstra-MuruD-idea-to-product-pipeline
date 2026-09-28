@@ -22,6 +22,9 @@ from pydantic_ai.providers.ollama import OllamaProvider
 from app.config import settings
 from app.repositories.project_repo import Message
 
+# Consecutive ModelRetry failures one tool may have before the turn fails.
+TOOL_RETRIES = 3
+
 
 def _model(name: str) -> Model:
     """Build a model for one name, for user defined model name defaulted to: deepseek v4.1 flash"""
@@ -63,6 +66,8 @@ def get_agent_for(system_prompt: str, model: str) -> Agent[None, str | DeferredT
         output_type=[str, DeferredToolRequests],
         name=_agent_name(system_prompt, model),
         capabilities=[DBOSDurability()],
+        # Default 1: a second bad-args call or MCP error on one tool ends the turn.
+        retries={"tools": TOOL_RETRIES},
     )
 
 
