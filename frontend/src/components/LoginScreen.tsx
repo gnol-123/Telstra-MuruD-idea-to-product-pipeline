@@ -2,7 +2,7 @@
 
 import { useState } from "react";
 import { login, signup, googleLoginUrl, ApiError } from "@/lib/api";
-import { BrandMark } from "./Brand";
+import { BrandLockup } from "./Brand";
 
 export default function LoginScreen({ onLoggedIn }: { onLoggedIn: () => void }) {
   const [mode, setMode] = useState<"login" | "signup">("login");
@@ -56,9 +56,9 @@ export default function LoginScreen({ onLoggedIn }: { onLoggedIn: () => void }) 
         className="w-[340px] bg-modal border border-accent/[0.3] rounded-2xl p-7 space-y-4 shadow-[0_40px_120px_rgba(0,0,0,.8),0_0_70px_rgba(92,141,255,.07)] anim-pop"
       >
         <div className="flex items-center gap-3 pb-1">
-          <BrandMark />
+          <BrandLockup />
           <div>
-          <div className="text-sm font-semibold">Agent Mesh</div>
+          <div className="text-sm font-semibold">Spindle</div>
           <div className="text-xs text-muted">
             {mode === "login" ? "Log in to your workspace" : "Create an account"}
           </div>

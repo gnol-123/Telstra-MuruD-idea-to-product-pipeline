@@ -39,7 +39,7 @@ import Inspector from "./Inspector";
 import ChatWindow, { ChatState, defaultChatState } from "./ChatWindow";
 import ToolConfigModal from "./ToolConfigModal";
 import WorkspaceWindow from "./workspace/WorkspaceWindow";
-import { BrandMark } from "./Brand";
+import { BrandLockup, BrandMark } from "./Brand";
 import RunProgress from "./RunProgress";
 import { tidyLayout } from "@/lib/layout";
 
@@ -777,9 +777,9 @@ export default function MeshCanvas({
           >
             ‹
           </button>
-          <BrandMark />
+          <BrandLockup />
           <div className="min-w-0">
-            <div className="text-sm font-semibold tracking-[-0.01em]">Agent Mesh</div>
+            <div className="text-sm font-semibold tracking-[-0.01em]">Spindle</div>
             <div className="text-[10.5px] text-white/[0.38] truncate max-w-[200px]" title={project.name}>
               {project.name}
             </div>

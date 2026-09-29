@@ -515,6 +515,10 @@ export async function listEnvironmentPreviews(projectId: string, nodeId: string)
   return request<{ previews: EnvironmentPreviewEntry[] }>(envPath(projectId, nodeId, "/previews"), { auth: true });
 }
 
+export async function deleteEnvironmentPreview(projectId: string, nodeId: string, port: number) {
+  return request<void>(envPath(projectId, nodeId, `/previews/${port}`), { method: "DELETE", auth: true });
+}
+
 // Start (or reuse) a static server on a directory — or on a file's
 // directory, in which case open_url points straight at the file.
 export async function serveEnvironmentPath(projectId: string, nodeId: string, path: string) {

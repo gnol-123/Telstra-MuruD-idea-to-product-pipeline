@@ -671,6 +671,22 @@ async def list_environment_previews(
     return PreviewsResponse(previews=[PreviewInfo(**r) for r in rows])
 
 
+@router.delete("/{node_id}/previews/{port}", status_code=status.HTTP_204_NO_CONTENT)
+async def delete_environment_preview(
+    project_id: UUID, node_id: UUID, port: int, env_repo: EnvRepo
+) -> None:
+    """Remove a published preview from the registry by port number."""
+    node = await _load_ready(project_id, node_id, env_repo)
+
+    async def remove(sandbox: AsyncSandbox) -> None:
+        entries = await workspace.read_registry(sandbox)
+        filtered = [e for e in entries if e.get("port") != port]
+        if len(filtered) != len(entries):
+            await workspace.write_registry(sandbox, filtered)
+
+    await _on_sandbox(env_repo, node, remove)
+
+
 # How long /serve waits for a new server to start listening before answering
 # anyway. python3 -m http.server is up in well under a second.
 _SERVE_WAIT_SECONDS = 5.0

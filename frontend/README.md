@@ -1,4 +1,4 @@
-# Agent Mesh (frontend)
+# Spindle (frontend)
 
 Canvas-based frontend: log in, pick/create a project, add agent nodes from the
 catalog, drag them around, chat with each one.

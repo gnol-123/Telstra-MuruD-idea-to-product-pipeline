@@ -4,6 +4,7 @@ import { useEffect, useMemo, useRef, useState } from "react";
 import { EnvironmentFileEntry, EnvironmentNode, EnvironmentPreviewEntry, ProjectNode, isAgentNode } from "@/lib/types";
 import {
   ApiError,
+  deleteEnvironmentPreview,
   fetchEnvironmentArchive,
   fetchEnvironmentFileBlob,
   listEnvironmentFiles,
@@ -110,6 +111,16 @@ export default function EnvPanel({
     setFile(null);
     setStalled(false);
     setPick({ id, path });
+  }
+
+  async function deletePreview(port: number) {
+    try {
+      await deleteEnvironmentPreview(projectId, env.id, port);
+    } catch {
+      // best-effort; list refresh below cleans up either way
+    }
+    setPreviews((prev) => prev?.filter((p) => p.port !== port) ?? prev);
+    if (pick?.id === String(port)) setPick(null);
   }
 
   // mount: pick the newest published quietly. publish: pick it and open.
@@ -416,21 +427,32 @@ export default function EnvPanel({
                   previews.map((p) => {
                     const on = pick?.id === p.id;
                     return (
-                      <button
+                      <div
                         key={p.id}
-                        onClick={() => selectPreview(p.id)}
-                        title={`${p.url} (port ${p.port})`}
-                        className={`w-full flex items-center gap-2 px-3 h-[25px] text-[11.5px] text-left ${
+                        className={`group flex items-center gap-2 px-3 h-[25px] text-[11.5px] ${
                           on ? "bg-accent/[0.11] text-text" : "text-white/[0.72] hover:bg-white/[0.04]"
                         }`}
                       >
-                        {p.live ? (
-                          <span className="flex-none w-[6px] h-[6px] rounded-full bg-green anim-softpulse" />
-                        ) : (
-                          <span className="flex-none w-[9px] h-[9px] rounded-full border border-white/25 border-t-accent animate-spin" />
-                        )}
-                        <span className="truncate min-w-0">{label(p)}</span>
-                      </button>
+                        <button
+                          onClick={() => selectPreview(p.id)}
+                          title={`${p.url} (port ${p.port})`}
+                          className="flex-1 min-w-0 flex items-center gap-2 text-left"
+                        >
+                          {p.live ? (
+                            <span className="flex-none w-[6px] h-[6px] rounded-full bg-green anim-softpulse" />
+                          ) : (
+                            <span className="flex-none w-[9px] h-[9px] rounded-full border border-white/25 border-t-accent animate-spin" />
+                          )}
+                          <span className="truncate min-w-0">{label(p)}</span>
+                        </button>
+                        <button
+                          onClick={() => deletePreview(p.port)}
+                          title="Delete this preview"
+                          className="flex-none opacity-0 group-hover:opacity-100 text-white/40 hover:text-red-300 text-[12px] leading-none"
+                        >
+                          ×
+                        </button>
+                      </div>
                     );
                   })
                 )}
