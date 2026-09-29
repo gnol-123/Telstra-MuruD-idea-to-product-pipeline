@@ -3,7 +3,7 @@ import "@xterm/xterm/css/xterm.css";
 import "./globals.css";
 
 export const metadata: Metadata = {
-  title: "Agent Mesh — Telstra Muru-D Team 2",
+  title: "Spindle | Telstra Muru-D Team 2",
   description: "Canvas of agent and tool nodes for the idea-to-prototype pipeline",
 };
 

@@ -1,5 +1,5 @@
 <p align="center">
-  <img src="docs/readme/hero.svg" alt="Agent Mesh: a team of AI agents on a canvas, joined by arrows" width="100%">
+  <img src="docs/readme/hero.svg" alt="Spindle: a team of AI agents on a canvas, joined by arrows" width="100%">
 </p>
 
 <p align="center">
@@ -21,7 +21,7 @@
 
 ## What is this?
 
-Most AI tools give you a single chat box. Agent Mesh gives you a whiteboard instead.
+Most AI tools give you a single chat box. Spindle gives you a whiteboard instead.
 
 Each card on the board is an AI agent with one job. One researches the market, one turns that into a project brief, one designs the screens, one writes the code. You connect them with arrows, and an arrow simply means *"you should know what that agent found out."*
 
